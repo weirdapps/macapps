@@ -63,7 +63,7 @@ Kit gives you: `StatusPopover` (menu bar item + popover, `setSymbol`, `setTitle`
 
 ## Done means, per app
 
-1. `swift build -c release --product Foo` has no errors and no warnings from your files.
+1. `swift build -c release --manifest-cache local --product Foo` (always pass `--manifest-cache local`: the shared manifest cache serves another worktree's app list) has no errors and no warnings from your files.
 2. `scripts/build.sh Foo` succeeds (it renders the icon and makes `build/Foo.app`).
 3. `build/Foo.app/Contents/MacOS/Foo --snapshot /path/foo-panel.png` and Read that image. Also Read `build/icons/Foo.png`. Fix anything clipped, misaligned, empty or ugly, and look again. Snapshot rendering does not show vibrancy, which is fine.
 4. If the app has logic that can be wrong (parsing, maths, conversions), test it: add a pure function and exercise it from a quick `swift` script or a check in your report. Do not add test targets.

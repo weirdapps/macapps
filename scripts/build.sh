@@ -10,7 +10,7 @@ if (( $# )); then APPS=("$@"); else APPS=(Apps/*/Info.plist(:h:t)); fi
 mkdir -p build/icons
 
 for app in $APPS; do
-  swift build -c release --product "$app"
+  swift build -c release --manifest-cache local --product "$app"
   bundle="build/$app.app"
   rm -rf "$bundle"
   mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
