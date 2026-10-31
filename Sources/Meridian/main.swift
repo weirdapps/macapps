@@ -3,6 +3,8 @@ import Combine
 import Kit
 import SwiftUI
 
+IconKit.handleCommandLine(draw: appIcon)
+
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     let delegate = AppDelegate()
@@ -400,5 +402,57 @@ struct SearchRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+    }
+}
+
+// MARK: - Icon
+
+//: a globe with meridians, half in night
+
+func appIcon() -> NSBitmapImageRep {
+    render(0x0E1B4D, 0x3149B8) { ctx in
+        // Stars.
+        ctx.setFillColor(NSColor.white.withAlphaComponent(0.75).cgColor)
+        for (x, y, r) in [(220.0, 800.0, 5.0), (300, 870, 3), (790, 830, 4), (850, 740, 3), (180, 660, 3), (760, 210, 3), (240, 230, 4)] {
+            ctx.fillEllipse(in: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
+        }
+        let c = CGPoint(x: 512, y: 500), r: CGFloat = 300
+        let disc = CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2)
+        // Glow.
+        radial([rgb(0x7FD3FF, 0.45), rgb(0x7FD3FF, 0)], center: c, radius: r + 90, in: ctx)
+        ctx.saveGState()
+        shadow(ctx, y: -16, blur: 30, alpha: 0.4)
+        ctx.setFillColor(rgb(0x1E88E5).cgColor)
+        ctx.fillEllipse(in: disc)
+        ctx.restoreGState()
+        ctx.saveGState()
+        ctx.addEllipse(in: disc)
+        ctx.clip()
+        radial([rgb(0x8EE0FF), rgb(0x2E9BF0), rgb(0x1258C9)], center: CGPoint(x: c.x - 110, y: c.y + 120), radius: r * 1.5, in: ctx)
+        // Meridians and parallels.
+        ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.55).cgColor)
+        ctx.setLineWidth(9)
+        for w in [0.0, 0.42, 0.78] {
+            let half = r * CGFloat(w)
+            ctx.strokeEllipse(in: CGRect(x: c.x - half, y: c.y - r, width: half * 2, height: r * 2))
+        }
+        ctx.move(to: CGPoint(x: c.x, y: c.y - r)); ctx.addLine(to: CGPoint(x: c.x, y: c.y + r)); ctx.strokePath()
+        for f in [-0.55, 0.0, 0.55] {
+            let y = c.y + r * CGFloat(f)
+            ctx.move(to: CGPoint(x: c.x - r, y: y)); ctx.addLine(to: CGPoint(x: c.x + r, y: y))
+        }
+        ctx.strokePath()
+        // The night side, with a soft terminator.
+        gradient([rgb(0x050A2A, 0), rgb(0x050A2A, 0), rgb(0x050A2A, 0.62)],
+                 from: CGPoint(x: c.x - 40, y: c.y + 60), to: CGPoint(x: c.x + r, y: c.y - 40), in: ctx)
+        ctx.restoreGState()
+        ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.5).cgColor)
+        ctx.setLineWidth(5)
+        ctx.strokeEllipse(in: disc.insetBy(dx: -18, dy: -18))
+        // Sun.
+        let s = CGPoint(x: 760, y: 760)
+        radial([rgb(0xFFE08A, 0.9), rgb(0xFFB547, 0.4), rgb(0xFFB547, 0)], center: s, radius: 150, in: ctx)
+        ctx.setFillColor(rgb(0xFFF4CF).cgColor)
+        ctx.fillEllipse(in: CGRect(x: s.x - 58, y: s.y - 58, width: 116, height: 116))
     }
 }

@@ -1,12 +1,13 @@
 #!/bin/zsh
-# Builds every app as a signed .app bundle in build/, and with --install copies them to /Applications.
+# Builds apps as signed .app bundles in build/, and with --install copies them to /Applications.
+# Usage: scripts/build.sh [--install] [App ...]   (no app names = every app in Apps/)
 set -euo pipefail
 cd "${0:A:h}/.."
 
-APPS=(Jot Meridian Hush Plain Tempo)
-
-swift build -c release --product IconGen >/dev/null
-.build/release/IconGen build/icons >/dev/null
+INSTALL=0
+if (( INSTALL )); then INSTALL=1; shift; fi
+if (( $# )); then APPS=("$@"); else APPS=(Apps/*/Info.plist(:h:t)); fi
+mkdir -p build/icons
 
 for app in $APPS; do
   swift build -c release --product "$app"
@@ -15,6 +16,7 @@ for app in $APPS; do
   mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
   cp ".build/release/$app" "$bundle/Contents/MacOS/$app"
   cp "Apps/$app/Info.plist" "$bundle/Contents/Info.plist"
+  ".build/release/$app" --icon "build/icons/$app.png"
 
   iconset="build/icons/$app.iconset"
   rm -rf "$iconset" && mkdir -p "$iconset"
@@ -28,7 +30,7 @@ for app in $APPS; do
   echo "built $bundle"
 done
 
-if [[ "${1:-}" == "--install" ]]; then
+if (( INSTALL )); then
   for app in $APPS; do
     pkill -x "$app" 2>/dev/null || true
     rm -rf "/Applications/$app.app"

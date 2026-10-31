@@ -3,6 +3,8 @@ import Combine
 import Kit
 import SwiftUI
 
+IconKit.handleCommandLine(draw: appIcon)
+
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     let delegate = AppDelegate()
@@ -320,5 +322,55 @@ struct Badge: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 1.5)
             .background(Capsule().fill(.quaternary.opacity(0.8)))
+    }
+}
+
+// MARK: - Icon
+
+//: a clean page and sparkles
+
+func appIcon() -> NSBitmapImageRep {
+    render(0x3DDBA4, 0x0B7C8E) { ctx in
+        let page = CGRect(x: 300, y: 230, width: 400, height: 520)
+        let fold: CGFloat = 110
+        let outline = CGMutablePath()
+        outline.move(to: CGPoint(x: page.minX + 40, y: page.minY))
+        outline.addLine(to: CGPoint(x: page.maxX - 40, y: page.minY))
+        outline.addQuadCurve(to: CGPoint(x: page.maxX, y: page.minY + 40), control: CGPoint(x: page.maxX, y: page.minY))
+        outline.addLine(to: CGPoint(x: page.maxX, y: page.maxY - fold))
+        outline.addLine(to: CGPoint(x: page.maxX - fold, y: page.maxY))
+        outline.addLine(to: CGPoint(x: page.minX + 40, y: page.maxY))
+        outline.addQuadCurve(to: CGPoint(x: page.minX, y: page.maxY - 40), control: CGPoint(x: page.minX, y: page.maxY))
+        outline.addLine(to: CGPoint(x: page.minX, y: page.minY + 40))
+        outline.addQuadCurve(to: CGPoint(x: page.minX + 40, y: page.minY), control: CGPoint(x: page.minX, y: page.minY))
+        ctx.saveGState()
+        shadow(ctx, y: -18, blur: 34, alpha: 0.3)
+        ctx.addPath(outline)
+        ctx.setFillColor(NSColor.white.cgColor)
+        ctx.fillPath()
+        ctx.restoreGState()
+        // Folded corner.
+        ctx.move(to: CGPoint(x: page.maxX, y: page.maxY - fold))
+        ctx.addLine(to: CGPoint(x: page.maxX - fold + 18, y: page.maxY - fold))
+        ctx.addQuadCurve(to: CGPoint(x: page.maxX - fold, y: page.maxY - fold + 18), control: CGPoint(x: page.maxX - fold, y: page.maxY - fold))
+        ctx.addLine(to: CGPoint(x: page.maxX - fold, y: page.maxY))
+        ctx.closePath()
+        ctx.setFillColor(rgb(0xCFEFEA).cgColor)
+        ctx.fillPath()
+        // Plain text lines.
+        ctx.setStrokeColor(rgb(0x9DB8BF).cgColor)
+        ctx.setLineWidth(22)
+        ctx.setLineCap(.round)
+        for (i, w) in [220.0, 300, 270, 300, 190].enumerated() {
+            let y = page.maxY - 170 - CGFloat(i) * 62
+            ctx.move(to: CGPoint(x: page.minX + 60, y: y)); ctx.addLine(to: CGPoint(x: page.minX + 60 + w, y: y))
+        }
+        ctx.strokePath()
+        ctx.saveGState()
+        shadow(ctx, y: -4, blur: 16, alpha: 0.18)
+        sparkle(ctx, at: CGPoint(x: 735, y: 760), size: 92, color: rgb(0xFFF6C2))
+        sparkle(ctx, at: CGPoint(x: 820, y: 620), size: 46, color: .white)
+        sparkle(ctx, at: CGPoint(x: 230, y: 330), size: 52, color: rgb(0xFFF6C2))
+        ctx.restoreGState()
     }
 }

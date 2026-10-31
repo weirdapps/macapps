@@ -6,6 +6,8 @@ import CoreAudio
 import Kit
 import SwiftUI
 
+IconKit.handleCommandLine(draw: appIcon)
+
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     let delegate = AppDelegate()
@@ -242,5 +244,56 @@ struct MuteButton: View {
         .onHover { h in withAnimation(.easeOut(duration: 0.15)) { hovering = h } }
         .onAppear { pulse = true }
         .help(muted ? "Unmute" : "Mute")
+    }
+}
+
+// MARK: - Icon
+
+//: a studio microphone with a slash
+
+func appIcon() -> NSBitmapImageRep {
+    render(0xFF6A6A, 0xD81B60) { ctx in
+        let c = CGPoint(x: 512, y: 512)
+        ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.1).cgColor)
+        ctx.setLineWidth(18)
+        for r in [250.0, 340] { ctx.strokeEllipse(in: CGRect(x: c.x - r, y: c.y - r + 30, width: r * 2, height: r * 2)) }
+
+        ctx.saveGState()
+        shadow(ctx, y: -14, blur: 26, alpha: 0.3)
+        let head = CGRect(x: 412, y: 450, width: 200, height: 330)
+        ctx.addPath(roundedRect(head, 100))
+        ctx.setFillColor(NSColor.white.cgColor)
+        ctx.fillPath()
+        // Holder arc, stem and base.
+        ctx.setStrokeColor(NSColor.white.cgColor)
+        ctx.setLineWidth(40)
+        ctx.setLineCap(.round)
+        ctx.addArc(center: CGPoint(x: 512, y: 560), radius: 165, startAngle: .pi * 0.02, endAngle: .pi * 0.98, clockwise: true)
+        ctx.strokePath()
+        ctx.move(to: CGPoint(x: 512, y: 395)); ctx.addLine(to: CGPoint(x: 512, y: 300)); ctx.strokePath()
+        ctx.move(to: CGPoint(x: 410, y: 290)); ctx.addLine(to: CGPoint(x: 614, y: 290)); ctx.strokePath()
+        ctx.restoreGState()
+        // Grille.
+        ctx.saveGState()
+        ctx.addPath(roundedRect(head, 100))
+        ctx.clip()
+        gradient([rgb(0xFFFFFF), rgb(0xF1E3E8)], from: CGPoint(x: head.minX, y: 0), to: CGPoint(x: head.maxX, y: 0), in: ctx)
+        ctx.setStrokeColor(rgb(0xE6C2CF).cgColor)
+        ctx.setLineWidth(10)
+        ctx.setLineCap(.round)
+        for i in 0..<4 {
+            let y = 690 - CGFloat(i) * 44
+            ctx.move(to: CGPoint(x: 462, y: y)); ctx.addLine(to: CGPoint(x: 562, y: y))
+        }
+        ctx.strokePath()
+        ctx.restoreGState()
+        // Slash, cut out from the background colour so it reads at small sizes.
+        ctx.setLineCap(.round)
+        ctx.setStrokeColor(rgb(0xEC3B6A).cgColor)
+        ctx.setLineWidth(84)
+        ctx.move(to: CGPoint(x: 300, y: 770)); ctx.addLine(to: CGPoint(x: 724, y: 260)); ctx.strokePath()
+        ctx.setStrokeColor(NSColor.white.cgColor)
+        ctx.setLineWidth(42)
+        ctx.move(to: CGPoint(x: 300, y: 770)); ctx.addLine(to: CGPoint(x: 724, y: 260)); ctx.strokePath()
     }
 }

@@ -3,6 +3,8 @@ import Carbon.HIToolbox
 import Kit
 import SwiftUI
 
+IconKit.handleCommandLine(draw: appIcon)
+
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     let delegate = AppDelegate()
@@ -215,4 +217,80 @@ struct PageTab: View {
 extension Color {
     static let accentGradient = LinearGradient(colors: [Color(red: 1, green: 0.78, blue: 0.2), Color(red: 1, green: 0.58, blue: 0.05)],
                                                startPoint: .top, endPoint: .bottom)
+}
+
+// MARK: - Icon
+
+//: a ruled note card and a pencil
+
+func appIcon() -> NSBitmapImageRep {
+    render(0xFFD84F, 0xFF9500) { ctx in
+        ctx.saveGState()
+        ctx.translateBy(x: 470, y: 520)
+        ctx.rotate(by: 6 * .pi / 180)
+        let card = CGRect(x: -250, y: -290, width: 500, height: 580)
+        ctx.saveGState()
+        shadow(ctx, y: -18, blur: 36, alpha: 0.28)
+        ctx.addPath(roundedRect(card, 44))
+        ctx.setFillColor(rgb(0xFFFDF4).cgColor)
+        ctx.fillPath()
+        ctx.restoreGState()
+        ctx.addPath(roundedRect(card, 44))
+        ctx.clip()
+        // Header band.
+        ctx.setFillColor(rgb(0xFFF1C9).cgColor)
+        ctx.fill(CGRect(x: card.minX, y: card.maxY - 110, width: card.width, height: 110))
+        // Ruled lines and the margin.
+        ctx.setStrokeColor(rgb(0xBFD7F2).cgColor)
+        ctx.setLineWidth(5)
+        for i in 0..<7 {
+            let y = card.maxY - 160 - CGFloat(i) * 62
+            ctx.move(to: CGPoint(x: card.minX, y: y)); ctx.addLine(to: CGPoint(x: card.maxX, y: y))
+        }
+        ctx.strokePath()
+        ctx.setStrokeColor(rgb(0xFF8A80).cgColor)
+        ctx.move(to: CGPoint(x: card.minX + 88, y: card.minY)); ctx.addLine(to: CGPoint(x: card.minX + 88, y: card.maxY))
+        ctx.strokePath()
+        // Handwriting, as soft strokes.
+        ctx.setStrokeColor(rgb(0x5B6B82, 0.75).cgColor)
+        ctx.setLineWidth(16)
+        ctx.setLineCap(.round)
+        for (i, w) in [300.0, 240, 330, 170].enumerated() {
+            let y = card.maxY - 160 - CGFloat(i) * 62 + 22
+            ctx.move(to: CGPoint(x: card.minX + 120, y: y)); ctx.addLine(to: CGPoint(x: card.minX + 120 + w, y: y))
+        }
+        ctx.strokePath()
+        ctx.restoreGState()
+
+        // Pencil, laid diagonally across the lower right, drawn as one shadowed layer.
+        ctx.saveGState()
+        ctx.translateBy(x: 610, y: 380)
+        ctx.rotate(by: 40 * .pi / 180)
+        shadow(ctx, y: -14, blur: 24, alpha: 0.35)
+        ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+        ctx.addPath(roundedRect(CGRect(x: -370, y: -42, width: 90, height: 84), 26))
+        ctx.setFillColor(rgb(0xFF7AA2).cgColor)
+        ctx.fillPath()
+        ctx.saveGState()
+        ctx.clip(to: CGRect(x: -300, y: -42, width: 72, height: 84))
+        gradient([rgb(0xF2F4F7), rgb(0x9AA4B1)], from: CGPoint(x: 0, y: 42), to: CGPoint(x: 0, y: -42), in: ctx)
+        ctx.restoreGState()
+        ctx.setFillColor(rgb(0x3A7BFF).cgColor)
+        ctx.fill(CGRect(x: -230, y: -42, width: 360, height: 84))
+        ctx.setFillColor(rgb(0x6FA0FF).cgColor)
+        ctx.fill(CGRect(x: -230, y: 6, width: 360, height: 22))
+        ctx.setFillColor(rgb(0x2A5FD6).cgColor)
+        ctx.fill(CGRect(x: -230, y: -42, width: 360, height: 18))
+        // Sharpened wood and graphite tip.
+        ctx.move(to: CGPoint(x: 130, y: 42)); ctx.addLine(to: CGPoint(x: 250, y: 0)); ctx.addLine(to: CGPoint(x: 130, y: -42))
+        ctx.closePath()
+        ctx.setFillColor(rgb(0xF5CFA0).cgColor)
+        ctx.fillPath()
+        ctx.move(to: CGPoint(x: 210, y: 14)); ctx.addLine(to: CGPoint(x: 250, y: 0)); ctx.addLine(to: CGPoint(x: 210, y: -14))
+        ctx.closePath()
+        ctx.setFillColor(rgb(0x2B2F36).cgColor)
+        ctx.fillPath()
+        ctx.endTransparencyLayer()
+        ctx.restoreGState()
+    }
 }

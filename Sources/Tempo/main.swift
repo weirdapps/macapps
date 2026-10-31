@@ -5,6 +5,8 @@ import Kit
 import SwiftUI
 import UserNotifications
 
+IconKit.handleCommandLine(draw: appIcon)
+
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     let delegate = AppDelegate()
@@ -351,5 +353,49 @@ struct Today: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Icon
+
+//: a progress ring with a glowing knob
+
+func appIcon() -> NSBitmapImageRep {
+    render(0xFF7E5F, 0xD12A6E) { ctx in
+        let c = CGPoint(x: 512, y: 512), r: CGFloat = 255
+        ctx.setLineCap(.round)
+        // Hour ticks.
+        ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.55).cgColor)
+        ctx.setLineWidth(14)
+        for i in 0..<12 {
+            let a = CGFloat(i) / 12 * 2 * .pi
+            let inner: CGFloat = i % 3 == 0 ? 150 : 170
+            ctx.move(to: CGPoint(x: c.x + cos(a) * inner, y: c.y + sin(a) * inner))
+            ctx.addLine(to: CGPoint(x: c.x + cos(a) * 192, y: c.y + sin(a) * 192))
+        }
+        ctx.strokePath()
+        // Track and progress.
+        ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.22).cgColor)
+        ctx.setLineWidth(66)
+        ctx.strokeEllipse(in: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2))
+        ctx.saveGState()
+        shadow(ctx, y: -8, blur: 22, alpha: 0.25)
+        ctx.setStrokeColor(NSColor.white.cgColor)
+        let start = CGFloat.pi / 2, end = start - 0.72 * 2 * .pi
+        ctx.addArc(center: c, radius: r, startAngle: start, endAngle: end, clockwise: true)
+        ctx.strokePath()
+        ctx.restoreGState()
+        // Knob at the end of the arc.
+        let k = CGPoint(x: c.x + cos(end) * r, y: c.y + sin(end) * r)
+        ctx.saveGState()
+        shadow(ctx, y: -6, blur: 18, alpha: 0.35)
+        ctx.setFillColor(NSColor.white.cgColor)
+        ctx.fillEllipse(in: CGRect(x: k.x - 52, y: k.y - 52, width: 104, height: 104))
+        ctx.restoreGState()
+        ctx.setFillColor(rgb(0xF0476A).cgColor)
+        ctx.fillEllipse(in: CGRect(x: k.x - 22, y: k.y - 22, width: 44, height: 44))
+        // Centre dot.
+        ctx.setFillColor(NSColor.white.cgColor)
+        ctx.fillEllipse(in: CGRect(x: c.x - 26, y: c.y - 26, width: 52, height: 52))
     }
 }
