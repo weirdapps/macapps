@@ -203,9 +203,12 @@ enum TableCodec {
         return ([line(header), separator] + rows.dropFirst().map(line)).joined(separator: "\n")
     }
 
-    static func delimited(_ table: Table, delimiter: Character) -> String {
+    /// - Parameter guardFormulas: prefixes cells that a spreadsheet would run as a formula (=, +, -, @, tab, return)
+    ///   with an apostrophe, for CSV that will be opened in Excel or Numbers.
+    static func delimited(_ table: Table, delimiter: Character, guardFormulas: Bool = false) -> String {
         table.normalized.map { row in
-            row.map { cell in
+            row.map { original in
+                let cell = guardFormulas && original.first.map({ "=+-@\t\r".contains($0) }) == true ? "'" + original : original
                 let needsQuotes = cell.contains(delimiter) || cell.contains("\"") || cell.contains("\n") || cell.contains("\r")
                     || cell.hasPrefix(" ") || cell.hasSuffix(" ")
                 return needsQuotes ? "\"" + cell.replacingOccurrences(of: "\"", with: "\"\"") + "\"" : cell
@@ -222,6 +225,7 @@ final class TabulaModel: ObservableObject {
     @AppStorage("alignment") var alignment: ColumnAlignment = .none { willSet { objectWillChange.send() } }
     @AppStorage("useTabs") var useTabs = false { willSet { objectWillChange.send() } }
     @AppStorage("pad") var pad = true { willSet { objectWillChange.send() } }
+    @AppStorage("guardFormulas") var guardFormulas = false { willSet { objectWillChange.send() } }
 
     private let pasteboard = NSPasteboard.general
     private var lastChange = -1
@@ -252,7 +256,7 @@ final class TabulaModel: ObservableObject {
 
     var output: String {
         guard let table, let format else { return "" }
-        if format == .markdown { return TableCodec.delimited(table, delimiter: useTabs ? "\t" : ",") }
+        if format == .markdown { return TableCodec.delimited(table, delimiter: useTabs ? "\t" : ",", guardFormulas: guardFormulas) }
         return TableCodec.markdown(table, alignment: alignment, pad: pad)
     }
 
@@ -331,6 +335,7 @@ struct TabulaView: View {
             PanelFooter(name: "Tabula") {
                 Toggle("Pad Markdown Columns", isOn: $model.pad)
                 Toggle("Write Tabs Instead of Commas", isOn: $model.useTabs)
+                Toggle("Neutralise Spreadsheet Formulas in CSV", isOn: $model.guardFormulas)
             }
         }
         .frame(width: 380)
