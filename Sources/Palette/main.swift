@@ -127,10 +127,6 @@ final class PaletteStore: ObservableObject {
 
     init() {
         favourites = Storage.load([Favourite].self, app: "Palette", file: "favourites.json") ?? []
-        if CommandLine.arguments.contains("--snapshot") && favourites.isEmpty {
-            favourites = [Favourite(base: RGB(hex: "#E76F51")!, harmony: "Analogous"),
-                          Favourite(base: RGB(hex: "#3A86FF")!, harmony: "Triadic")]
-        }
     }
 
     var base: RGB {
