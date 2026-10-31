@@ -5,12 +5,12 @@ set -euo pipefail
 cd "${0:A:h}/.."
 
 INSTALL=0
-if (( INSTALL )); then INSTALL=1; shift; fi
+if [[ "${1:-}" == "--install" ]]; then INSTALL=1; shift; fi
 if (( $# )); then APPS=("$@"); else APPS=(Apps/*/Info.plist(:h:t)); fi
 mkdir -p build/icons
 
 for app in $APPS; do
-  swift build -c release --product "$app"
+  swift build -c release --manifest-cache none --product "$app"
   bundle="build/$app.app"
   rm -rf "$bundle"
   mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
