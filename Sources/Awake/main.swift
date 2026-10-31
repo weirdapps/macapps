@@ -322,56 +322,73 @@ struct OptionRow<Control: View>: View {
 
 // MARK: - Icon
 
-//: an open eye with a sun for a pupil, on a night sky
+//: a steaming cup of coffee on a saucer, under a night sky
 
 func appIcon() -> NSBitmapImageRep {
     render(0x6C63FF, 0x221A5C) { ctx in
         // Stars.
-        for (x, y, s) in [(250.0, 780.0, 22.0), (760, 800, 16), (820, 640, 12), (200, 560, 12), (700, 250, 14), (300, 240, 18)] {
+        for (x, y, s) in [(230.0, 800.0, 24.0), (800, 780, 18), (840, 560, 12), (190, 560, 14)] {
             sparkle(ctx, at: CGPoint(x: x, y: y), size: s, color: NSColor.white.withAlphaComponent(0.7))
         }
-        let c = CGPoint(x: 512, y: 500)
-        // Eye outline: two arcs meeting at the corners.
-        let eye = CGMutablePath()
-        eye.move(to: CGPoint(x: c.x - 300, y: c.y))
-        eye.addQuadCurve(to: CGPoint(x: c.x + 300, y: c.y), control: CGPoint(x: c.x, y: c.y + 330))
-        eye.addQuadCurve(to: CGPoint(x: c.x - 300, y: c.y), control: CGPoint(x: c.x, y: c.y - 330))
-        eye.closeSubpath()
+        // Saucer.
         ctx.saveGState()
         shadow(ctx, y: -14, blur: 30, alpha: 0.35)
-        ctx.addPath(eye)
+        ctx.setFillColor(rgb(0xE7E4FF).cgColor)
+        ctx.fillEllipse(in: CGRect(x: 212, y: 196, width: 600, height: 132))
+        ctx.restoreGState()
+        ctx.setFillColor(rgb(0xCFC9F5).cgColor)
+        ctx.fillEllipse(in: CGRect(x: 352, y: 238, width: 320, height: 62))
+
+        // Handle: a thick ring on the right, drawn before the cup so the cup overlaps its inner end.
+        ctx.saveGState()
+        shadow(ctx, y: -10, blur: 22, alpha: 0.3)
+        ctx.setStrokeColor(NSColor.white.cgColor)
+        ctx.setLineWidth(44)
+        ctx.strokeEllipse(in: CGRect(x: 600, y: 360, width: 150, height: 160))
+        ctx.restoreGState()
+
+        // Cup body: wide at the rim, rounded at the base.
+        let cup = CGMutablePath()
+        cup.move(to: CGPoint(x: 290, y: 560))
+        cup.addLine(to: CGPoint(x: 694, y: 560))
+        cup.addCurve(to: CGPoint(x: 560, y: 272), control1: CGPoint(x: 694, y: 400), control2: CGPoint(x: 650, y: 290))
+        cup.addLine(to: CGPoint(x: 424, y: 272))
+        cup.addCurve(to: CGPoint(x: 290, y: 560), control1: CGPoint(x: 334, y: 290), control2: CGPoint(x: 290, y: 400))
+        cup.closeSubpath()
+        ctx.saveGState()
+        shadow(ctx, y: -14, blur: 30, alpha: 0.35)
+        ctx.addPath(cup)
         ctx.setFillColor(NSColor.white.cgColor)
         ctx.fillPath()
         ctx.restoreGState()
-        // Sun iris with rays, clipped to the eye.
         ctx.saveGState()
-        ctx.addPath(eye)
+        ctx.addPath(cup)
         ctx.clip()
-        radial([rgb(0xFFE08A), rgb(0xFF9A3C), rgb(0xF0602A)], center: c, radius: 130, in: ctx)
+        gradient([rgb(0xFFFFFF), rgb(0xE4E0FF)], from: CGPoint(x: 290, y: 0), to: CGPoint(x: 694, y: 0), in: ctx)
         ctx.restoreGState()
-        ctx.saveGState()
-        ctx.addPath(eye)
-        ctx.clip()
+        // Coffee surface inside the rim.
         ctx.setFillColor(NSColor.white.cgColor)
-        ctx.addRect(tile)
-        ctx.addEllipse(in: CGRect(x: c.x - 130, y: c.y - 130, width: 260, height: 260))
-        ctx.drawPath(using: .eoFill)
+        ctx.fillEllipse(in: CGRect(x: 290, y: 524, width: 404, height: 72))
+        ctx.saveGState()
+        ctx.addEllipse(in: CGRect(x: 314, y: 534, width: 356, height: 52))
+        ctx.clip()
+        gradient([rgb(0xC8743A), rgb(0x7A3E1E)], from: CGPoint(x: 0, y: 586), to: CGPoint(x: 0, y: 534), in: ctx)
         ctx.restoreGState()
-        // Pupil and highlight.
-        ctx.setFillColor(rgb(0x2A1F6E).cgColor)
-        ctx.fillEllipse(in: CGRect(x: c.x - 56, y: c.y - 56, width: 112, height: 112))
-        ctx.setFillColor(NSColor.white.withAlphaComponent(0.9).cgColor)
-        ctx.fillEllipse(in: CGRect(x: c.x + 18, y: c.y + 26, width: 40, height: 40))
-        // Lashes on the upper lid.
-        ctx.setStrokeColor(NSColor.white.cgColor)
-        ctx.setLineWidth(30)
+
+        // Steam: three soft S-curves rising from the cup, warm like the panel's awake colour.
         ctx.setLineCap(.round)
-        for i in -2...2 {
-            let a = CGFloat.pi / 2 + CGFloat(i) * 0.36
-            let base = CGPoint(x: c.x + cos(a) * 205, y: c.y - 40 + sin(a) * 205)
-            ctx.move(to: base)
-            ctx.addLine(to: CGPoint(x: c.x + cos(a) * 290, y: c.y - 40 + sin(a) * 290))
+        for (i, x) in [CGFloat(410), 492, 574].enumerated() {
+            let top: CGFloat = i == 1 ? 860 : 810
+            let path = CGMutablePath()
+            path.move(to: CGPoint(x: x, y: 630))
+            path.addCurve(to: CGPoint(x: x, y: top), control1: CGPoint(x: x - 60, y: 700), control2: CGPoint(x: x + 60, y: top - 90))
+            ctx.saveGState()
+            shadow(ctx, y: -4, blur: 18, alpha: 0.2)
+            ctx.addPath(path)
+            ctx.setStrokeColor(rgb(0xFFC66B).cgColor)
+            ctx.setLineWidth(34)
+            ctx.strokePath()
+            ctx.restoreGState()
         }
-        ctx.strokePath()
     }
 }
