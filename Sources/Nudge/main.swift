@@ -93,19 +93,12 @@ enum When {
 
 @MainActor
 final class ReminderStore: ObservableObject {
-    @Published private(set) var reminders: [Reminder] = [] { didSet { if !demo { persist() } } }
+    @Published private(set) var reminders: [Reminder] = [] { didSet { persist() } }
     @Published var now = Date()
     private var timer: Timer?
-    private let demo = CommandLine.arguments.contains("--snapshot")
 
     init() {
-        if demo {
-            reminders = [Reminder(text: "Call mum", due: Date().addingTimeInterval(14 * 60)),
-                         Reminder(text: "Take the laundry out", due: Date().addingTimeInterval(52 * 60)),
-                         Reminder(text: "Submit the expense report", due: Date().addingTimeInterval(5 * 3600 + 20 * 60))]
-        } else {
-            reminders = Storage.load([Reminder].self, app: "Nudge", file: "reminders.json") ?? []
-        }
+        reminders = Storage.load([Reminder].self, app: "Nudge", file: "reminders.json") ?? []
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
@@ -142,7 +135,7 @@ final class ReminderStore: ObservableObject {
     private func tick() {
         now = Date()
         let due = reminders.filter { $0.due <= now }
-        guard !due.isEmpty, !demo else { return }
+        guard !due.isEmpty else { return }
         withAnimation(.snappy) { reminders.removeAll { $0.due <= now } }
         NSSound(named: "Glass")?.play()
         HUD.show(symbol: "bell.badge.fill", title: due.count == 1 ? due[0].text : "\(due.count) reminders", tint: Accent.solid)

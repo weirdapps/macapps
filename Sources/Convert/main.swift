@@ -191,13 +191,6 @@ final class ConvertModel: ObservableObject {
         from = c.units[c.defaults.from]
         to = c.units[c.defaults.to]
         favourites = Storage.load([FavouritePair].self, app: "Convert", file: "favourites.json") ?? []
-        if CommandLine.arguments.contains("--snapshot") {
-            input = "10"
-            if favourites.isEmpty {
-                favourites = [FavouritePair(category: "Temperature", from: "Temperature.Fahrenheit", to: "Temperature.Celsius"),
-                              FavouritePair(category: "Data", from: "Data.Gibibytes", to: "Data.Gigabytes")]
-            }
-        }
     }
 
     private func resetUnits() {

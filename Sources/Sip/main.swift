@@ -87,17 +87,9 @@ final class WaterLog: ObservableObject {
 
     private struct Saved: Codable { var days: [String: Int]; var drinks: [Drink] }
     private var timer: Timer?
-    private let demo = CommandLine.arguments.contains("--snapshot")
 
     init() {
-        if demo {
-            let cal = Calendar.current
-            for (i, ml) in [1750, 2250, 1500, 2000, 2400, 1250].enumerated() {
-                days[WaterLog.key(cal.date(byAdding: .day, value: -(6 - i), to: Date())!)] = ml
-            }
-            drinks = [Drink(at: Date(), ml: 1250)]
-            days[WaterLog.key(Date())] = 1250
-        } else if let saved = Storage.load(Saved.self, app: "Sip", file: "log.json") {
+        if let saved = Storage.load(Saved.self, app: "Sip", file: "log.json") {
             days = saved.days
             drinks = saved.drinks.filter { Calendar.current.isDateInToday($0.at) }
         }
@@ -139,7 +131,7 @@ final class WaterLog: ObservableObject {
 
     private func check() {
         objectWillChange.send() // a new day resets the view
-        guard remind, !demo, today < goal,
+        guard remind, today < goal,
               Schedule.due(now: Date(), lastDrink: drinks.last?.at, lastNudge: lastNudge, intervalHours: interval, wake: wake, sleep: sleep)
         else { return }
         lastNudge = Date()
@@ -154,7 +146,7 @@ final class WaterLog: ObservableObject {
         // Keep sixty days of totals; the panel shows seven.
         let cutoff = WaterLog.key(Calendar.current.date(byAdding: .day, value: -60, to: Date())!)
         days = days.filter { $0.key >= cutoff }
-        if !demo { Storage.save(Saved(days: days, drinks: drinks), app: "Sip", file: "log.json") }
+        Storage.save(Saved(days: days, drinks: drinks), app: "Sip", file: "log.json")
     }
 }
 
@@ -213,14 +205,20 @@ struct SipView: View {
                     ForEach([1.0, 1.5, 2, 3], id: \.self) { Text($0 == 1 ? "hour" : "\($0.formatted()) hours").tag($0) }
                 }
                 Picker("From", selection: $log.wake) {
-                    ForEach(5...12, id: \.self) { Text(String(format: "%02d:00", $0)).tag($0) }
+                    ForEach(5...12, id: \.self) { Text(Self.clock($0)).tag($0) }
                 }
                 Picker("Until", selection: $log.sleep) {
-                    ForEach(18...24, id: \.self) { Text(String(format: "%02d:00", $0)).tag($0) }
+                    ForEach(18...24, id: \.self) { Text(Self.clock($0)).tag($0) }
                 }
             }
         }
         .frame(width: 330)
+    }
+
+    /// An hour of the day in the user's own clock style, 24 shown as midnight.
+    static func clock(_ hour: Int) -> String {
+        let date = Calendar.current.date(bySettingHour: hour % 24, minute: 0, second: 0, of: Date()) ?? Date()
+        return date.formatted(date: .omitted, time: .shortened)
     }
 
     private var remainingText: String {
@@ -357,6 +355,7 @@ struct WeekChart: View {
                         }
                     }
                 }
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .bottomLeading)
             }
             .frame(height: 84)
         }

@@ -70,8 +70,10 @@ struct BreakClock: Equatable {
         if idle >= naturalBreak {
             guard !resetForIdle else { return nil }
             resetForIdle = true
+            // Only a pause that follows screen time counts as a break; launching on an idle Mac does not.
+            let hadWork = active > 0
             active = 0
-            return .naturalBreak
+            return hadWork ? .naturalBreak : nil
         }
         resetForIdle = false
         guard idle < idleGrace else { return nil }
@@ -108,15 +110,12 @@ final class BreakCoach: ObservableObject {
     private var timer: Timer?
     private var lastTick = Date()
     private let overlay = BreakOverlay()
-    private let demo = CommandLine.arguments.contains("--snapshot") || CommandLine.arguments.contains("--snapshot-break")
+    private let demo = CommandLine.arguments.contains("--snapshot-break")
 
     init() {
         clock = BreakClock(work: TimeInterval(UserDefaults.standard.object(forKey: "workMinutes") as? Int ?? 20) * 60)
-        if demo {
-            stats = Stats(taken: 7, skipped: 1, activeSeconds: 3 * 3600 + 25 * 60)
-            clock.active = 13 * 60 + 20
-            return
-        }
+        // The break card snapshot needs no clock.
+        if demo { return }
         if let saved = Storage.load(Stats.self, app: "Blink", file: "today.json"), saved.day == BreakCoach.dayKey { stats = saved }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
@@ -345,7 +344,7 @@ struct BlinkView: View {
                         .stroke(Accent.gradient, style: StrokeStyle(lineWidth: 9, lineCap: .round))
                         .rotationEffect(.degrees(-90))
                         .animation(.linear(duration: 1), value: coach.progress)
-                        .opacity(coach.paused ? 0.35 : 1)
+                        .opacity(coach.progress <= 0 ? 0 : coach.paused ? 0.35 : 1)
                     Image(systemName: coach.paused ? "eye.slash.fill" : "eye.fill")
                         .font(.system(size: 22))
                         .foregroundStyle(Accent.gradient)
@@ -387,7 +386,7 @@ struct BlinkView: View {
             .padding(.bottom, 14)
 
             HStack(spacing: 8) {
-                StatTile(value: "\(coach.stats.taken)", label: "breaks taken", symbol: "checkmark.circle.fill")
+                StatTile(value: "\(coach.stats.taken)", label: coach.stats.taken == 1 ? "break taken" : "breaks taken", symbol: "checkmark.circle.fill")
                 StatTile(value: "\(coach.stats.skipped)", label: "skipped", symbol: "forward.fill")
                 StatTile(value: Self.duration(coach.stats.activeSeconds), label: "screen time", symbol: "display")
             }
