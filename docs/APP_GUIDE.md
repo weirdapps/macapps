@@ -41,6 +41,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 ```
 
+**Never declare a top-level `let` or `var` in `main.swift` below the `MainActor.assumeIsolated` block.** Globals in `main.swift` initialise in order and `app.run()` never returns, so they stay uninitialised and the first view that reads one crashes. Put constants in a type: `enum Theme { static let accent = ... }`.
+
 Kit gives you: `StatusPopover` (menu bar item + popover, `setSymbol`, `setTitle` for monospaced text in the bar, `onSecondaryClick`, `toggle`), `HotKey(keyCode: kVK_ANSI_X, modifiers: cmdKey | optionKey)` (needs `import Carbon.HIToolbox`), `HUD.show(symbol:title:tint:)`, `PanelFooter(name:shortcut:) { menu items }` (always the bottom bar: settings menu, launch at login, about, quit), `KeyCap`, `GlassIconButton`, `PillButtonStyle(colors)`, `Storage.load/save` (JSON in Application Support), `VisualEffect`, `LinkCleaner`. Icon helpers: `render(top, bottom) { ctx in }`, `rgb(0xRRGGBB)`, `gradient`, `radial`, `shadow`, `roundedRect`, `sparkle`, and `tile` (the 824 px tile rect, origin 100,100, y up).
 
 ## Design rules
