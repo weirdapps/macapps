@@ -67,9 +67,7 @@ final class CounterStore: ObservableObject {
 
     init() {
         counters = Storage.load([Counter].self, app: "Tally", file: "counters.json")
-            ?? [Counter(name: "Glasses of water", value: 3, color: 1, dailyReset: true),
-                Counter(name: "Push-ups", value: 40, color: 0),
-                Counter(name: "Coffees", value: 2, color: 3, dailyReset: true)]
+            ?? [Counter(name: "Counter")]
         rollOver()
         clock = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.rollOver() }
