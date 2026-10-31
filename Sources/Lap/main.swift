@@ -67,12 +67,6 @@ final class Stopwatch: ObservableObject {
     private struct Saved: Codable { var banked: TimeInterval; var startedAt: Date?; var splits: [TimeInterval] }
 
     init() {
-        if CommandLine.arguments.contains("--snapshot") {
-            // A plausible session for the README screenshot.
-            splits = [62.41, 121.87, 185.02, 244.66, 303.19]
-            banked = 331.27
-            return
-        }
         if let saved = Storage.load(Saved.self, app: "Lap", file: "stopwatch.json") {
             banked = saved.banked
             startedAt = saved.startedAt
@@ -143,17 +137,20 @@ final class Stopwatch: ObservableObject {
         }
     }
 
-    /// "4:05.27", or "1:04:05.27" past an hour. Truncates, like a real stopwatch.
+    /// "4:05.27", or "1:04:05.27" past an hour, with the locale's decimal separator. Truncates, like a real stopwatch.
     nonisolated static func format(_ t: TimeInterval, hundredths: Bool = true) -> String {
         // The epsilon keeps 59.64 from printing as 59.63 after floating point subtraction.
         let cs = Int((max(0, t) * 100 + 1e-6).rounded(.down))
         let h = cs / 360_000, m = cs / 6000 % 60, s = cs / 100 % 60, c = cs % 100
-        let base = h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
-        return hundredths ? base + String(format: ".%02d", c) : base
+        let lead = h > 0 ? String(format: "%d:%02d:", h, m) : "\(m):"
+        guard hundredths else { return lead + String(format: "%02d", s) }
+        // FormatStyle, not Locale.decimalSeparator: only it honours a region set apart from the language.
+        let seconds = (Double(s) + Double(c) / 100).formatted(.number.precision(.integerAndFractionLength(integer: 2, fraction: 2)).grouping(.never))
+        return lead + seconds
     }
 
     nonisolated static func formatDelta(_ d: TimeInterval) -> String {
-        (d >= 0 ? "+" : "-") + String(format: "%.2f", abs(d))
+        (d >= 0 ? "+" : "-") + abs(d).formatted(.number.precision(.fractionLength(2)).grouping(.never))
     }
 }
 
