@@ -114,21 +114,15 @@ enum Format: String, CaseIterable, Identifiable {
 
 @MainActor
 final class SwatchStore: ObservableObject {
-    @Published var history: [RGB] { didSet { if !demo { Storage.save(history, app: "Swatch", file: "history.json") } } }
+    @Published var history: [RGB] { didSet { Storage.save(history, app: "Swatch", file: "history.json") } }
     @Published var current: RGB?
     @AppStorage("copyFormat") var copyFormat: Format = .hex
     @AppStorage("copyOnPick") var copyOnPick = true
     var closePanel: (() -> Void)?
     private let sampler = NSColorSampler()
-    private let demo = CommandLine.arguments.contains("--snapshot")
 
     init() {
-        if demo {
-            history = ["#1E90FF", "#FF6B6B", "#FFD166", "#06D6A0", "#118AB2", "#073B4C", "#EF476F", "#8338EC", "#3A86FF", "#FB5607", "#2A9D8F"]
-                .compactMap(RGB.init(hex:))
-        } else {
-            history = Storage.load([RGB].self, app: "Swatch", file: "history.json") ?? []
-        }
+        history = Storage.load([RGB].self, app: "Swatch", file: "history.json") ?? []
         current = history.first
     }
 
