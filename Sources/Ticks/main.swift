@@ -48,9 +48,7 @@ final class Checklist: ObservableObject {
     @Published var items: [Item] { didSet { Storage.save(items, app: "Ticks", file: "items.json") } }
 
     init() {
-        items = Storage.load([Item].self, app: "Ticks", file: "items.json")
-            ?? [Item(text: "Reply to Anna about Friday"), Item(text: "Book the dentist"), Item(text: "Water the plants"),
-                Item(text: "Buy oat milk", done: true, doneAt: Date())]
+        items = Storage.load([Item].self, app: "Ticks", file: "items.json") ?? []
     }
 
     var open: [Item] { items.filter { !$0.done } }
@@ -171,10 +169,10 @@ struct TicksView: View {
         let done = list.items.count - list.open.count
         return HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(list.open.count == 0 && total > 0 ? "All done" : "\(list.open.count) to do")
+                Text(total == 0 ? "Ticks" : list.open.count == 0 ? "All done" : "\(list.open.count) to do")
                     .font(.system(size: 22, weight: .bold, design: .rounded))
                     .contentTransition(.numericText())
-                Text(total == 0 ? "Ticks" : "\(done) of \(total) completed")
+                Text(total == 0 ? "A quick checklist" : "\(done) of \(total) completed")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()

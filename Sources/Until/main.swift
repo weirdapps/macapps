@@ -84,16 +84,8 @@ final class EventStore: ObservableObject {
     private var clock: Timer?
 
     init() {
-        let cal = Calendar.current
-        let today = cal.startOfDay(for: Date())
-        let year = cal.component(.year, from: today)
-        let newYear = cal.date(from: DateComponents(year: year + 1, month: 1, day: 1))!
-        events = Storage.load([Event].self, app: "Until", file: "events.json")
-            ?? [Event(name: "Holiday in Crete", date: cal.date(byAdding: .day, value: 12, to: today)!, emoji: "🏖️"),
-                Event(name: "Mum's birthday", date: cal.date(byAdding: .day, value: 47, to: today)!, emoji: "🎂"),
-                Event(name: "New Year", date: newYear, emoji: "🎆"),
-                Event(name: "Team offsite", date: cal.date(byAdding: .day, value: -3, to: today)!, emoji: "🚀")]
-        pinnedID = UserDefaults.standard.string(forKey: "pinned").flatMap(UUID.init) ?? events.first?.id
+        events = Storage.load([Event].self, app: "Until", file: "events.json") ?? []
+        pinnedID = UserDefaults.standard.string(forKey: "pinned").flatMap(UUID.init)
         clock = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.now = Date() }
         }

@@ -324,7 +324,13 @@ struct PasswordOptionsView: View {
         VStack(spacing: 10) {
             HStack {
                 Text("Length").font(.system(size: 12, weight: .medium))
-                Slider(value: Binding(get: { Double(model.length) }, set: { model.length = Int($0); model.generate() }), in: 8...64, step: 1)
+                // Continuous, rounded by hand: a `step:` would draw a tick mark for every value.
+                Slider(value: Binding(get: { Double(model.length) }, set: { v in
+                    let length = Int(v.rounded())
+                    guard length != model.length else { return }
+                    model.length = length
+                    model.generate()
+                }), in: 8...64)
                 Text("\(model.length)")
                     .font(.system(size: 13, weight: .bold, design: .rounded))
                     .monospacedDigit()

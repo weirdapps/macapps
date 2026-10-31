@@ -46,7 +46,7 @@ final class SnippetStore: ObservableObject {
     var onCopied: (() -> Void)?
 
     init() {
-        snippets = Storage.load([Snippet].self, app: "Stash", file: "snippets.json") ?? SnippetStore.samples
+        snippets = Storage.load([Snippet].self, app: "Stash", file: "snippets.json") ?? []
     }
 
     var filtered: [Snippet] {
@@ -95,13 +95,6 @@ final class SnippetStore: ObservableObject {
               let to = snippets.firstIndex(where: { $0.id == target }) else { return }
         snippets.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
     }
-
-    static let samples = [
-        Snippet(title: "Email signature", text: "Best regards,\nYour Name\nyou@example.com"),
-        Snippet(title: "Meeting link", text: "https://meet.example.com/your-room"),
-        Snippet(title: "Shrug", text: "¯\\_(ツ)_/¯"),
-        Snippet(title: "Thanks", text: "Thanks for getting back to me so quickly. I will take a look and reply by tomorrow."),
-    ]
 }
 
 extension Snippet {
@@ -148,13 +141,15 @@ struct ListPane: View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 Text("Stash").font(.system(size: 17, weight: .bold, design: .rounded))
-                Text("\(store.snippets.count)")
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(LinearGradient(colors: Color.stash, startPoint: .top, endPoint: .bottom)))
-                    .contentTransition(.numericText())
+                if !store.snippets.isEmpty {
+                    Text("\(store.snippets.count)")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(LinearGradient(colors: Color.stash, startPoint: .top, endPoint: .bottom)))
+                        .contentTransition(.numericText())
+                }
                 Spacer()
                 GlassIconButton("plus", help: "New snippet from the clipboard (⌘N)") {
                     withAnimation(.snappy) { store.newSnippet() }
