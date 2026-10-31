@@ -41,6 +41,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 ```
 
+**Never declare a top-level `let` or `var` in `main.swift` below the `MainActor.assumeIsolated` block.** Globals in `main.swift` initialise in order and `app.run()` never returns, so they stay uninitialised and the first view that reads one crashes. Put constants in a type: `enum Theme { static let accent = ... }`.
+
 Kit gives you: `StatusPopover` (menu bar item + popover, `setSymbol`, `setTitle` for monospaced text in the bar, `onSecondaryClick`, `toggle`), `HotKey(keyCode: kVK_ANSI_X, modifiers: cmdKey | optionKey)` (needs `import Carbon.HIToolbox`), `HUD.show(symbol:title:tint:)`, `PanelFooter(name:shortcut:) { menu items }` (always the bottom bar: settings menu, launch at login, about, quit), `KeyCap`, `GlassIconButton`, `PillButtonStyle(colors)`, `Storage.load/save` (JSON in Application Support), `VisualEffect`, `LinkCleaner`. Icon helpers: `render(top, bottom) { ctx in }`, `rgb(0xRRGGBB)`, `gradient`, `radial`, `shadow`, `roundedRect`, `sparkle`, and `tile` (the 824 px tile rect, origin 100,100, y up).
 
 ## Design rules
@@ -61,7 +63,7 @@ Kit gives you: `StatusPopover` (menu bar item + popover, `setSymbol`, `setTitle`
 
 ## Done means, per app
 
-1. `swift build -c release --product Foo` has no errors and no warnings from your files.
+1. `swift build -c release --manifest-cache none --product Foo` (always pass `--manifest-cache none`: Package.swift finds apps by folder, so any cached manifest goes stale when a folder is added) has no errors and no warnings from your files.
 2. `scripts/build.sh Foo` succeeds (it renders the icon and makes `build/Foo.app`).
 3. `build/Foo.app/Contents/MacOS/Foo --snapshot /path/foo-panel.png` and Read that image. Also Read `build/icons/Foo.png`. Fix anything clipped, misaligned, empty or ugly, and look again. Snapshot rendering does not show vibrancy, which is fine.
 4. If the app has logic that can be wrong (parsing, maths, conversions), test it: add a pure function and exercise it from a quick `swift` script or a check in your report. Do not add test targets.
