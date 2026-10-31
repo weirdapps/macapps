@@ -84,7 +84,7 @@ enum WCAG {
 
     /// Rounds down to two places, so 4.499 never shows as a passing 4.50.
     static func format(_ ratio: Double) -> String {
-        String(format: "%.2f:1", (ratio * 100).rounded(.down) / 100)
+        ((ratio * 100).rounded(.down) / 100).formatted(.number.precision(.fractionLength(2)).grouping(.never)) + ":1"
     }
 
     /// The nearest shade of `foreground` that reaches `target` on `background`, darker or lighter, whichever is closer.
@@ -317,7 +317,7 @@ struct CriterionRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 30, alignment: .leading)
             Text(criterion.label).font(.system(size: 12.5))
-            Text(String(format: "%g:1", criterion.minimum))
+            Text(criterion.minimum.formatted(.number.precision(.fractionLength(0...1))) + ":1")
                 .font(.system(size: 11, design: .rounded))
                 .foregroundStyle(.tertiary)
             Spacer()
