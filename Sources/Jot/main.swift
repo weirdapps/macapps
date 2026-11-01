@@ -46,15 +46,18 @@ struct Note: Codable, Identifiable, Equatable {
 @MainActor
 final class NoteStore: ObservableObject {
     @Published var notes: [Note] { didSet { scheduleSave() } }
-    @Published var selection: UUID
+    @Published var selection: UUID { didSet { if !StatusPopover.isSnapshot { savedSelection = selection.uuidString } } }
+    @AppStorage("selection") private var savedSelection = ""
 
     private var saveWork: DispatchWorkItem?
 
     init() {
-        let loaded = Storage.load([Note].self, app: "Jot", file: "notes.json") ?? []
+        // A snapshot shows fixed demo pages, never the user's notes.
+        let loaded = StatusPopover.isSnapshot ? NoteStore.demo : Storage.load([Note].self, app: "Jot", file: "notes.json") ?? []
         let notes = loaded.isEmpty ? [Note(text: NoteStore.welcome)] : loaded
         self.notes = notes
-        selection = notes[0].id
+        let saved = StatusPopover.isSnapshot ? nil : UserDefaults.standard.string(forKey: "selection")
+        selection = notes.first { $0.id.uuidString == saved }?.id ?? notes[0].id
     }
 
     var index: Int { notes.firstIndex { $0.id == selection } ?? 0 }
@@ -88,7 +91,16 @@ final class NoteStore: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
     }
 
-    func saveNow() { Storage.save(notes, app: "Jot", file: "notes.json") }
+    func saveNow() {
+        guard !StatusPopover.isSnapshot else { return }
+        Storage.save(notes, app: "Jot", file: "notes.json")
+    }
+
+    static let demo = [
+        Note(text: welcome),
+        Note(text: "Ideas\n\nA menu bar timer that knows when the kettle is done."),
+        Note(text: "Call list\n\nPlumber, Tuesday after 10\nDentist to move the appointment"),
+    ]
 
     static let welcome = """
     Welcome to Jot

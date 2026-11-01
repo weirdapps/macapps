@@ -62,14 +62,31 @@ enum Kind: String, CaseIterable, Identifiable {
 final class LoremModel: ObservableObject {
     @AppStorage("kind") var kind: Kind = .paragraphs { willSet { objectWillChange.send() } }
     @AppStorage("startWithLorem") var startWithLorem = true { willSet { objectWillChange.send() } }
-    @Published var counts: [Kind: Int] = Dictionary(uniqueKeysWithValues: Kind.allCases.map { ($0, $0.defaultCount) })
+    @AppStorage("counts") private var countsData = Data() { willSet { objectWillChange.send() } }
     @Published private(set) var output = ""
 
-    init() { regenerate() }
+    init() {
+        // A snapshot shows the default settings, whatever the user chose. The argument domain is read
+        // before the saved one and is never written, so nothing persists.
+        if StatusPopover.isSnapshot {
+            UserDefaults.standard.setVolatileDomain(["kind": Kind.paragraphs.rawValue, "startWithLorem": true, "counts": Data()], forName: UserDefaults.argumentDomain)
+        }
+        regenerate()
+    }
 
     var count: Int {
-        get { counts[kind] ?? kind.defaultCount }
-        set { counts[kind] = min(max(newValue, kind.range.lowerBound), kind.range.upperBound); regenerate() }
+        get { counts[kind.rawValue] ?? kind.defaultCount }
+        set {
+            var all = counts
+            all[kind.rawValue] = min(max(newValue, kind.range.lowerBound), kind.range.upperBound)
+            countsData = (try? JSONEncoder().encode(all)) ?? Data()
+            regenerate()
+        }
+    }
+
+    /// Counts per kind, saved so they survive a relaunch.
+    private var counts: [String: Int] {
+        (try? JSONDecoder().decode([String: Int].self, from: countsData)) ?? [:]
     }
 
     func regenerate() {

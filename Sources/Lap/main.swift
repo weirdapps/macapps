@@ -36,9 +36,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if watch.running {
             status.setSymbol("stopwatch.fill", label: "Lap, running")
             if ticker == nil {
-                ticker = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
                     MainActor.assumeIsolated { self?.updateTitle() }
                 }
+                // Common modes, so the title keeps counting while a menu is open.
+                RunLoop.main.add(timer, forMode: .common)
+                ticker = timer
             }
         } else {
             status.setSymbol("stopwatch", label: "Lap")
@@ -67,6 +70,12 @@ final class Stopwatch: ObservableObject {
     private struct Saved: Codable { var banked: TimeInterval; var startedAt: Date?; var splits: [TimeInterval] }
 
     init() {
+        // A snapshot shows a fixed demo session, never the user's own laps, and saves nothing.
+        if StatusPopover.isSnapshot {
+            banked = 754.27
+            splits = [118.42, 241.07, 371.95, 498.3, 631.18]
+            return
+        }
         if let saved = Storage.load(Saved.self, app: "Lap", file: "stopwatch.json") {
             banked = saved.banked
             startedAt = saved.startedAt
@@ -104,6 +113,7 @@ final class Stopwatch: ObservableObject {
     }
 
     private func persist() {
+        guard !StatusPopover.isSnapshot else { return }
         Storage.save(Saved(banked: banked, startedAt: startedAt, splits: splits), app: "Lap", file: "stopwatch.json")
     }
 

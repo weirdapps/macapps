@@ -155,7 +155,18 @@ final class KeyModel: ObservableObject {
         mode == .password ? Generator.passwordBits(options) : Generator.passphraseBits(words: wordCount, number: addNumber)
     }
 
-    init() { generate() }
+    init() {
+        // A snapshot shows the default settings, whatever the user chose. The argument domain is read
+        // before the saved one and is never written, so nothing persists.
+        if StatusPopover.isSnapshot {
+            UserDefaults.standard.setVolatileDomain([
+                "mode": Mode.password.rawValue, "length": 20, "lower": true, "upper": true, "digits": true, "symbols": true,
+                "avoidAmbiguous": false, "wordCount": 5, "separator": "-", "capitalize": false, "addNumber": false,
+                "clearClipboard": true,
+            ], forName: UserDefaults.argumentDomain)
+        }
+        generate()
+    }
 
     func generate() {
         var rng = SecureRandom()
@@ -270,7 +281,8 @@ struct Output: View {
                 Spacer()
                 Button { model.copy() } label: { Label("Copy", systemImage: "doc.on.doc") }
                     .buttonStyle(PillButtonStyle(Color.keymaker))
-                    .keyboardShortcut("c")
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+                    .help("Copy (⇧⌘C)")
             }
         }
         .padding(12)

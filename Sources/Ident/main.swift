@@ -166,7 +166,9 @@ enum Inspector {
     }
 
     static func inspect(_ raw: String) -> Info? {
-        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.lowercased().hasPrefix("urn:uuid:") { s = String(s.dropFirst(9)) }
+        if s.hasPrefix("{"), s.hasSuffix("}") { s = String(s.dropFirst().dropLast()) }
         let hex = s.replacingOccurrences(of: "-", with: "").lowercased()
         if hex.count == 32, hex.allSatisfy(\.isHexDigit), s.count == 32 || s.count == 36 {
             let bytes = stride(from: 0, to: 32, by: 2).map { UInt8(hex[hex.index(hex.startIndex, offsetBy: $0)...].prefix(2), radix: 16)! }
@@ -223,7 +225,17 @@ final class IdentModel: ObservableObject {
 
     private var generator = IDGenerator(rng: SystemRandomNumberGenerator())
 
-    init() { regenerate() }
+    init() {
+        // A snapshot shows the default settings, whatever the user chose. The argument domain is read
+        // before the saved one and is never written, so nothing persists.
+        if StatusPopover.isSnapshot {
+            UserDefaults.standard.setVolatileDomain([
+                "kind": Kind.uuid4.rawValue, "count": 5, "uppercase": false, "hyphens": true,
+                "length.nanoid": 21, "length.random": 32,
+            ], forName: UserDefaults.argumentDomain)
+        }
+        regenerate()
+    }
 
     var kind: Kind {
         get { Kind(rawValue: kindRaw) ?? .uuid4 }
