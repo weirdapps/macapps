@@ -4,6 +4,7 @@ import Combine
 import DiskArbitration
 import Kit
 import SwiftUI
+import UniformTypeIdentifiers
 
 IconKit.handleCommandLine(draw: appIcon)
 
@@ -28,13 +29,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         status.onSecondaryClick = { [weak self] in self?.drives.ejectAll(feedback: true) }
         hotKey = HotKey(keyCode: kVK_ANSI_E, modifiers: cmdKey | optionKey) { [weak self] in self?.drives.ejectAll(feedback: true) }
-        drives.$volumes
+        // objectWillChange covers both the volume list and the "Show Count" setting.
+        drives.objectWillChange
             .receive(on: RunLoop.main)
-            .sink { [weak self] volumes in
-                self?.status.setSymbol(volumes.isEmpty ? "eject" : "eject.fill", label: "\(volumes.count) ejectable volumes")
-                self?.status.setTitle(volumes.isEmpty || !(self?.drives.showCount ?? true) ? "" : "\(volumes.count)")
-            }
+            .sink { [weak self] in self?.updateStatus() }
             .store(in: &cancellables)
+        updateStatus()
+    }
+
+    private func updateStatus() {
+        let volumes = drives.volumes
+        status.setSymbol(volumes.isEmpty ? "eject" : "eject.fill", label: "\(volumes.count) ejectable volumes")
+        status.setTitle(volumes.isEmpty || !drives.showCount ? "" : "\(volumes.count)")
     }
 }
 
@@ -50,6 +56,21 @@ struct Drive: Identifiable, Equatable {
     let kind: Kind
 
     var id: URL { url }
+
+    init(url: URL, name: String, total: Int64, available: Int64, kind: Kind) {
+        self.url = url
+        self.name = name
+        self.total = total
+        self.available = available
+        self.kind = kind
+    }
+
+    /// Made-up disks for `--snapshot`, so a published image never shows the owner's volume names.
+    static let demo = [
+        Drive(url: URL(fileURLWithPath: "/Volumes/Backup"), name: "Backup", total: 2_000_000_000_000, available: 812_000_000_000, kind: .external),
+        Drive(url: URL(fileURLWithPath: "/Volumes/Installer"), name: "Installer", total: 14_200_000_000, available: 0, kind: .diskImage),
+        Drive(url: URL(fileURLWithPath: "/Volumes/SD Card"), name: "SD Card", total: 64_000_000_000, available: 41_300_000_000, kind: .removable),
+    ]
 
     static let keys: [URLResourceKey] = [
         .volumeLocalizedNameKey, .volumeTotalCapacityKey, .volumeAvailableCapacityKey, .volumeIsRootFileSystemKey,
@@ -75,6 +96,16 @@ struct Drive: Identifiable, Equatable {
               let disk = DADiskCreateFromVolumePath(kCFAllocatorDefault, session, url as CFURL),
               let info = DADiskCopyDescription(disk) as? [CFString: Any] else { return false }
         return (info[kDADiskDescriptionDeviceModelKey] as? String)?.contains("Disk Image") == true
+    }
+
+    /// The system's own icon for this kind of disk, for when there is no mounted path to ask Finder about.
+    var genericIcon: NSImage {
+        let file = switch kind {
+        case .external: "/System/Library/Extensions/IOStorageFamily.kext/Contents/Resources/External.icns"
+        case .removable: "/System/Library/Extensions/IOStorageFamily.kext/Contents/Resources/Removable.icns"
+        case .network, .diskImage: ""
+        }
+        return NSImage(contentsOfFile: file) ?? NSWorkspace.shared.icon(for: kind == .diskImage ? UTType(filenameExtension: "dmg") ?? .diskImage : .volume)
     }
 
     var symbol: String {
@@ -111,6 +142,10 @@ final class DriveList: ObservableObject {
     private var observers: [NSObjectProtocol] = []
 
     init() {
+        if StatusPopover.isSnapshot {
+            volumes = Drive.demo
+            return
+        }
         refresh()
         let center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification, NSWorkspace.didRenameVolumeNotification] {
@@ -121,6 +156,7 @@ final class DriveList: ObservableObject {
     }
 
     func refresh() {
+        guard !StatusPopover.isSnapshot else { return }
         let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: Drive.keys, options: [.skipHiddenVolumes]) ?? []
         let now = urls.compactMap(Drive.init(url:)).sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         if now != volumes { withAnimation(.snappy) { volumes = now } }
@@ -147,6 +183,8 @@ final class DriveList: ObservableObject {
                 do {
                     try NSWorkspace.shared.unmountAndEjectDevice(at: drive.url)
                 } catch {
+                    // Ejecting one partition ejects the whole disk, so its sibling is already gone: not a failure.
+                    guard FileManager.default.fileExists(atPath: drive.url.path) else { continue }
                     failures.append((drive, DriveList.explain(error, name: drive.name)))
                 }
             }
@@ -158,8 +196,10 @@ final class DriveList: ObservableObject {
                 }
                 self.refresh()
                 guard feedback else { return }
-                if let (drive, _) = failed.first {
-                    HUD.show(symbol: "exclamationmark.triangle.fill", title: failed.count == 1 ? "\(drive.name) is in use" : "\(failed.count) disks are in use",
+                if let (drive, message) = failed.first {
+                    // The HUD is small: name the cause only when it is the common one, the row shows the full sentence.
+                    let one = message.hasPrefix("\(drive.name) is in use") ? "\(drive.name) is in use" : "\(drive.name) could not be ejected"
+                    HUD.show(symbol: "exclamationmark.triangle.fill", title: failed.count == 1 ? one : "\(failed.count) disks could not be ejected",
                              tint: .orange)
                 } else {
                     HUD.show(symbol: "eject.fill", title: pending.count == 1 ? "Ejected \(pending[0].name)" : "Ejected \(pending.count) disks")
@@ -257,7 +297,9 @@ struct DriveRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
-                Image(nsImage: NSWorkspace.shared.icon(forFile: drive.url.path))
+                // A generic disk icon when the path is gone (just ejected, or a snapshot's made-up disk).
+                Image(nsImage: FileManager.default.fileExists(atPath: drive.url.path)
+                    ? NSWorkspace.shared.icon(forFile: drive.url.path) : drive.genericIcon)
                     .resizable()
                     .frame(width: 30, height: 30)
                 VStack(alignment: .leading, spacing: 1) {

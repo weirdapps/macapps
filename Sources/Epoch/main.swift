@@ -160,7 +160,7 @@ enum EpochParser {
     static let zoneNames: [String: Int] = ["UT": 0, "UTC": 0, "GMT": 0, "Z": 0, "EST": -5, "EDT": -4, "CST": -6, "CDT": -5,
                                            "MST": -7, "MDT": -6, "PST": -8, "PDT": -7]
     static let rfcPattern = try! NSRegularExpression(pattern:
-        #"^(?:([A-Za-z]{3}),?\s+)?(\d{1,2})\s+([A-Za-z]{3})\s+(\d{2,4})\s+(\d{2}):(\d{2})(?::(\d{2}))?\s*([+-]\d{4}|[A-Za-z]{1,3})?$"#)
+        #"^(?:([A-Za-z]{3}),?\s+)?(\d{1,2})\s+([A-Za-z]{3})\s+(\d{2,4})\s+(\d{2}):(\d{2})(?::(\d{2}))?\s*([+-]\d{4}|[A-Za-z]{1,3})?(?:\s*\([^)]*\))?$"#)
 
     static func rfc2822(_ text: String) -> Result<Parsed, ParseError>? {
         let ns = text as NSString
@@ -204,6 +204,12 @@ enum EpochParser {
             return .failure(ParseError("\(String(format: "%04d-%02d-%02d", year, month, day)) is not a real date."))
         }
         let base = Int64(date.timeIntervalSince1970.rounded()) + (second == 60 ? 1 : 0)
+        // A local time inside a daylight saving gap does not exist; the calendar moves it forward, so say so.
+        let landed = cal.dateComponents([.hour, .minute], from: date)
+        if offset == nil, !endOfDay, landed.hour != hour || landed.minute != minute {
+            return .success(Parsed(instant: Instant(seconds: base, nanos: nanos),
+                                   readAs: readAs + String(format: ", %02d:%02d skipped by DST", hour, minute)))
+        }
         return .success(Parsed(instant: Instant(seconds: base, nanos: nanos), readAs: readAs))
     }
 }
@@ -257,12 +263,12 @@ enum Formats {
         return delta < 0 ? "\(phrase) ago" : "in \(phrase)"
     }
 
-    static func rows(_ i: Instant, zone: TimeZone, now: Date) -> [(String, String)] {
+    static func rows(_ i: Instant, zone: TimeZone, local: TimeZone = .current, now: Date) -> [(String, String)] {
         func v(_ per: Int64) -> String { i.value(perSecond: per).map(String.init) ?? "out of range" }
         var rows = [("Seconds", v(1)), ("Milliseconds", v(1000)), ("Microseconds", v(1_000_000)), ("Nanoseconds", v(1_000_000_000)),
-                    ("ISO 8601 UTC", iso(i, zone: .gmt)), ("ISO 8601 local", iso(i, zone: .current)),
-                    ("RFC 2822", rfc2822(i, zone: .gmt)), ("Local", human(i, zone: .current)), ("UTC", human(i, zone: .gmt))]
-        if zone.identifier != TimeZone.current.identifier, !["GMT", "UTC"].contains(zone.identifier) {
+                    ("ISO 8601 UTC", iso(i, zone: .gmt)), ("ISO 8601 local", iso(i, zone: local)),
+                    ("RFC 2822", rfc2822(i, zone: .gmt)), ("Local", human(i, zone: local)), ("UTC", human(i, zone: .gmt))]
+        if zone.identifier != local.identifier, !["GMT", "UTC"].contains(zone.identifier) {
             rows.append((zone.identifier.split(separator: "/").last.map { $0.replacingOccurrences(of: "_", with: " ") } ?? zone.identifier,
                          human(i, zone: zone)))
             rows.append(("ISO 8601 zone", iso(i, zone: zone)))
@@ -276,8 +282,11 @@ enum Formats {
 final class EpochModel: ObservableObject {
     @Published var input = ""
     @Published private(set) var now = Date()
-    @AppStorage("unit") var unitRaw = EpochUnit.auto.rawValue
-    @AppStorage("zone") var zoneID = "America/New_York"
+    /// Snapshots read throwaway keys and a fixed local zone, so a published image never shows where the owner lives
+    /// and never saves demo values.
+    @AppStorage(StatusPopover.isSnapshot ? "snapshotDemo.unit" : "unit") var unitRaw = EpochUnit.auto.rawValue
+    @AppStorage(StatusPopover.isSnapshot ? "snapshotDemo.zone" : "zone") var zoneID = "America/New_York"
+    var localZone: TimeZone { StatusPopover.isSnapshot ? TimeZone(identifier: "Europe/Berlin")! : .current }
 
     private var timer: Timer?
 
@@ -287,7 +296,15 @@ final class EpochModel: ObservableObject {
                         "Pacific/Auckland"]
 
     init() {
-        input = String(Int64(Date().timeIntervalSince1970))
+        input = StatusPopover.isSnapshot ? "1700000000" : String(Int64(Date().timeIntervalSince1970))
+    }
+
+    /// The clock ticks ten times a second only while the panel is on screen.
+    func setLive(_ live: Bool) {
+        timer?.invalidate()
+        timer = nil
+        guard live else { return }
+        now = Date()
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.now = Date() }
         }
@@ -300,7 +317,7 @@ final class EpochModel: ObservableObject {
 
     var zone: TimeZone { TimeZone(identifier: zoneID) ?? .gmt }
 
-    var parsed: Result<Parsed, ParseError> { EpochParser.parse(input, unit: unit, zone: .current, now: now) }
+    var parsed: Result<Parsed, ParseError> { EpochParser.parse(input, unit: unit, zone: localZone, now: now) }
 
     func copy(_ text: String) {
         NSPasteboard.general.clearContents()
@@ -333,6 +350,9 @@ struct EpochView: View {
             }
         }
         .frame(width: 400)
+        .onAppear { model.setLive(true) }
+        .onDisappear { model.setLive(false) }
+        .onReceive(NotificationCenter.default.publisher(for: .popoverDidShow)) { _ in model.setLive(true) }
     }
 }
 
@@ -433,7 +453,7 @@ struct ResultList: View {
             switch model.parsed {
             case .success(let p):
                 VStack(spacing: 3) {
-                    ForEach(Formats.rows(p.instant, zone: model.zone, now: model.now), id: \.0) { label, value in
+                    ForEach(Formats.rows(p.instant, zone: model.zone, local: model.localZone, now: model.now), id: \.0) { label, value in
                         ResultRow(label: label, value: value)
                     }
                 }

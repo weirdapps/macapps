@@ -174,6 +174,14 @@ struct CronExpression: Equatable {
                 t = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: t))!
                 continue
             }
+            // Clocks going forward skip a wall-clock hour. Like Vixie cron and cronie, a fixed-time job due in the
+            // skipped hour runs once, right after the jump; jobs that run every hour just carry on.
+            let jump = cal.timeZone.secondsFromGMT(for: t) - cal.timeZone.secondsFromGMT(for: t.addingTimeInterval(-1))
+            if jump > 0, hour.count < 24, !runs.contains(t), skippedRun(before: t, seconds: jump, cal, hour: hour, minute: min) {
+                runs.append(t)
+                t = t.addingTimeInterval(1)
+                continue
+            }
             if !hour.contains(c.hour!) {
                 t = nextBoundary(t, .hour, cal)
                 continue
@@ -196,6 +204,16 @@ struct CronExpression: Equatable {
             t = t.addingTimeInterval(1)
         }
         return runs
+    }
+
+    /// Whether a run was due in the wall-clock times skipped just before `t`, where the clock jumped `seconds` ahead.
+    private func skippedRun(before t: Date, seconds: Int, _ cal: Calendar, hour: Set<Int>, minute: Set<Int>) -> Bool {
+        let last = cal.dateComponents([.hour, .minute], from: t.addingTimeInterval(-1))
+        let first = last.hour! * 60 + last.minute! + 1
+        return (0..<seconds / 60).contains { k in
+            let m = first + k
+            return hour.contains(m / 60 % 24) && minute.contains(m % 60)
+        }
     }
 
     /// The start of the next hour or minute, measured in real time so DST changes do not loop.
@@ -291,8 +309,12 @@ enum Describer {
             if let st = stride(dom.values, 1...31) { return "on every \(ordinal(st.step)) day of the month" + (st.start > 1 ? " from the \(ordinal(st.start))" : "") }
             return "on the \(runs(dom.values) { ordinal($0) }) of the month"
         }()
-        let dowText = runs(dow.values) { dayNames[$0] }
-        switch (dom.values.count < 31, dow.values.count < 7) {
+        // A set running over the weekend, such as 5-7, reads Friday through Sunday rather than Sunday, Friday and Saturday.
+        let wraps = dow.values.contains(0) && dow.values.contains(6) && !dow.values.contains(1)
+        let dowText = runs(wraps ? Set(dow.values.map { $0 == 0 ? 7 : $0 }) : dow.values) { dayNames[$0 % 7] }
+        // Vixie cron: when neither day field is written with *, either may match, so one full field means every day.
+        let everyDay = !dom.star && !dow.star && (dom.values.count == 31 || dow.values.count == 7)
+        switch everyDay ? (false, false) : (dom.values.count < 31, dow.values.count < 7) {
         case (true, true):
             // Vixie cron: two restricted day fields mean either day; a field written with * makes it both.
             sentence.append(dom.star || dow.star ? "\(domText), only if it is a \(dowText)" : "\(domText) and on every \(dowText)")
@@ -327,7 +349,10 @@ struct Preset: Identifiable {
 
 @MainActor
 final class CronModel: ObservableObject {
-    @AppStorage("expression") var expression = "30 9 * * 1-5"
+    /// Snapshots read a throwaway key and a fixed zone, so a published image never shows the owner's own schedule or
+    /// where they live, and never saves demo values.
+    @AppStorage(StatusPopover.isSnapshot ? "snapshotDemo.expression" : "expression") var expression = "30 9 * * 1-5"
+    var zone: TimeZone { StatusPopover.isSnapshot ? TimeZone(identifier: "Europe/London")! : .current }
     @Published private(set) var now = Date()
     private var timer: Timer?
 
@@ -339,7 +364,11 @@ final class CronModel: ObservableObject {
 
     var parsed: Result<CronExpression, FieldError> { CronExpression.parse(expression) }
 
-    func runs(_ e: CronExpression) -> [Date] { e.nextRuns(after: now, count: 10, calendar: .current) }
+    func runs(_ e: CronExpression) -> [Date] {
+        var cal = Calendar.current
+        cal.timeZone = zone
+        return e.nextRuns(after: now, count: 10, calendar: cal)
+    }
 }
 
 // MARK: - Views
@@ -460,7 +489,7 @@ struct RunList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text("Next runs, \(TimeZone.current.localizedName(for: .shortGeneric, locale: .current) ?? TimeZone.current.identifier)")
+            Text("Next runs, \(model.zone.localizedName(for: .shortGeneric, locale: .current) ?? model.zone.identifier)")
                 .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
             if case .success(let e) = model.parsed {
                 let runs = model.runs(e)
@@ -470,7 +499,7 @@ struct RunList: View {
                 } else {
                     VStack(spacing: 2) {
                         ForEach(Array(runs.enumerated()), id: \.offset) { i, date in
-                            RunRow(index: i, date: date, now: model.now, seconds: e.hasSeconds)
+                            RunRow(index: i, date: date, now: model.now, seconds: e.hasSeconds, zone: model.zone)
                         }
                     }
                 }
@@ -487,15 +516,22 @@ struct RunRow: View {
     let date: Date
     let now: Date
     let seconds: Bool
+    let zone: TimeZone
     @State private var hovering = false
+
+    private func inZone(_ style: Date.FormatStyle) -> Date.FormatStyle {
+        var style = style
+        style.timeZone = zone
+        return style
+    }
 
     var body: some View {
         HStack(spacing: 8) {
             Text("\(index + 1)").font(.system(size: 10, weight: .bold, design: .rounded)).foregroundStyle(.tertiary).frame(width: 16)
-            Text(date.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).year()))
+            Text(date.formatted(inZone(.dateTime.weekday(.abbreviated).day().month(.abbreviated).year())))
                 .font(.system(size: 12, weight: .medium))
-            Text(seconds ? date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute().second())
-                         : date.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute()))
+            Text(seconds ? date.formatted(inZone(.dateTime.hour(.twoDigits(amPM: .omitted)).minute().second()))
+                         : date.formatted(inZone(.dateTime.hour(.twoDigits(amPM: .omitted)).minute())))
                 .font(.system(size: 12, weight: .semibold, design: .rounded)).monospacedDigit()
             Spacer()
             Text(date, format: .relative(presentation: .named))

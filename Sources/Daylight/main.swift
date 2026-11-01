@@ -51,7 +51,9 @@ final class DaylightModel: ObservableObject {
     private var timer: Timer?
 
     init() {
-        place = Storage.load(Place.self, app: "Daylight", file: "place.json") ?? Cities.guess
+        // Snapshots show a fixed city, never the owner's saved place or time zone; didSet does not run in init, so nothing is saved.
+        place = StatusPopover.isSnapshot ? Cities.all.first { $0.name == "London" }!
+            : Storage.load(Place.self, app: "Daylight", file: "place.json") ?? Cities.guess
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.now = Date() }
         }
@@ -138,7 +140,8 @@ struct DaylightView: View {
     private var subtitle: String {
         var style = Date.FormatStyle.dateTime.weekday(.wide).day().month(.wide)
         style.timeZone = model.place.zone
-        let local = model.place.zone.secondsFromGMT(for: model.now) == TimeZone.current.secondsFromGMT(for: model.now)
+        // A snapshot never hints at the Mac's own zone.
+        let local = StatusPopover.isSnapshot || model.place.zone.secondsFromGMT(for: model.now) == TimeZone.current.secondsFromGMT(for: model.now)
         return model.now.formatted(style) + (local ? "" : ", local time there")
     }
 
@@ -392,6 +395,13 @@ enum Solar {
         // Twice, so the equation of time is taken at noon itself.
         for _ in 0..<2 {
             noon = midnightUTC.addingTimeInterval((720 - 4 * longitude - position(at: noon).equationOfTime) * 60)
+        }
+        // Where the clock runs more than 12 hours from the sun (UTC+13/+14 west of 180°), noon falls on the next or
+        // previous UTC date: move it back onto the local day asked for.
+        let landed = local.dateComponents([.year, .month, .day], from: noon)
+        if landed != c {
+            let ahead = (landed.year!, landed.month!, landed.day!) > (c.year!, c.month!, c.day!)
+            noon = noon.addingTimeInterval(ahead ? -86400 : 86400)
         }
         return noon
     }

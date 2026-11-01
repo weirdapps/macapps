@@ -40,15 +40,23 @@ enum Mode: String, CaseIterable {
 
 @MainActor
 final class Decider: ObservableObject {
-    @AppStorage("mode") var mode: Mode = .coin { willSet { objectWillChange.send() } }
-    @AppStorage("sides") var sides = 6 { willSet { objectWillChange.send() } }
-    @AppStorage("diceCount") var diceCount = 2 { willSet { objectWillChange.send() } }
-    @AppStorage("choices") var choicesText = "Pizza\nSushi\nTacos\nRamen" { willSet { objectWillChange.send() } }
+    /// Snapshots read throwaway keys, so a README image never shows the owner's own list and never saves demo values.
+    static func key(_ name: String) -> String { StatusPopover.isSnapshot ? "snapshotDemo.\(name)" : name }
+
+    @AppStorage(Decider.key("mode")) var mode: Mode = .coin { willSet { objectWillChange.send() } }
+    @AppStorage(Decider.key("sides")) var sides = 6 { willSet { objectWillChange.send() } }
+    @AppStorage(Decider.key("diceCount")) var diceCount = 2 { willSet { objectWillChange.send() } }
+    @AppStorage(Decider.key("choices")) var choicesText = "Pizza\nSushi\nTacos\nRamen" { willSet { objectWillChange.send() } }
 
     @Published private(set) var heads = true
     @Published private(set) var coinTurns = 0.0
     @Published private(set) var flips = (heads: 0, tails: 0)
-    @Published private(set) var dice: [Int] = [3, 5]
+    @Published private(set) var dice: [Int] = []
+    var clampedCount: Int { max(1, min(6, diceCount)) }
+
+    init() {
+        dice = (0..<clampedCount).map { _ in Int.random(in: 1...sides) }
+    }
     @Published private(set) var rolling = false
     @Published private(set) var picked: Int?
     @Published private(set) var highlight: Int?
@@ -75,7 +83,7 @@ final class Decider: ObservableObject {
     func roll() {
         guard !rolling else { return }
         rolling = true
-        let count = max(1, min(6, diceCount)), sides = self.sides
+        let count = clampedCount, sides = self.sides
         Task {
             // Tumble through random faces, slowing down, then settle.
             for step in 0..<12 {
@@ -86,6 +94,8 @@ final class Decider: ObservableObject {
                 dice = (0..<count).map { _ in Int.random(in: 1...sides) }
             }
             rolling = false
+            // The count or the die changed mid-roll: roll again so the dice match the controls.
+            if count != clampedCount || sides != self.sides { roll() }
         }
     }
 
@@ -312,7 +322,7 @@ struct PickPane: View {
                 Text(items.count < 2 ? "Add at least two options" : "\(items.count) options")
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
                 Spacer()
-                Button(editing ? "Done" : "Edit List") { withAnimation(.snappy) { editing.toggle(); model.clearPick() } }
+                Button(editing ? "Done" : "Edit List") { withAnimation(.snappy) { editing = !editing || model.choices.count < 2; model.clearPick() } }
                     .buttonStyle(.plain)
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Color.decide[1])
@@ -320,7 +330,7 @@ struct PickPane: View {
             .padding(.horizontal, 18)
             .padding(.top, 14)
 
-            if editing || items.count < 2 {
+            if editing {
                 TextEditor(text: $model.choicesText)
                     .font(.system(size: 13))
                     .scrollContentBackground(.hidden)
@@ -343,10 +353,13 @@ struct PickPane: View {
 
             Button(model.picked == nil ? "Pick One" : "Pick Again") { editing = false; model.pick() }
                 .buttonStyle(PillButtonStyle(Color.decide))
-                .keyboardShortcut(.space, modifiers: [])
+                // Space must reach the editor while the list is being typed.
+                .keyboardShortcut(editing ? nil : KeyboardShortcut(.space, modifiers: []))
                 .disabled(items.count < 2)
                 .padding(.bottom, 16)
         }
+        // Too few options: open the editor and keep it open while the second one is typed.
+        .onAppear { if model.choices.count < 2 { editing = true } }
     }
 }
 
