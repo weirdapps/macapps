@@ -42,17 +42,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 // MARK: - Sampling
 
-/// Raw CPU tick counters; usage is the difference between two readings.
+/// One core's raw 32-bit tick counters; usage is the difference between two readings.
 struct CPUTicks: Equatable {
-    var user: UInt64 = 0, system: UInt64 = 0, idle: UInt64 = 0, nice: UInt64 = 0
-    var total: UInt64 { user + system + idle + nice }
+    var user: UInt32 = 0, system: UInt32 = 0, idle: UInt32 = 0, nice: UInt32 = 0
 
-    /// Busy fractions between an earlier reading and this one.
-    func usage(since old: CPUTicks) -> CPUUsage {
-        let total = Double(self.total &- old.total)
+    /// Ticks elapsed since an earlier reading. Subtracting in UInt32 keeps the result right when a counter wraps.
+    func delta(since old: CPUTicks) -> TickDelta {
+        TickDelta(user: UInt64(user &- old.user) + UInt64(nice &- old.nice),
+                  system: UInt64(system &- old.system), idle: UInt64(idle &- old.idle))
+    }
+}
+
+/// Ticks spent in each state over an interval, summable across cores.
+struct TickDelta {
+    var user: UInt64 = 0, system: UInt64 = 0, idle: UInt64 = 0
+
+    static func + (a: TickDelta, b: TickDelta) -> TickDelta {
+        TickDelta(user: a.user + b.user, system: a.system + b.system, idle: a.idle + b.idle)
+    }
+
+    var usage: CPUUsage {
+        let total = Double(user + system + idle)
         guard total > 0 else { return CPUUsage() }
-        return CPUUsage(user: Double((user &- old.user) &+ (nice &- old.nice)) / total,
-                        system: Double(system &- old.system) / total)
+        return CPUUsage(user: Double(user) / total, system: Double(system) / total)
     }
 }
 
@@ -92,18 +104,8 @@ enum Pressure: Int {
 enum Probe {
     private static let host = mach_host_self()
 
-    static func cpuTicks() -> CPUTicks? {
-        var info = host_cpu_load_info()
-        var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info>.stride / MemoryLayout<integer_t>.stride)
-        let result = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { host_statistics(host, HOST_CPU_LOAD_INFO, $0, &count) }
-        }
-        guard result == KERN_SUCCESS else { return nil }
-        let t = info.cpu_ticks
-        return CPUTicks(user: UInt64(t.0), system: UInt64(t.1), idle: UInt64(t.2), nice: UInt64(t.3))
-    }
-
-    /// One reading per logical core.
+    /// One reading per logical core. The whole-machine figure is their sum: `host_statistics(HOST_CPU_LOAD_INFO)`
+    /// is rate-limited for non-Apple binaries and returns stale ticks when sampled often.
     static func coreTicks() -> [CPUTicks] {
         var cpuCount: natural_t = 0
         var info: processor_info_array_t?
@@ -117,10 +119,10 @@ enum Probe {
         let stride = Int(CPU_STATE_MAX)
         return (0..<Int(cpuCount)).map { i in
             let base = i * stride
-            return CPUTicks(user: UInt64(UInt32(bitPattern: info[base + Int(CPU_STATE_USER)])),
-                            system: UInt64(UInt32(bitPattern: info[base + Int(CPU_STATE_SYSTEM)])),
-                            idle: UInt64(UInt32(bitPattern: info[base + Int(CPU_STATE_IDLE)])),
-                            nice: UInt64(UInt32(bitPattern: info[base + Int(CPU_STATE_NICE)])))
+            return CPUTicks(user: UInt32(bitPattern: info[base + Int(CPU_STATE_USER)]),
+                            system: UInt32(bitPattern: info[base + Int(CPU_STATE_SYSTEM)]),
+                            idle: UInt32(bitPattern: info[base + Int(CPU_STATE_IDLE)]),
+                            nice: UInt32(bitPattern: info[base + Int(CPU_STATE_NICE)]))
         }
     }
 
@@ -179,12 +181,14 @@ final class SystemMonitor: ObservableObject {
     @Published private(set) var memoryHistory: [Double] = []
     @AppStorage("barShows") var barShows = BarShows.cpu
 
-    private var lastTicks: CPUTicks?
     private var lastCores: [CPUTicks] = []
     private var timer: Timer?
 
     init() {
-        lastTicks = Probe.cpuTicks()
+        if StatusPopover.isSnapshot {
+            showDemo()
+            return
+        }
         lastCores = Probe.coreTicks()
         // Screenshots get a full chart of real, faster samples.
         let interval = CommandLine.arguments.contains("--snapshot") ? 0.08 : 2
@@ -195,14 +199,24 @@ final class SystemMonitor: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.sample() }
     }
 
+    /// Fixed readings of a generic 16 GB Mac under moderate load, for screenshots: never this Mac's own figures.
+    private func showDemo() {
+        let gb: UInt64 = 1_073_741_824
+        cpu = CPUUsage(user: 0.25, system: 0.10)
+        cores = [0.62, 0.48, 0.55, 0.41, 0.36, 0.29, 0.12, 0.08, 0.15, 0.06]
+        memory = MemoryUsage(physical: 16 * gb, app: 7 * gb + gb / 2, wired: 2 * gb, compressed: gb / 2, cached: 4 * gb)
+        pressure = .normal
+        loads = [3.12, 2.84, 2.51]
+        cpuHistory = (0..<Self.capacity).map { i in 0.3 + 0.1 * sin(Double(i) / 4) + 0.05 * sin(Double(i) * 1.7) }
+        memoryHistory = (0..<Self.capacity).map { i in 0.6 + 0.03 * sin(Double(i) / 9) }
+    }
+
     private func sample() {
-        if let now = Probe.cpuTicks() {
-            if let lastTicks { cpu = now.usage(since: lastTicks) }
-            lastTicks = now
-        }
         let nowCores = Probe.coreTicks()
-        if nowCores.count == lastCores.count {
-            cores = zip(nowCores, lastCores).map { $0.usage(since: $1).total }
+        if !nowCores.isEmpty, nowCores.count == lastCores.count {
+            let deltas = zip(nowCores, lastCores).map { $0.delta(since: $1) }
+            cores = deltas.map(\.usage.total)
+            cpu = deltas.reduce(TickDelta(), +).usage
         }
         lastCores = nowCores
         if let m = Probe.memory() { memory = m }

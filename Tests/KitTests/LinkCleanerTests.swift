@@ -26,4 +26,18 @@ final class LinkCleanerTests: XCTestCase {
     func testLeavesPlainTextAlone() {
         XCTAssertEqual(LinkCleaner.clean("no links here?utm_source=1").removed, 0)
     }
+
+    func testAmazonRulesApplyToEveryStorefront() {
+        XCTAssertEqual(LinkCleaner.clean("https://www.amazon.de/dp/B0?ref_=abc&tag=x").text, "https://www.amazon.de/dp/B0?tag=x")
+        XCTAssertEqual(LinkCleaner.clean("https://www.amazon.co.uk/dp/B0?psc=1").text, "https://www.amazon.co.uk/dp/B0")
+        XCTAssertEqual(LinkCleaner.clean("https://example.com/?ref_=abc").removed, 0)
+        XCTAssertEqual(LinkCleaner.clean("https://s3.amazonaws.com/b/k?psc=1").removed, 0)
+    }
+
+    func testCleansSchemelessLinks() {
+        let r = LinkCleaner.clean("See www.example.com/p?id=3&utm_source=x now")
+        XCTAssertEqual(r.text, "See www.example.com/p?id=3 now")
+        XCTAssertEqual(r.removed, 1)
+        XCTAssertEqual(LinkCleaner.clean("www.example.com/?fbclid=1").text, "www.example.com/")
+    }
 }

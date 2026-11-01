@@ -120,18 +120,22 @@ struct Favourite: Codable, Identifiable, Equatable {
 
 @MainActor
 final class PaletteStore: ObservableObject {
-    @AppStorage("base") var baseHex = "#2A9D8F"
+    /// Snapshots read a store nothing ever writes, so they show the default colour, never the user's.
+    private static let defaults = StatusPopover.isSnapshot ? UserDefaults(suiteName: "com.weirdapps.palette.snapshot") : UserDefaults.standard
+    @AppStorage("base", store: PaletteStore.defaults) var baseHex = "#2A9D8F"
     @Published var favourites: [Favourite] { didSet { Storage.save(favourites, app: "Palette", file: "favourites.json") } }
     @Published var copied: String?
     private var clearCopied: DispatchWorkItem?
 
     init() {
-        favourites = Storage.load([Favourite].self, app: "Palette", file: "favourites.json") ?? []
+        favourites = StatusPopover.isSnapshot
+            ? [Favourite(base: RGB(r: 0.91, g: 0.44, b: 0.32), harmony: "Analogous"), Favourite(base: RGB(r: 0.15, g: 0.27, b: 0.33), harmony: "Analogous")]
+            : Storage.load([Favourite].self, app: "Palette", file: "favourites.json") ?? []
     }
 
     var base: RGB {
         get { RGB(hex: baseHex) ?? RGB(r: 0.16, g: 0.62, b: 0.56) }
-        set { baseHex = newValue.hex }
+        set { if !StatusPopover.isSnapshot { baseHex = newValue.hex } }
     }
 
     func copy(_ c: RGB) {

@@ -29,7 +29,7 @@ public enum LinkCleaner {
     }
 
     public static func clean(_ text: String) -> Result {
-        guard text.contains("://"),
+        guard text.contains("?"),
               let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
             return Result(text: text, removed: 0)
         }
@@ -47,9 +47,11 @@ public enum LinkCleaner {
     }
 
     static func cleanURL(_ string: String) -> (String, Int)? {
-        guard var components = URLComponents(string: string), let items = components.queryItems, !items.isEmpty else { return nil }
+        // Scheme-less links ("www.example.com/?utm_source=x") get a scheme to parse, removed again on output.
+        let prefix = string.contains("://") ? "" : "https://"
+        guard var components = URLComponents(string: prefix + string), let items = components.queryItems, !items.isEmpty else { return nil }
         let host = (components.host ?? "").lowercased()
-        let hostRules = perHost.first { host == $0.key || host.hasSuffix("." + $0.key) }?.value ?? []
+        let hostRules = rules(for: host)
         let kept = items.filter { item in
             let name = item.name.lowercased()
             return !(exact.contains(name) || hostRules.contains(item.name) || prefixes.contains { name.hasPrefix($0) })
@@ -57,6 +59,14 @@ public enum LinkCleaner {
         let count = items.count - kept.count
         guard count > 0 else { return (string, 0) }
         components.queryItems = kept.isEmpty ? nil : kept
-        return (components.string ?? string, count)
+        guard let rebuilt = components.string else { return (string, 0) }
+        return (String(rebuilt.dropFirst(prefix.count)), count)
+    }
+
+    /// Host rules for `host` or any parent domain; every Amazon storefront (amazon.de, amazon.co.uk...) shares amazon.com's.
+    static func rules(for host: String) -> Set<String> {
+        if let match = perHost.first(where: { host == $0.key || host.hasSuffix("." + $0.key) }) { return match.value }
+        if host.split(separator: ".").contains("amazon") { return perHost["amazon.com"] ?? [] }
+        return []
     }
 }

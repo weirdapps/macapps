@@ -62,7 +62,11 @@ struct JSONParser {
     private var i = 0
     private var depth = 0
 
-    init(_ text: String) { s = Array(text.unicodeScalars) }
+    init(_ text: String) {
+        // A byte order mark from some editors is not part of the JSON.
+        let scalars = Array(text.unicodeScalars)
+        s = scalars.first == "\u{FEFF}" ? Array(scalars.dropFirst()) : scalars
+    }
 
     static func parse(_ text: String) -> Result<JSONValue, JSONError> {
         var p = JSONParser(text)
@@ -310,7 +314,7 @@ final class PrettyModel: ObservableObject {
             HUD.show(symbol: "clipboard", title: "Clipboard is empty", tint: .secondary)
             return
         }
-        switch JSONFormatter.format(text, indent: indent, sortKeys: sortKeys) {
+        switch JSONFormatter.format(text, indent: minify ? nil : indent, sortKeys: sortKeys) {
         case .success(let out):
             pb.clearContents()
             pb.setString(out, forType: .string)
@@ -396,9 +400,7 @@ struct InputPane: View {
                 PaneButton("xmark", "Clear") { model.input = "" }
             }
             ZStack(alignment: .topLeading) {
-                TextEditor(text: $model.input)
-                    .font(.system(size: 12, design: .monospaced))
-                    .scrollContentBackground(.hidden)
+                CodeEditor(text: $model.input)
                     .padding(4)
                 if model.input.isEmpty {
                     Text("Paste or type JSON").font(.system(size: 12, design: .monospaced)).foregroundStyle(.tertiary)
@@ -407,6 +409,46 @@ struct InputPane: View {
             }
             .frame(height: 100)
             .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.quaternary.opacity(0.3)))
+        }
+    }
+}
+
+/// A plain-text editor with smart quotes, dashes and text replacement off: TextEditor would turn a typed " into a curly quote.
+struct CodeEditor: NSViewRepresentable {
+    @Binding var text: String
+
+    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSTextView.scrollableTextView()
+        scroll.drawsBackground = false
+        let view = scroll.documentView as! NSTextView
+        view.delegate = context.coordinator
+        view.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        view.drawsBackground = false
+        view.isRichText = false
+        view.allowsUndo = true
+        view.isAutomaticQuoteSubstitutionEnabled = false
+        view.isAutomaticDashSubstitutionEnabled = false
+        view.isAutomaticTextReplacementEnabled = false
+        view.isAutomaticSpellingCorrectionEnabled = false
+        view.isContinuousSpellCheckingEnabled = false
+        view.textContainerInset = .zero
+        view.string = text
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        context.coordinator.text = $text
+        if let view = scroll.documentView as? NSTextView, view.string != text { view.string = text }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var text: Binding<String>
+        init(text: Binding<String>) { self.text = text }
+
+        func textDidChange(_ notification: Notification) {
+            if let view = notification.object as? NSTextView { text.wrappedValue = view.string }
         }
     }
 }

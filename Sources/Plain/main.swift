@@ -82,12 +82,29 @@ final class ClipboardCleaner: ObservableObject {
 
     init() {
         lastChange = pasteboard.changeCount
+        if StatusPopover.isSnapshot {
+            // Fixed demo data for screenshots: never the user's clipboard, and the clipboard is not watched.
+            history = ClipboardCleaner.demoHistory
+            totals = Totals(cleaned: 128, trackers: 46, formatting: 71)
+            return
+        }
         history = Storage.load([Cleaning].self, app: "Plain", file: "history.json") ?? []
         totals = Storage.load(Totals.self, app: "Plain", file: "totals.json") ?? Totals()
         timer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll() }
         }
     }
+
+    private static let demoHistory: [Cleaning] = [
+        Cleaning(date: Date(timeIntervalSinceNow: -40), text: "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+                 formatting: false, trackers: 2, whitespace: false),
+        Cleaning(date: Date(timeIntervalSinceNow: -300), text: "The meeting moved to Thursday at 10:00, same room.",
+                 formatting: true, trackers: 0, whitespace: true),
+        Cleaning(date: Date(timeIntervalSinceNow: -1500), text: "Read this: https://example.com/article/swift-concurrency",
+                 formatting: true, trackers: 3, whitespace: false),
+        Cleaning(date: Date(timeIntervalSinceNow: -4000), text: "brew install --cask visual-studio-code",
+                 formatting: false, trackers: 0, whitespace: true),
+    ]
 
     func pause(for minutes: Int?) {
         resumeWork?.cancel()
@@ -139,7 +156,7 @@ final class ClipboardCleaner: ObservableObject {
         }
         var trimmed = false
         if trimWhitespace {
-            let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let t = ClipboardCleaner.trimmed(text)
             trimmed = t != text && !t.isEmpty
             if trimmed { text = t }
         }
@@ -151,6 +168,14 @@ final class ClipboardCleaner: ObservableObject {
         }
         copy(text)
         record(Cleaning(text: text, formatting: rich, trackers: trackers, whitespace: trimmed))
+    }
+
+    /// Drops trailing whitespace and leading blank lines, keeping the first line's indentation so pasted code still works.
+    static func trimmed(_ text: String) -> String {
+        var t = Substring(text)
+        while let c = t.last, c.isWhitespace { t.removeLast() }
+        while let nl = t.firstIndex(where: \.isNewline), t[..<nl].allSatisfy(\.isWhitespace) { t = t[t.index(after: nl)...] }
+        return String(t)
     }
 
     private func record(_ entry: Cleaning) {
@@ -187,7 +212,7 @@ struct PlainView: View {
                 .frame(height: 180)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 4) {
+                    VStack(spacing: 4) {
                         ForEach(cleaner.history.prefix(12)) { entry in
                             HistoryRow(entry: entry)
                         }

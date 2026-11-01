@@ -105,6 +105,12 @@ final class PortScanner: ObservableObject {
     private var timer: Timer?
 
     init() {
+        if StatusPopover.isSnapshot {
+            // Fixed demo listeners for screenshots: never this Mac's real processes.
+            listeners = PortScanner.demo
+            scannedOnce = true
+            return
+        }
         refresh()
         // Refresh while the panel is in use; the popover activates the app and closing it deactivates it.
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
@@ -112,6 +118,16 @@ final class PortScanner: ObservableObject {
         }
         timer?.tolerance = 1
     }
+
+    private static let demo: [Listener] = [
+        Listener(proto: .tcp, port: 3000, pid: 4211, command: "node", hosts: ["127.0.0.1"]),
+        Listener(proto: .tcp, port: 5173, pid: 4388, command: "vite", hosts: ["[::1]"]),
+        Listener(proto: .tcp, port: 5432, pid: 812, command: "postgres", hosts: ["127.0.0.1", "[::1]"]),
+        Listener(proto: .udp, port: 5353, pid: 402, command: "mDNSResponder", hosts: ["*"]),
+        Listener(proto: .tcp, port: 6379, pid: 905, command: "redis-server", hosts: ["127.0.0.1"]),
+        Listener(proto: .tcp, port: 8000, pid: 5102, command: "Python", hosts: ["*"]),
+        Listener(proto: .tcp, port: 8080, pid: 5240, command: "nginx", hosts: ["*"]),
+    ]
 
     var visible: [Listener] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
@@ -122,7 +138,7 @@ final class PortScanner: ObservableObject {
     }
 
     func refresh() {
-        guard !scanning else { return }
+        guard !scanning, !StatusPopover.isSnapshot else { return }
         scanning = true
         Task.detached(priority: .utility) {
             let found = Lsof.scan()
@@ -233,7 +249,8 @@ struct PortRow: View {
     @State private var hovering = false
 
     var body: some View {
-        let app = NSRunningApplication(processIdentifier: listener.pid)
+        // Demo PIDs could belong to a real app on this Mac, so snapshots never look them up.
+        let app = StatusPopover.isSnapshot ? nil : NSRunningApplication(processIdentifier: listener.pid)
         let colors = listener.proto == .tcp ? Palette.accent : Palette.udp
         HStack(spacing: 10) {
             Text(String(listener.port))
