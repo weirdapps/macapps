@@ -8,4 +8,5 @@ Fifty native macOS menu bar apps in one SwiftPM package. README.md lists them; d
 - Apps are AppKit status items hosting SwiftUI (`Kit/StatusPopover`), not `MenuBarExtra`, so hot keys can open the panel.
 - Running a binary outside its `.app` crashes Tempo (UNUserNotificationCenter needs a bundle). Use `build/<App>.app/Contents/MacOS/<App>`.
 - Screenshots: `<App> --snapshot out.png`. Icons: each app's `appIcon()`, rendered by `<App> --icon out.png` in the build script.
-- Not pushed anywhere yet. Publishing to GitHub (public) needs the owner's go-ahead.
+- Public at github.com/weirdapps/macapps; the website is `docs/` on GitHub Pages. Release: `scripts/release.sh`, then `gh release create vX.Y.Z build/release/*.zip`.
+- `--snapshot` must render fixed demo data (`StatusPopover.isSnapshot`), never the Mac's real clipboard, files, IPs, processes or settings: the screenshots are published.

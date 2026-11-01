@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Small Mac Apps</title>
+<meta name="description" content="Fifty small, native menu bar apps for macOS. Each does one thing, stays out of the way, and looks like it belongs on a Mac. Free and open source.">
+<meta property="og:title" content="Small Mac Apps">
+<meta property="og:description" content="Fifty small, native menu bar apps for macOS. Free and open source.">
+<meta property="og:image" content="https://weirdapps.github.io/macapps/icons.png">
+<link rel="icon" href="icons/Jot.png">
+<style>
+:root {
+  --bg: #ffffff;
+  --fg: #1d1d1f;
+  --muted: #6e6e73;
+  --faint: #a1a1a6;
+  --card: #f5f5f7;
+  --card-hover: #ececf0;
+  --line: rgba(0,0,0,.08);
+  --accent: #0071e3;
+  --shadow: 0 20px 50px rgba(0,0,0,.18);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #000000;
+    --fg: #f5f5f7;
+    --muted: #a1a1a6;
+    --faint: #6e6e73;
+    --card: #141416;
+    --card-hover: #1d1d20;
+    --line: rgba(255,255,255,.1);
+    --accent: #2997ff;
+    --shadow: 0 20px 60px rgba(0,0,0,.6);
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 17px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+header { text-align: center; padding: 96px 0 40px; }
+header .hero { width: min(560px, 100%); height: auto; margin: 0 auto 40px; display: block; }
+h1 {
+  font: 700 clamp(40px, 7vw, 64px)/1.05 -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
+  letter-spacing: -.03em;
+  margin: 0 0 16px;
+}
+.lede { font-size: clamp(19px, 2.4vw, 23px); color: var(--muted); max-width: 640px; margin: 0 auto 32px; line-height: 1.4; }
+.actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 11px 22px; border-radius: 980px;
+  font-weight: 600; font-size: 16px;
+  background: var(--fg); color: var(--bg);
+  transition: transform .15s ease, opacity .15s ease;
+}
+.btn:hover { text-decoration: none; transform: translateY(-1px); opacity: .9; }
+.btn.secondary { background: var(--card); color: var(--fg); }
+.meta { margin-top: 18px; font-size: 14px; color: var(--faint); }
+
+nav.filters { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 48px 0 32px; }
+nav.filters button {
+  font: inherit; font-size: 14px; font-weight: 500;
+  border: 0; cursor: pointer;
+  padding: 7px 15px; border-radius: 980px;
+  background: var(--card); color: var(--muted);
+  transition: background .15s, color .15s;
+}
+nav.filters button:hover { background: var(--card-hover); color: var(--fg); }
+nav.filters button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+
+section.group { margin-bottom: 56px; }
+section.group h2 {
+  font-size: 13px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--faint); margin: 0 0 16px 4px;
+}
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 16px; }
+.app {
+  all: unset; box-sizing: border-box; cursor: pointer;
+  display: flex; flex-direction: column; align-items: flex-start;
+  padding: 24px; border-radius: 22px; background: var(--card);
+  transition: transform .2s cubic-bezier(.2,.8,.2,1), background .2s;
+}
+.app:hover, .app:focus-visible { background: var(--card-hover); transform: translateY(-3px); }
+.app:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.app img { width: 84px; height: 84px; margin: -6px 0 14px -6px; filter: drop-shadow(0 6px 12px rgba(0,0,0,.18)); transition: transform .3s cubic-bezier(.2,.8,.2,1); }
+.app:hover img { transform: scale(1.06) rotate(-2deg); }
+.app .name { font-weight: 700; font-size: 19px; letter-spacing: -.01em; display: flex; align-items: center; gap: 8px; }
+.app .desc { color: var(--muted); font-size: 15px; line-height: 1.4; margin-top: 4px; }
+kbd {
+  font: 600 12px/1 -apple-system, BlinkMacSystemFont, sans-serif;
+  padding: 4px 7px; border-radius: 6px;
+  background: var(--bg); color: var(--muted); border: 1px solid var(--line);
+}
+
+.features { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 32px; padding: 40px 0 72px; border-top: 1px solid var(--line); }
+.features h3 { font-size: 17px; margin: 0 0 6px; }
+.features p { margin: 0; color: var(--muted); font-size: 15px; }
+
+footer { text-align: center; color: var(--faint); font-size: 14px; padding: 32px 0 64px; border-top: 1px solid var(--line); }
+footer a { color: var(--muted); }
+
+dialog {
+  border: 0; padding: 0; border-radius: 26px; width: min(560px, calc(100vw - 32px));
+  background: var(--bg); color: var(--fg); box-shadow: var(--shadow);
+  max-height: calc(100vh - 48px);
+}
+dialog::backdrop { background: rgba(0,0,0,.35); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+dialog[open] { animation: pop .28s cubic-bezier(.2,.8,.2,1); }
+@keyframes pop { from { opacity: 0; transform: scale(.96) translateY(8px); } }
+.sheet { padding: 32px; }
+.sheet-head { display: flex; gap: 18px; align-items: center; margin-bottom: 20px; }
+.sheet-head img { width: 96px; height: 96px; filter: drop-shadow(0 8px 16px rgba(0,0,0,.2)); }
+.sheet-head h2 { margin: 0; font-size: 30px; letter-spacing: -.02em; }
+.sheet-head p { margin: 2px 0 0; color: var(--muted); }
+.shot { display: block; width: 100%; max-width: 400px; margin: 0 auto 24px; border-radius: 14px; border: 1px solid var(--line); box-shadow: 0 10px 30px rgba(0,0,0,.12); }
+.sheet .actions { justify-content: flex-start; }
+.close {
+  position: absolute; top: 14px; right: 14px; width: 30px; height: 30px; border-radius: 50%;
+  border: 0; cursor: pointer; background: var(--card); color: var(--muted); font-size: 18px; line-height: 30px;
+}
+.close:hover { background: var(--card-hover); color: var(--fg); }
+
+@media (max-width: 600px) {
+  header { padding-top: 56px; }
+  .grid { grid-template-columns: 1fr 1fr; gap: 12px; }
+  .app { padding: 18px; }
+  .app img { width: 64px; height: 64px; }
+  .app .desc { font-size: 14px; }
+  .wrap { padding: 0 16px; }
+}
+@media (max-width: 380px) { .grid { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <img class="hero" src="icons.png" alt="Fifty app icons" width="1720" height="860">
+    <h1>Small Mac Apps</h1>
+    <p class="lede">Fifty native menu bar apps for macOS. Each does one thing, stays out of the way, and looks like it belongs on a Mac.</p>
+    <div class="actions">
+      <a class="btn" href="https://github.com/weirdapps/macapps/releases/latest/download/SmallMacApps.zip">Download all</a>
+      <a class="btn secondary" href="https://github.com/weirdapps/macapps">Source on GitHub</a>
+    </div>
+    <p class="meta">Free and open source · macOS 14 or later · Apple silicon · <a href="https://github.com/weirdapps/macapps#install">First launch help</a></p>
+  </header>
+
+  <nav class="filters" id="filters" aria-label="Filter by category"></nav>
+  <main id="groups"></main>
+
+  <div class="features">
+    <div><h3>Native</h3><p>AppKit and SwiftUI, no web views. Each app is a few hundred kilobytes and idles at zero CPU.</p></div>
+    <div><h3>Private</h3><p>Nothing leaves your Mac. Only Reach and Address touch the network, and only for their one job.</p></div>
+    <div><h3>No permissions</h3><p>No Accessibility, Screen Recording or Automation. Global shortcuts use Carbon hot keys. Only Bin asks for Full Disk Access, to read the Trash.</p></div>
+    <div><h3>Out of the way</h3><p>No Dock icons, no windows, no onboarding. Every app has launch at login in its gear menu.</p></div>
+  </div>
+</div>
+
+<footer>
+  Made in Athens by <a href="https://weirdapps.github.io/resume/">Dimitrios Plessas</a>, with Claude Code. MIT licensed.
+</footer>
+
+<dialog id="sheet" aria-labelledby="sheet-title">
+  <button class="close" aria-label="Close" onclick="sheet.close()">×</button>
+  <div class="sheet">
+    <div class="sheet-head">
+      <img id="sheet-icon" alt="">
+      <div><h2 id="sheet-title"></h2><p id="sheet-desc"></p></div>
+    </div>
+    <img class="shot" id="sheet-shot" alt="">
+    <div class="actions">
+      <a class="btn" id="sheet-dl">Download</a>
+      <a class="btn secondary" id="sheet-src">Source</a>
+    </div>
+  </div>
+</dialog>
+
+<script>
+const REPO = "https://github.com/weirdapps/macapps";
+const GROUPS = [
+  ["Write and organise", [
+    ["Jot", "A scratchpad in your menu bar", "⌥⌘J"],
+    ["Stash", "Text snippets one click away", "⌥⌘S"],
+    ["Ticks", "A quick checklist in your menu bar"],
+    ["Tally", "Counters for anything"],
+    ["Until", "Countdowns to the days that matter"],
+    ["Decide", "Coin flips, dice and picks for when you cannot choose"],
+    ["Measure", "Word counts and reading time for copied text"],
+  ]],
+  ["Clipboard and text", [
+    ["Plain", "Clean clipboard text and links"],
+    ["Case", "Change the case of copied text"],
+    ["Lorem", "Placeholder text and fake data on tap"],
+    ["Glyphs", "Special characters a click away", "⌥⌘G"],
+    ["Tabula", "Turn copied CSV into Markdown tables and back"],
+    ["Keymaker", "Strong passwords and passphrases on demand"],
+  ]],
+  ["Time and focus", [
+    ["Meridian", "World clocks in your menu bar"],
+    ["Tempo", "A focus timer in your menu bar", "⌥⌘T"],
+    ["Month", "A calendar with week numbers"],
+    ["Lap", "A stopwatch with laps"],
+    ["Nudge", "Quick reminders from your menu bar", "⌥⌘R"],
+    ["Daylight", "Sunrise, sunset and golden hour"],
+    ["Luna", "The moon phase in your menu bar"],
+  ]],
+  ["Wellbeing", [
+    ["Sip", "Hydration tracking in your menu bar"],
+    ["Blink", "Eye breaks, the 20-20-20 way"],
+    ["Hush", "Mute your microphone from anywhere", "⌥⌘M"],
+  ]],
+  ["System", [
+    ["Pulse", "CPU and memory at a glance"],
+    ["Charge", "Your battery, in detail"],
+    ["Room", "Disk space for every volume"],
+    ["Flow", "Network speed in your menu bar"],
+    ["Awake", "Keep your Mac awake", "⌥⌘A"],
+    ["Hogs", "What is eating your CPU and memory"],
+    ["Bin", "How full is the Trash"],
+    ["Eject", "Eject every disk in one go", "⌥⌘E"],
+    ["Since", "Uptime, sleep and wake, at a glance"],
+  ]],
+  ["Network", [
+    ["Reach", "Is the internet up, and how fast"],
+    ["Address", "Every IP address, one click to copy"],
+    ["Ports", "Who is listening on which port"],
+  ]],
+  ["Colour and design", [
+    ["Swatch", "A colour picker in your menu bar", "⌥⌘C"],
+    ["Contrast", "A WCAG contrast checker"],
+    ["Palette", "Colour palettes from one colour"],
+    ["Convert", "A unit converter in your menu bar"],
+  ]],
+  ["Developer tools", [
+    ["Codec", "Encode and decode text"],
+    ["Pretty", "Format and validate JSON", "⌥⌘F"],
+    ["Ident", "Generate UUIDs, ULIDs and random IDs"],
+    ["Hash", "Hash text and files, and check them"],
+    ["Epoch", "Convert Unix timestamps and dates"],
+    ["Regex", "Test regular expressions live"],
+    ["Square", "Make and read QR codes"],
+    ["Cron", "Explain cron schedules and their next runs"],
+    ["Token", "Decode and verify JSON Web Tokens"],
+    ["Compare", "Compare two texts line by line"],
+    ["Sum", "A calculator in your menu bar", "⌥⌘K"],
+  ]],
+];
+
+const el = (tag, props = {}, ...kids) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids); return n; };
+const groupsEl = document.getElementById("groups");
+const filtersEl = document.getElementById("filters");
+const sheet = document.getElementById("sheet");
+const APPS = {};
+
+for (const [title, apps] of GROUPS) {
+  const grid = el("div", { className: "grid" });
+  for (const [name, desc, key] of apps) {
+    APPS[name] = { desc, key };
+    const nameEl = el("span", { className: "name" }, name);
+    if (key) nameEl.append(el("kbd", {}, key));
+    grid.append(el("button", { className: "app", onclick: () => openApp(name), ariaLabel: `${name}: ${desc}` },
+      el("img", { src: `icons/${name}.png`, alt: "", loading: "lazy", width: 84, height: 84 }),
+      nameEl,
+      el("span", { className: "desc" }, desc)));
+  }
+  groupsEl.append(el("section", { className: "group", dataset: { group: title } }, el("h2", {}, title), grid));
+}
+
+function setFilter(group) {
+  for (const b of filtersEl.children) b.setAttribute("aria-pressed", String(b.dataset.group === group));
+  for (const s of groupsEl.children) s.hidden = group !== "All" && s.dataset.group !== group;
+}
+for (const g of ["All", ...GROUPS.map(g => g[0])]) {
+  filtersEl.append(el("button", { onclick: () => setFilter(g), dataset: { group: g } }, g));
+}
+setFilter("All");
+
+function openApp(name) {
+  const a = APPS[name];
+  document.getElementById("sheet-icon").src = `icons/${name}.png`;
+  document.getElementById("sheet-title").textContent = name;
+  document.getElementById("sheet-desc").textContent = a.desc + (a.key ? `. Shortcut ${a.key}.` : ".");
+  const shot = document.getElementById("sheet-shot");
+  shot.src = `screenshots/${name}.png`;
+  shot.alt = `The ${name} panel`;
+  document.getElementById("sheet-dl").href = `${REPO}/releases/latest/download/${name}.zip`;
+  document.getElementById("sheet-src").href = `${REPO}/tree/master/Sources/${name}`;
+  history.replaceState(null, "", `#${name.toLowerCase()}`);
+  sheet.showModal();
+}
+sheet.addEventListener("close", () => history.replaceState(null, "", location.pathname));
+sheet.addEventListener("click", e => { if (e.target === sheet) sheet.close(); });
+const hash = location.hash.slice(1);
+const match = Object.keys(APPS).find(n => n.toLowerCase() === hash);
+if (match) openApp(match);
+</script>
+</body>
+</html>
