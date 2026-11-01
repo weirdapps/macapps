@@ -2,7 +2,7 @@
   <img src="docs/icons.png" width="720" alt="Fifty app icons">
 </p>
 
-<h1 align="center">Small Mac Apps</h1>
+<h1 align="center">Useful Mac Menu Apps</h1>
 
 <p align="center">
   Fifty native menu bar apps for macOS.<br>
