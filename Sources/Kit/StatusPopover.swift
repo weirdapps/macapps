@@ -14,9 +14,19 @@ public final class StatusPopover: NSObject, NSPopoverDelegate {
     /// Called on right-click or control-click instead of opening the popover.
     public var onSecondaryClick: (() -> Void)?
 
+    /// True when the app runs as `App --snapshot out.png`; apps show fixed demo data then, never the user's own.
+    public static let isSnapshot = CommandLine.arguments.contains("--snapshot")
+
+    /// `.transient` by default. Apps that take drags from Finder or open panels use `.semitransient`.
+    public var behavior: NSPopover.Behavior {
+        get { popover.behavior }
+        set { popover.behavior = newValue }
+    }
+
     public init<Content: View>(symbol: String, accessibilityLabel: String, @ViewBuilder content: () -> Content) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
+        StatusPopover.installEditMenu()
         popover.behavior = .transient
         popover.animates = true
         popover.delegate = self
@@ -49,6 +59,25 @@ public final class StatusPopover: NSObject, NSPopoverDelegate {
                 exit(0)
             }
         }
+    }
+
+    /// Text fields get Cmd+C, V, X, A and Z through the main menu, which an accessory app does not have.
+    /// This hidden Edit menu is never shown, but it makes those shortcuts work in every panel.
+    private static func installEditMenu() {
+        guard NSApp.mainMenu == nil else { return }
+        let main = NSMenu()
+        let item = NSMenuItem()
+        main.addItem(item)
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        item.submenu = edit
+        NSApp.mainMenu = main
     }
 
     public static func symbol(_ name: String, label: String, pointSize: CGFloat = 14, weight: NSFont.Weight = .medium) -> NSImage? {

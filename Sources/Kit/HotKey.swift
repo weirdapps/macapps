@@ -9,6 +9,8 @@ public final class HotKey {
 
     private var ref: EventHotKeyRef?
     private let id: UInt32
+    /// False when another app already owns the combination, so the shortcut will never fire.
+    public private(set) var isRegistered = false
 
     /// - Parameters:
     ///   - keyCode: a `kVK_*` virtual key code.
@@ -19,7 +21,9 @@ public final class HotKey {
         HotKey.nextID += 1
         HotKey.handlers[id] = handler
         let hotKeyID = EventHotKeyID(signature: OSType(0x4B49_5421), id: id)
-        RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), hotKeyID, GetApplicationEventTarget(), 0, &ref)
+        let status = RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), hotKeyID, GetApplicationEventTarget(), 0, &ref)
+        isRegistered = status == noErr
+        if !isRegistered { NSLog("HotKey: could not register key code %d (status %d); another app may own it", keyCode, status) }
     }
 
     deinit {
