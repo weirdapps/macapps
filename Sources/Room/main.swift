@@ -50,8 +50,11 @@ struct Volume: Identifiable, Equatable {
     let isBoot: Bool
     let isEjectable: Bool
     let isDiskImage: Bool
+    /// Only for the demo volumes, which have no real path to take an icon from.
+    var demoIcon: String?
 
     var id: URL { url }
+    var icon: NSImage { demoIcon.flatMap(NSImage.init(contentsOfFile:)) ?? NSWorkspace.shared.icon(forFile: url.path) }
     var used: Int64 { max(0, total - available) }
     var usedFraction: Double { total > 0 ? Double(used) / Double(total) : 0 }
 
@@ -74,6 +77,26 @@ struct Volume: Identifiable, Equatable {
         isDiskImage = Volume.isDiskImage(url)
     }
 
+    /// Fixed volumes for the website screenshot.
+    init(demo name: String, path: String, total: Int64, available: Int64, isBoot: Bool = false, isDiskImage: Bool = false) {
+        url = URL(fileURLWithPath: path)
+        self.name = name
+        self.total = total
+        self.available = available
+        self.isBoot = isBoot
+        isEjectable = !isBoot
+        self.isDiskImage = isDiskImage
+        if !isBoot {
+            demoIcon = "/System/Library/Extensions/IOStorageFamily.kext/Contents/Resources/\(isDiskImage ? "Removable" : "External").icns"
+        }
+    }
+
+    static let demo = [
+        Volume(demo: "Macintosh HD", path: "/", total: 994_662_584_320, available: 612_400_000_000, isBoot: true),
+        Volume(demo: "Backup", path: "/Volumes/Backup", total: 2_000_189_177_856, available: 1_240_000_000_000),
+        Volume(demo: "Installer", path: "/Volumes/Installer", total: 1_073_741_824, available: 112_000_000, isDiskImage: true),
+    ]
+
     /// Disk images are mounted from a file; `hdiutil`-backed volumes report a disk image as their device model.
     private static func isDiskImage(_ url: URL) -> Bool {
         guard let session = DASessionCreate(kCFAllocatorDefault),
@@ -87,7 +110,8 @@ struct Volume: Identifiable, Equatable {
         var value = Double(max(0, bytes))
         var unit = 0
         let units = ["bytes", "KB", "MB", "GB", "TB", "PB"]
-        while value >= 1000 && unit < units.count - 1 {
+        // Round before choosing the unit, so 999.96 GB reads "1 TB", not "1000 GB".
+        while value.rounded() >= 1000 && unit < units.count - 1 {
             value /= 1000
             unit += 1
         }
@@ -127,6 +151,10 @@ final class DiskStore: ObservableObject {
     }
 
     func refresh() {
+        guard !StatusPopover.isSnapshot else {
+            if volumes.isEmpty { volumes = Volume.demo }
+            return
+        }
         let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: Volume.keys,
                                                          options: [.skipHiddenVolumes]) ?? []
         let now = urls.compactMap(Volume.init(url:)).sorted { a, b in
@@ -264,7 +292,7 @@ struct VolumeRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: volume.url.path))
+            Image(nsImage: volume.icon)
                 .resizable()
                 .frame(width: 30, height: 30)
             VStack(alignment: .leading, spacing: 5) {

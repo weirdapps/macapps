@@ -25,8 +25,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             SipView().environmentObject(self.log)
         }
         status.onSecondaryClick = { [weak self] in self?.log.add(self?.log.defaultGlass ?? 250) }
-        UNUserNotificationCenter.current().delegate = self
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        // Screenshots must not ask for notification permission.
+        if !StatusPopover.isSnapshot {
+            UNUserNotificationCenter.current().delegate = self
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        }
         log.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] in self?.updateStatus() }
@@ -89,6 +92,17 @@ final class WaterLog: ObservableObject {
     private var timer: Timer?
 
     init() {
+        if StatusPopover.isSnapshot {
+            // Fixed demo data for the website screenshot.
+            for (back, ml) in [2250, 1750, 2000, 1500, 2500, 1800].enumerated() {
+                days[WaterLog.key(Calendar.current.date(byAdding: .day, value: -(back + 1), to: Date())!)] = ml
+            }
+            let now = Date()
+            drinks = [Drink(at: now.addingTimeInterval(-4 * 3600), ml: 330), Drink(at: now.addingTimeInterval(-2 * 3600), ml: 500),
+                      Drink(at: now.addingTimeInterval(-1800), ml: 250)]
+            days[WaterLog.key(now)] = 1080
+            return
+        }
         if let saved = Storage.load(Saved.self, app: "Sip", file: "log.json") {
             days = saved.days
             drinks = saved.drinks.filter { Calendar.current.isDateInToday($0.at) }
@@ -98,7 +112,10 @@ final class WaterLog: ObservableObject {
         }
     }
 
-    static func key(_ date: Date) -> String { date.formatted(.iso8601.year().month().day()) }
+    /// Local calendar day; the ISO 8601 style defaults to UTC, which would roll the day over at the wrong hour.
+    static func key(_ date: Date) -> String {
+        date.formatted(Date.ISO8601FormatStyle(timeZone: .current).year().month().day())
+    }
 
     var today: Int { days[WaterLog.key(Date())] ?? 0 }
     var progress: Double { goal > 0 ? min(1, Double(today) / Double(goal)) : 0 }

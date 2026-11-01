@@ -69,6 +69,8 @@ struct Outcome: Equatable {
 
 enum RegexEngine {
     static let limit = 5000
+    /// A pattern that backtracks without end is stopped after this long.
+    static let timeLimit: TimeInterval = 1
 
     static func run(pattern: String, flags: Flags, text: String, template: String?) -> Outcome {
         guard !pattern.isEmpty else { return Outcome() }
@@ -79,9 +81,15 @@ enum RegexEngine {
             return Outcome(error: describe(error, pattern: pattern))
         }
         let ns = text as NSString
-        let names = namedGroupNumbers(pattern)
+        let names = namedGroupNumbers(pattern, extendedMode: flags.contains(.extended))
         var out = Outcome()
-        regex.enumerateMatches(in: text, range: NSRange(location: 0, length: ns.length)) { result, _, stop in
+        let deadline = Date().addingTimeInterval(timeLimit)
+        regex.enumerateMatches(in: text, options: .reportProgress, range: NSRange(location: 0, length: ns.length)) { result, _, stop in
+            if Date() > deadline {
+                out = Outcome(error: "The pattern takes too long on this text. Look for nested repeats like (a+)+.")
+                stop.pointee = true
+                return
+            }
             guard let result else { return }
             if out.matches.count == limit { out.truncated = true; stop.pointee = true; return }
             var groups: [Group] = []
@@ -92,7 +100,7 @@ enum RegexEngine {
             for (name, n) in names where n < groups.count { groups[n].name = name }
             out.matches.append(Match(range: result.range, groups: groups))
         }
-        if let template {
+        if let template, out.error == nil {
             out.replaced = regex.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: ns.length),
                                                           withTemplate: expandNames(template, names: names))
         }
@@ -101,22 +109,46 @@ enum RegexEngine {
 
     /// NSRegularExpression templates know $1 but not ${name}; turn names into numbers.
     static func expandNames(_ template: String, names: [String: Int]) -> String {
-        var result = template
-        for (name, n) in names { result = result.replacingOccurrences(of: "${\(name)}", with: "$\(n)") }
+        var result = ""
+        var i = template.startIndex
+        while i < template.endIndex {
+            if template[i] == "\\" {
+                // An escaped character stays as written: \${name} is a literal ${name}.
+                let end = template.index(i, offsetBy: 2, limitedBy: template.endIndex) ?? template.endIndex
+                result += template[i..<end]
+                i = end
+                continue
+            }
+            if template[i...].hasPrefix("${"), let close = template[i...].firstIndex(of: "}"),
+               let n = names[String(template[template.index(i, offsetBy: 2)..<close])] {
+                result += "$\(n)"
+                i = template.index(after: close)
+                continue
+            }
+            result.append(template[i])
+            i = template.index(after: i)
+        }
         return result
     }
 
     /// Numbers each capturing group by the position of its opening parenthesis, as ICU does.
-    static func namedGroupNumbers(_ pattern: String) -> [String: Int] {
+    static func namedGroupNumbers(_ pattern: String, extendedMode: Bool = false) -> [String: Int] {
         let chars = Array(pattern)
         var numbers: [String: Int] = [:]
         var count = 0
         var i = 0
         var inClass = false
+        // In extended mode, set by the x flag or an inline (?x), # starts a comment that runs to the end of the line.
+        var extended = extendedMode
         while i < chars.count {
             let c = chars[i]
             if c == "\\" { i += 2; continue }
             if inClass { if c == "]" { inClass = false }; i += 1; continue }
+            if extended, c == "#" {
+                while i < chars.count, chars[i] != "\n" { i += 1 }
+                continue
+            }
+            extended = extended || (c == "(" && chars[i...].starts(with: Array("(?x)")))
             if c == "[" { inClass = true; i += 1; continue }
             if c == "(" {
                 if i + 1 < chars.count, chars[i + 1] == "?" {
@@ -156,20 +188,24 @@ enum RegexEngine {
 
 @MainActor
 final class RegexModel: ObservableObject {
-    @AppStorage("pattern") var pattern = #"(?<user>[\w.+-]+)@(?<domain>[\w-]+(?:\.[\w-]+)+)"# { didSet { refresh() } }
-    @AppStorage("flags") var flagBits = 0 { didSet { refresh() } }
-    @AppStorage("replacement") var replacement = "${user} at $2" { didSet { refresh() } }
-    @AppStorage("sample") var sample = """
+    @AppStorage("pattern", store: RegexModel.store) var pattern = #"(?<user>[\w.+-]+)@(?<domain>[\w-]+(?:\.[\w-]+)+)"# { didSet { refresh() } }
+    @AppStorage("flags", store: RegexModel.store) var flagBits = 0 { didSet { refresh() } }
+    @AppStorage("replacement", store: RegexModel.store) var replacement = "${user} at $2" { didSet { refresh() } }
+    @AppStorage("sample", store: RegexModel.store) var sample = """
     Write to ada@example.com or grace.hopper@navy.mil.
     Bounces go to postmaster@mail.example.org.
     """ { didSet { refresh() } }
     @Published private(set) var outcome = Outcome()
+
+    /// The website screenshot reads an empty store, so it shows the built-in example and never the user's own text.
+    static let store: UserDefaults = StatusPopover.isSnapshot ? UserDefaults(suiteName: "com.weirdapps.regex.snapshot") ?? .standard : .standard
     @Published var selected = 0
 
     private var generation = 0
 
     init() {
-        outcome = RegexEngine.run(pattern: pattern, flags: flags, text: sample, template: replacement)
+        // Off the main thread like every other run, so a runaway saved pattern cannot freeze launch.
+        refresh()
     }
 
     var flags: Flags {

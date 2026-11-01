@@ -150,6 +150,9 @@ final class ReachProbe: ObservableObject {
     private let monitor = NWPathMonitor()
     private var timer: Timer?
     private var inFlight = false
+    /// Sleep drops the network and the first checks after wake fail while Wi-Fi rejoins; neither is an outage.
+    private var quietUntil = Date.distantPast
+    private var observers: [NSObjectProtocol] = []
     private let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
@@ -166,7 +169,27 @@ final class ReachProbe: ObservableObject {
     }
 
     init() {
+        if StatusPopover.isSnapshot {
+            // Fixed demo data for the website screenshot: no real test URL, network or history.
+            link = .wifi
+            let now = Date()
+            let ms: [Double?] = [31, 34, 29, 33, 41, 30, 28, 36, 32, 30, 29, 35, 47, 31, 30, 33, 29, 38, 32, 31,
+                                 30, 34, 28, 31, 210, 64, 33, 30, 29, 32, 31, 35, 30, 28, 33, 31, nil, nil, 52, 34,
+                                 30, 29, 32, 31, 36, 30, 33, 29, 31, 30, 34, 32, 28, 31, 30, 33, 29, 31, 30, 32]
+            samples = ms.enumerated().map { Sample(date: now.addingTimeInterval(Double($0.offset - ms.count) * 10), milliseconds: $0.element) }
+            outages = [Outage(start: now.addingTimeInterval(-240), end: now.addingTimeInterval(-215), reason: "No response from www.apple.com"),
+                       Outage(start: now.addingTimeInterval(-86_400 - 5_000), end: now.addingTimeInterval(-86_400 - 4_810),
+                              reason: "Network connection lost")]
+            return
+        }
         outages = Storage.load([Outage].self, app: "Reach", file: "outages.json") ?? []
+        let workspace = NSWorkspace.shared.notificationCenter
+        observers.append(workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.quietUntil = .distantFuture }
+        })
+        observers.append(workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.quietUntil = Date().addingTimeInterval(20) }
+        })
         monitor.pathUpdateHandler = { [weak self] path in
             DispatchQueue.main.async { self?.update(path) }
         }
@@ -226,7 +249,7 @@ final class ReachProbe: ObservableObject {
     }
 
     private func beginOutage(reason: String) {
-        guard outages.first?.end != nil || outages.isEmpty else { return }
+        guard Date() >= quietUntil, outages.first?.end != nil || outages.isEmpty else { return }
         outages.insert(Outage(start: Date(), reason: reason), at: 0)
         outages = Array(outages.prefix(100))
         save()
@@ -243,7 +266,10 @@ final class ReachProbe: ObservableObject {
         save()
     }
 
-    func save() { Storage.save(outages, app: "Reach", file: "outages.json") }
+    func save() {
+        guard !StatusPopover.isSnapshot else { return }
+        Storage.save(outages, app: "Reach", file: "outages.json")
+    }
 
     func editURL() {
         let alert = NSAlert()

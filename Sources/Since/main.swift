@@ -112,7 +112,18 @@ enum Timeline {
     static func segments(events: [Event], from: Date, to: Date) -> [Segment] {
         guard to > from else { return [] }
         let sorted = events.sorted { $0.date < $1.date }
-        var state = sorted.last { $0.date <= from }?.kind.state ?? .unknown
+        // A Mac wakes to the lock screen when it was locked before sleeping; it stays locked until unlock.
+        var locked = false
+        func next(after e: Event) -> MacState {
+            switch e.kind {
+            case .lock: locked = true
+            case .unlock, .boot, .launch, .quit: locked = false
+            default: break
+            }
+            return e.kind == .wake && locked ? .locked : e.kind.state
+        }
+        var state = MacState.unknown
+        for e in sorted where e.date <= from { state = next(after: e) }
         var cursor = from
         var result: [Segment] = []
         func close(at date: Date) {
@@ -126,7 +137,7 @@ enum Timeline {
         }
         for e in sorted where e.date > from && e.date < to {
             close(at: e.date)
-            state = e.kind.state
+            state = next(after: e)
         }
         close(at: to)
         return result
@@ -169,14 +180,28 @@ final class Journal: ObservableObject {
     @Published private(set) var events: [Event]
     @Published private(set) var now = Date()
     @AppStorage("showUptimeInBar") var showUptimeInBar = false
-    let boot = Uptime.bootTime()
-    /// Screenshots must not write into the real history.
-    private let persist = !CommandLine.arguments.contains("--snapshot")
+    let boot: Date
+    /// Screenshots must not read or write the real history.
+    private let persist = !StatusPopover.isSnapshot
 
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     private var timer: Timer?
 
     init() {
+        if StatusPopover.isSnapshot {
+            // A fixed demo day for the website screenshot.
+            let today = Calendar.current.startOfDay(for: Date())
+            func at(_ h: Double) -> Date { today.addingTimeInterval(h * 3600) }
+            now = at(17.5)
+            boot = at(17.5).addingTimeInterval(-(3 * 86_400 + 4 * 3600 + 12 * 60))
+            events = [Event(kind: .boot, date: boot), Event(kind: .launch, date: boot.addingTimeInterval(60)),
+                      Event(kind: .sleep, date: at(-0.8)), Event(kind: .wake, date: at(7.7)),
+                      Event(kind: .lock, date: at(12.5)), Event(kind: .unlock, date: at(13.3)),
+                      Event(kind: .lock, date: at(15.0)), Event(kind: .sleep, date: at(15.05)),
+                      Event(kind: .wake, date: at(15.7)), Event(kind: .unlock, date: at(15.72))]
+            return
+        }
+        boot = Uptime.bootTime()
         // Keep two weeks.
         let cutoff = Date().addingTimeInterval(-14 * 86_400)
         events = (Storage.load([Event].self, app: "Since", file: "events.json") ?? []).filter { $0.date > cutoff }
@@ -213,6 +238,9 @@ final class Journal: ObservableObject {
         now = Date()
         if persist { Storage.save(events, app: "Since", file: "events.json") }
     }
+
+    /// Brings the clock up to date, e.g. when the panel opens.
+    func tick() { if persist { now = Date() } }
 
     func clear() {
         events = [Event(kind: .boot, date: boot), Event(kind: .launch, date: Date())]
@@ -289,6 +317,7 @@ struct SinceView: View {
         }
         .frame(width: 340)
         .animation(.snappy, value: journal.events)
+        .onReceive(NotificationCenter.default.publisher(for: .popoverDidShow)) { _ in journal.tick() }
     }
 }
 
@@ -300,7 +329,8 @@ struct DayBar: View {
     var body: some View {
         VStack(spacing: 4) {
             GeometryReader { geo in
-                let day: TimeInterval = 86_400
+                // 23 or 25 hours on the days the clocks change.
+                let day = Calendar.current.date(byAdding: .day, value: 1, to: start)!.timeIntervalSince(start)
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 6, style: .continuous).fill(.quaternary.opacity(0.35))
                     ForEach(Array(segments.enumerated()), id: \.offset) { _, s in
