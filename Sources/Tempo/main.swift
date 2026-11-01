@@ -28,11 +28,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         status.onSecondaryClick = { [weak self] in self?.timer.startOrPause() }
         hotKey = HotKey(keyCode: kVK_ANSI_T, modifiers: cmdKey | optionKey) { [weak self] in self?.timer.startOrPause() }
-        UNUserNotificationCenter.current().delegate = self
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        // A snapshot never asks for notification permission (and has no bundle to ask with when run bare).
+        if !StatusPopover.isSnapshot {
+            UNUserNotificationCenter.current().delegate = self
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        }
 
         timer.objectWillChange
-            .receive(on: RunLoop.main)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.updateStatus() }
             .store(in: &cancellables)
         updateStatus()
@@ -97,21 +100,39 @@ final class FocusTimer: ObservableObject {
     @Published private(set) var completedToday = 0
     @Published private(set) var tick = Date()
 
-    @AppStorage("focusMinutes") var focusMinutes = 25
-    @AppStorage("shortMinutes") var shortMinutes = 5
-    @AppStorage("longMinutes") var longMinutes = 15
-    @AppStorage("autoStartNext") var autoStartNext = false
-    @AppStorage("dailyGoal") var dailyGoal = 8
+    // @AppStorage does not publish from an ObservableObject, so each setting announces its own change.
+    @AppStorage("focusMinutes") var focusMinutes = 25 { willSet { objectWillChange.send() } }
+    @AppStorage("shortMinutes") var shortMinutes = 5 { willSet { objectWillChange.send() } }
+    @AppStorage("longMinutes") var longMinutes = 15 { willSet { objectWillChange.send() } }
+    @AppStorage("autoStartNext") var autoStartNext = false { willSet { objectWillChange.send() } }
+    @AppStorage("dailyGoal") var dailyGoal = 8 { willSet { objectWillChange.send() } }
 
     private var clock: Timer?
-    private var streakDay: String { Date().formatted(.iso8601.year().month().day()) }
+    /// The local calendar day; a plain `.iso8601` style would use UTC and roll over at 02:00 or 03:00 in Athens.
+    private var streakDay: String { Date().formatted(Date.ISO8601FormatStyle(timeZone: .current).year().month().day()) }
+    private var shownDay = ""
 
     init() {
-        let saved = UserDefaults.standard.dictionary(forKey: "today") as? [String: Int]
-        completedToday = saved?[streakDay] ?? 0
-        clock = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        if StatusPopover.isSnapshot {
+            completedToday = 3 // Fixed demo progress, never the user's own.
+            return
+        }
+        refreshDay()
+        let clock = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.step() }
         }
+        // Common modes keep the menu bar countdown moving while a menu is open.
+        RunLoop.main.add(clock, forMode: .common)
+        self.clock = clock
+    }
+
+    /// Reloads today's session count when the day changes, so the tally restarts at midnight.
+    private func refreshDay() {
+        let day = streakDay
+        guard day != shownDay else { return }
+        shownDay = day
+        let saved = UserDefaults.standard.dictionary(forKey: "today") as? [String: Int]
+        completedToday = saved?[day] ?? 0
     }
 
     var length: TimeInterval {
@@ -149,6 +170,7 @@ final class FocusTimer: ObservableObject {
     }
 
     private func step() {
+        refreshDay()
         guard case .running = state else { return }
         tick = Date()
         if remaining <= 0 { advance(completed: true) }

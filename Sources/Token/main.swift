@@ -61,7 +61,9 @@ enum JWT {
 
     static func decode(_ raw: String) -> Result<DecodedJWT, JWTError> {
         var token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if token.lowercased().hasPrefix("bearer ") { token = String(token.dropFirst(7)).trimmingCharacters(in: .whitespaces) }
+        if token.lowercased().hasPrefix("bearer ") { token = String(token.dropFirst(7)) }
+        // Tokens copied from logs or mail are often wrapped across lines; no JWT part may contain whitespace.
+        token.removeAll(where: \.isWhitespace)
         let parts = token.split(separator: ".", omittingEmptySubsequences: false)
         if parts.count == 5 { return .failure(JWTError(message: "This is an encrypted token (JWE). Its contents cannot be read without the key.")) }
         guard parts.count == 3 else { return .failure(JWTError(message: "A JWT has three parts separated by dots; this has \(parts.count).")) }

@@ -29,7 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.store.bump(first.id, by: 1)
         }
         store.objectWillChange
-            .receive(on: RunLoop.main)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.updateStatus() }
             .store(in: &cancellables)
         updateStatus()
@@ -54,24 +54,36 @@ struct Counter: Codable, Identifiable, Equatable {
     var dailyReset = false
     var day = Counter.today
 
-    static var today: String { Date().formatted(.iso8601.year().month().day()) }
+    /// The local calendar day; a plain `.iso8601` style would use UTC and roll over at 02:00 or 03:00 in Athens.
+    static var today: String { Date().formatted(Date.ISO8601FormatStyle(timeZone: .current).year().month().day()) }
 }
 
 @MainActor
 final class CounterStore: ObservableObject {
-    @Published var counters: [Counter] { didSet { Storage.save(counters, app: "Tally", file: "counters.json") } }
+    @Published var counters: [Counter] {
+        didSet { if !StatusPopover.isSnapshot { Storage.save(counters, app: "Tally", file: "counters.json") } }
+    }
     @Published var renaming: UUID?
     @AppStorage("showInMenuBar") var showInMenuBar = true { willSet { objectWillChange.send() } }
 
     private var clock: Timer?
 
     init() {
+        if StatusPopover.isSnapshot {
+            // Fixed demo counters, never the user's own.
+            counters = [Counter(name: "Glasses of water", value: 6, color: 1, dailyReset: true),
+                        Counter(name: "Push-ups", value: 40, color: 3),
+                        Counter(name: "Books this year", value: 12, color: 2)]
+            return
+        }
         counters = Storage.load([Counter].self, app: "Tally", file: "counters.json")
             ?? [Counter(name: "Counter")]
         rollOver()
-        clock = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+        let clock = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.rollOver() }
         }
+        RunLoop.main.add(clock, forMode: .common)
+        self.clock = clock
     }
 
     /// Zeroes daily counters the first time they are seen on a new day.
@@ -214,6 +226,8 @@ struct CounterCard: View {
                         .focused($nameFocused)
                         .onSubmit { commitName() }
                         .onAppear { name = counter.name; DispatchQueue.main.async { nameFocused = true } }
+                        // Clicking away keeps the new name instead of leaving the field open.
+                        .onChange(of: nameFocused) { _, focused in if !focused, store.renaming == counter.id { commitName() } }
                 } else {
                     Text(counter.name)
                         .font(.system(size: 12.5, weight: .semibold))

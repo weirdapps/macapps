@@ -24,7 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             UntilView().environmentObject(self.store)
         }
         store.objectWillChange
-            .receive(on: RunLoop.main)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.updateStatus() }
             .store(in: &cancellables)
         updateStatus()
@@ -53,6 +53,14 @@ struct Countdown: Equatable {
     let past: Bool
 
     init(from now: Date, to date: Date, calendar: Calendar = .current) {
+        // An event at midnight is a whole day: it is "today" until the day is over, not "16 hours ago".
+        if calendar.startOfDay(for: date) == date {
+            let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: now), to: date).day ?? 0
+            past = days < 0
+            value = abs(days)
+            unit = "day"
+            return
+        }
         let seconds = date.timeIntervalSince(now)
         past = seconds < 0
         let s = abs(seconds)
@@ -70,20 +78,36 @@ struct Countdown: Equatable {
         }
     }
 
-    var label: String { value == 1 ? unit : unit + "s" }
-    var short: String { "\(value)\(unit.prefix(1))" }
-    var sentence: String { past ? "\(value) \(label) ago" : "in \(value) \(label)" }
+    var isToday: Bool { value == 0 && unit == "day" }
+    var label: String { isToday ? "today" : value == 1 ? unit : unit + "s" }
+    var short: String { isToday ? "today" : "\(value)\(unit.prefix(1))" }
+    var sentence: String { isToday ? "today" : past ? "\(value) \(label) ago" : "in \(value) \(label)" }
 }
 
 @MainActor
 final class EventStore: ObservableObject {
-    @Published var events: [Event] { didSet { Storage.save(events, app: "Until", file: "events.json") } }
-    @Published var pinnedID: UUID? { didSet { UserDefaults.standard.set(pinnedID?.uuidString, forKey: "pinned") } }
+    @Published var events: [Event] {
+        didSet { if !StatusPopover.isSnapshot { Storage.save(events, app: "Until", file: "events.json") } }
+    }
+    @Published var pinnedID: UUID? {
+        didSet { if !StatusPopover.isSnapshot { UserDefaults.standard.set(pinnedID?.uuidString, forKey: "pinned") } }
+    }
     @Published private(set) var now = Date()
 
     private var clock: Timer?
 
     init() {
+        if StatusPopover.isSnapshot {
+            // Fixed demo countdowns, never the user's own.
+            let cal = Calendar.current, today = cal.startOfDay(for: Date())
+            func day(_ n: Int) -> Date { cal.date(byAdding: .day, value: n, to: today)! }
+            events = [Event(name: "Summer holiday", date: day(46), emoji: "🏖️"),
+                      Event(name: "Mum's birthday", date: day(12), emoji: "🎂"),
+                      Event(name: "Product launch", date: cal.date(byAdding: .hour, value: 5, to: Date())!, emoji: "🚀"),
+                      Event(name: "Marathon", date: day(-9), emoji: "🏅")]
+            pinnedID = events[1].id
+            return
+        }
         events = Storage.load([Event].self, app: "Until", file: "events.json") ?? []
         pinnedID = UserDefaults.standard.string(forKey: "pinned").flatMap(UUID.init)
         clock = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
@@ -93,10 +117,13 @@ final class EventStore: ObservableObject {
 
     /// Upcoming events soonest first, then past events most recent first.
     var sorted: [Event] {
-        let upcoming = events.filter { $0.date >= now }.sorted { $0.date < $1.date }
-        let past = events.filter { $0.date < now }.sorted { $0.date > $1.date }
+        // Past means the countdown says so, so a whole-day event stays upcoming all of its day.
+        let upcoming = events.filter { !isPast($0) }.sorted { $0.date < $1.date }
+        let past = events.filter(isPast).sorted { $0.date > $1.date }
         return upcoming + past
     }
+
+    func isPast(_ event: Event) -> Bool { Countdown(from: now, to: event.date).past }
 
     var pinned: Event? { events.first { $0.id == pinnedID } }
 
@@ -132,7 +159,8 @@ struct UntilView: View {
                 Spacer()
                 GlassIconButton(draft == nil ? "plus" : "xmark", help: draft == nil ? "New countdown" : "Cancel") {
                     withAnimation(.snappy) {
-                        draft = draft == nil ? Event(name: "", date: Calendar.current.date(byAdding: .day, value: 7, to: Date())!) : nil
+                        // New countdowns start as a whole day a week from today.
+                        draft = draft == nil ? Event(name: "", date: Calendar.current.date(byAdding: .day, value: 7, to: Calendar.current.startOfDay(for: Date()))!) : nil
                     }
                 }
             }
@@ -141,10 +169,10 @@ struct UntilView: View {
             .padding(.bottom, 8)
 
             if let binding = Binding($draft) {
-                EventForm(event: binding) { event in
+                EventForm(event: binding, save: { event in
                     store.save(event)
                     withAnimation(.snappy) { draft = nil }
-                }
+                }, close: { withAnimation(.snappy) { draft = nil } })
                 .padding(.horizontal, 12)
                 .padding(.bottom, 10)
                 .transition(.move(edge: .top).combined(with: .opacity))
@@ -174,7 +202,7 @@ struct UntilView: View {
             PanelFooter(name: "Until") {
                 Button("Unpin from Menu Bar") { store.pinnedID = nil }.disabled(store.pinnedID == nil)
                 Button("Delete Past Events") {
-                    for e in store.events where e.date < store.now { store.delete(e.id) }
+                    for e in store.events where store.isPast(e) { store.delete(e.id) }
                 }
             }
         }
@@ -209,12 +237,12 @@ struct EventRow: View {
             Spacer(minLength: 4)
             if !left.past {
                 VStack(alignment: .trailing, spacing: -2) {
-                    Text("\(left.value)")
+                    Text(left.isToday ? "Today" : "\(left.value)")
                         .font(.system(size: 24, weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(LinearGradient(colors: Color.until, startPoint: .top, endPoint: .bottom))
                         .contentTransition(.numericText(value: Double(left.value)))
-                    Text(left.label).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                    Text(left.isToday ? "" : left.label).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
                 }
             }
         }
@@ -245,6 +273,7 @@ struct EventForm: View {
     @EnvironmentObject var store: EventStore
     @Binding var event: Event
     let save: (Event) -> Void
+    let close: () -> Void
     @FocusState private var nameFocused: Bool
 
     private let emojis = ["🎂", "✈️", "🏖️", "🎄", "🎆", "💍", "🎓", "🚀", "📦", "⚽️", "🎉", "❤️"]
@@ -274,7 +303,7 @@ struct EventForm: View {
                     .datePickerStyle(.field)
                 Spacer()
                 if store.events.contains(where: { $0.id == event.id }) {
-                    Button { store.delete(event.id); event = Event(name: "", date: Date()) } label: {
+                    Button { store.delete(event.id); close() } label: {
                         Image(systemName: "trash").font(.system(size: 12))
                     }
                     .buttonStyle(.plain)

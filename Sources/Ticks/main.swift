@@ -45,9 +45,17 @@ struct Item: Codable, Identifiable, Equatable {
 
 @MainActor
 final class Checklist: ObservableObject {
-    @Published var items: [Item] { didSet { Storage.save(items, app: "Ticks", file: "items.json") } }
+    @Published var items: [Item] {
+        didSet { if !StatusPopover.isSnapshot { Storage.save(items, app: "Ticks", file: "items.json") } }
+    }
 
     init() {
+        if StatusPopover.isSnapshot {
+            // Fixed demo items, never the user's own.
+            items = [Item(text: "Book the dentist"), Item(text: "Reply to the club newsletter"), Item(text: "Water the plants"),
+                     Item(text: "Pack the gym bag", done: true, doneAt: Date()), Item(text: "Pay the electricity bill", done: true, doneAt: Date())]
+            return
+        }
         items = Storage.load([Item].self, app: "Ticks", file: "items.json") ?? []
     }
 
