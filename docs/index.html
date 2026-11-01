@@ -256,7 +256,12 @@ const GROUPS = [
   ]],
 ];
 
-const el = (tag, props = {}, ...kids) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids); return n; };
+const el = (tag, { dataset, ...props } = {}, ...kids) => {
+  const n = Object.assign(document.createElement(tag), props);
+  Object.assign(n.dataset, dataset);
+  n.append(...kids);
+  return n;
+};
 const groupsEl = document.getElementById("groups");
 const filtersEl = document.getElementById("filters");
 const sheet = document.getElementById("sheet");
