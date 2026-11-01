@@ -64,7 +64,7 @@ enum Category: String, CaseIterable, Identifiable {
                      ("Tonnes", UnitMass.metricTons), ("Ounces", Extra.ounces), ("Pounds", Extra.pounds), ("Stones", Extra.stones)]
         case .temperature: [("Celsius", UnitTemperature.celsius), ("Fahrenheit", UnitTemperature.fahrenheit), ("Kelvin", UnitTemperature.kelvin)]
         case .volume: [("Millilitres", UnitVolume.milliliters), ("Litres", UnitVolume.liters), ("Cubic metres", UnitVolume.cubicMeters),
-                       ("Teaspoons", Extra.teaspoons), ("Tablespoons", Extra.tablespoons), ("Cups (US)", UnitVolume.cups),
+                       ("Teaspoons", Extra.teaspoons), ("Tablespoons", Extra.tablespoons), ("Cups (US)", Extra.cups),
                        ("Fluid ounces (US)", Extra.fluidOunces), ("Pints (US)", Extra.pints), ("Gallons (US)", Extra.gallons),
                        ("Pints (UK)", Extra.imperialPints), ("Gallons (UK)", Extra.imperialGallons)]
         case .speed: [("Metres per second", UnitSpeed.metersPerSecond), ("Kilometres per hour", Extra.kilometersPerHour),
@@ -120,6 +120,8 @@ enum Extra {
     static let milesPerHour = UnitSpeed(symbol: "mph", converter: UnitConverterLinear(coefficient: 0.44704))
     // US customary volumes from the 231 cubic inch gallon; the base unit is the litre.
     static let gallons = UnitVolume(symbol: "gal", converter: UnitConverterLinear(coefficient: 3.785411784))
+    /// Foundation's cup is the 240 ml legal cup; the customary cup keeps 16 tablespoons to the cup.
+    static let cups = UnitVolume(symbol: "cup", converter: UnitConverterLinear(coefficient: 3.785411784 / 16))
     static let pints = UnitVolume(symbol: "pt", converter: UnitConverterLinear(coefficient: 3.785411784 / 8))
     static let fluidOunces = UnitVolume(symbol: "fl oz", converter: UnitConverterLinear(coefficient: 3.785411784 / 128))
     static let tablespoons = UnitVolume(symbol: "tbsp", converter: UnitConverterLinear(coefficient: 3.785411784 / 256))
@@ -147,23 +149,55 @@ enum Convert {
         Measurement(value: v, unit: from).converted(to: to).value
     }
 
+    /// NumberFormatter, not FormatStyle: it honours the separators chosen in System Settings, which
+    /// FormatStyle ignores in favour of the region, and `parse` reads with the same separators.
+    static let decimal: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.usesSignificantDigits = true
+        f.minimumSignificantDigits = 1
+        f.maximumSignificantDigits = 7
+        return f
+    }()
+
+    static let scientific: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .scientific
+        f.usesSignificantDigits = true
+        f.minimumSignificantDigits = 1
+        f.maximumSignificantDigits = 6
+        return f
+    }()
+
     /// Up to seven significant digits; scientific notation outside 1e-6...1e12.
     static func format(_ v: Double) -> String {
         if v == 0 || !v.isFinite { return v.isFinite ? "0" : "-" }
         let a = abs(v)
-        if a < 1e-6 || a >= 1e12 {
-            return v.formatted(.number.notation(.scientific).precision(.significantDigits(1...6)))
-        }
-        return v.formatted(.number.precision(.significantDigits(1...7)))
+        let f = a < 1e-6 || a >= 1e12 ? scientific : decimal
+        return f.string(from: v as NSNumber) ?? String(v)
     }
 
-    /// Accepts the locale's decimal separator, a dot, and grouping spaces.
-    static func parse(_ s: String) -> Double? {
-        let cleaned = s.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "\u{00A0}", with: "")
-        if let v = Double(cleaned) { return v }
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        return f.number(from: cleaned)?.doubleValue ?? Double(cleaned.replacingOccurrences(of: ",", with: "."))
+    /// Reads what `format` writes and what people type: either separator as the decimal mark,
+    /// grouping marks, spaces, and exponents. With both "." and "," present the last one is the decimal;
+    /// a lone grouping mark followed by exactly three digits groups thousands, so "1.000" is 1000 in Greek.
+    static func parse(_ s: String, decimalSeparator: String = Locale.current.decimalSeparator ?? ".",
+                      groupingSeparator: String = Locale.current.groupingSeparator ?? ",") -> Double? {
+        var t = s.filter { !$0.isWhitespace && $0 != "\u{202F}" }
+        let marks = t.filter { $0 == "." || $0 == "," }
+        if let last = marks.last {
+            let other: Character = last == "." ? "," : "."
+            if marks.contains(other) {
+                t.removeAll { $0 == other }
+            } else if marks.count > 1 {
+                t.removeAll { $0 == last }
+            } else if String(last) != decimalSeparator, String(last) == groupingSeparator,
+                      let i = t.firstIndex(of: last), t[t.index(after: i)...].count == 3,
+                      t[t.index(after: i)...].allSatisfy(\.isNumber) {
+                t.removeAll { $0 == last }
+            }
+            t = t.replacingOccurrences(of: ",", with: ".")
+        }
+        return Double(t)
     }
 }
 
@@ -186,11 +220,13 @@ final class ConvertModel: ObservableObject {
     @Published var copied: String?
 
     init() {
-        let c = Category(rawValue: UserDefaults.standard.string(forKey: "category") ?? "") ?? .length
+        // The README snapshot shows the defaults, never this Mac's saved choices.
+        let saved = StatusPopover.isSnapshot ? nil : UserDefaults.standard.string(forKey: "category")
+        let c = Category(rawValue: saved ?? "") ?? .length
         category = c
         from = c.units[c.defaults.from]
         to = c.units[c.defaults.to]
-        favourites = Storage.load([FavouritePair].self, app: "Convert", file: "favourites.json") ?? []
+        favourites = StatusPopover.isSnapshot ? [] : Storage.load([FavouritePair].self, app: "Convert", file: "favourites.json") ?? []
     }
 
     private func resetUnits() {
@@ -260,17 +296,29 @@ struct ConvertView: View {
                 .padding(12)
             Divider().opacity(0.5)
             PanelFooter(name: "Convert") {
-                Button("Swap Units") { withAnimation(.snappy) { model.swap() } }.keyboardShortcut("s")
-                Button(model.isFavourite ? "Remove Favourite" : "Add Favourite") { model.toggleFavourite() }.keyboardShortcut("d")
+                Button("Swap Units") { withAnimation(.snappy) { model.swap() } }
+                Button(model.isFavourite ? "Remove Favourite" : "Add Favourite") { model.toggleFavourite() }
                 if !model.favourites.isEmpty {
                     Button("Clear Favourites", role: .destructive) { model.favourites = [] }
                 }
             }
         }
         .frame(width: 380)
+        .background { shortcuts }
         .onReceive(NotificationCenter.default.publisher(for: .popoverDidShow)) { _ in
             DispatchQueue.main.async { focused = true }
         }
+    }
+
+    /// Key equivalents in a closed menu never fire, so ⌘S and ⌘D live on invisible buttons in the panel.
+    private var shortcuts: some View {
+        ZStack {
+            Button("Swap Units") { withAnimation(.snappy) { model.swap() } }.keyboardShortcut("s")
+            Button("Favourite") { model.toggleFavourite() }.keyboardShortcut("d")
+        }
+        .opacity(0)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     private var converter: some View {

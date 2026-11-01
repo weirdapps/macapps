@@ -21,6 +21,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         status = StatusPopover(symbol: "circle.lefthalf.filled", accessibilityLabel: "Contrast") {
             ContrastView().environmentObject(self.model)
         }
+        // The colour panel is a separate window; a transient popover would close the moment it is clicked.
+        status.behavior = .semitransient
     }
 }
 
@@ -36,7 +38,7 @@ struct RGB: Equatable {
         var s = hex.trimmingCharacters(in: .whitespaces).uppercased()
         if s.hasPrefix("#") { s.removeFirst() }
         if s.count == 3 { s = s.map { "\($0)\($0)" }.joined() }
-        guard s.count == 6, let v = UInt32(s, radix: 16) else { return nil }
+        guard s.count == 6, s.allSatisfy(\.isHexDigit), let v = UInt32(s, radix: 16) else { return nil }
         self.init(r: Double(v >> 16 & 0xFF) / 255, g: Double(v >> 8 & 0xFF) / 255, b: Double(v & 0xFF) / 255)
     }
 
@@ -82,18 +84,22 @@ enum WCAG {
         Criterion(id: "ui", level: "AA", label: "Icons and controls", minimum: 3),
     ]
 
+    /// WCAG writes ratios with a decimal point everywhere, whatever the region.
+    static let posix = Locale(identifier: "en_US_POSIX")
+
     /// Rounds down to two places, so 4.499 never shows as a passing 4.50.
     static func format(_ ratio: Double) -> String {
-        ((ratio * 100).rounded(.down) / 100).formatted(.number.precision(.fractionLength(2)).grouping(.never)) + ":1"
+        ((ratio * 100).rounded(.down) / 100).formatted(.number.precision(.fractionLength(2)).grouping(.never).locale(posix)) + ":1"
     }
 
     /// The nearest shade of `foreground` that reaches `target` on `background`, darker or lighter, whichever is closer.
+    /// Candidates are rounded to the 8-bit hex the app stores, so the applied colour passes too.
     static func fix(_ foreground: RGB, on background: RGB, target: Double) -> RGB? {
         if ratio(foreground, background) >= target { return foreground }
         for step in 1...100 {
             let t = Double(step) / 100
-            for candidate in [foreground.shifted(-t), foreground.shifted(t)] where ratio(candidate, background) >= target {
-                return candidate
+            for shade in [foreground.shifted(-t), foreground.shifted(t)] {
+                if let candidate = RGB(hex: shade.hex), ratio(candidate, background) >= target { return candidate }
             }
         }
         return nil
@@ -317,7 +323,7 @@ struct CriterionRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 30, alignment: .leading)
             Text(criterion.label).font(.system(size: 12.5))
-            Text(criterion.minimum.formatted(.number.precision(.fractionLength(0...1))) + ":1")
+            Text(criterion.minimum.formatted(.number.precision(.fractionLength(0...1)).locale(WCAG.posix)) + ":1")
                 .font(.system(size: 11, design: .rounded))
                 .foregroundStyle(.tertiary)
             Spacer()

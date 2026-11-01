@@ -53,6 +53,8 @@ struct BatteryState: Equatable {
     var percent = 100
     var charging = false
     var charged = false
+    /// macOS tops up the last few percent slowly and reports no time estimate meanwhile.
+    var finishing = false
     var onAC = true
     /// Minutes to empty on battery, or to full while charging; nil while macOS is still estimating.
     var minutesLeft: Int?
@@ -77,6 +79,7 @@ struct BatteryState: Equatable {
 
     var headline: String {
         if charged && onAC { return "Fully charged" }
+        if charging && (finishing || percent >= 100) { return "Finishing charge" }
         if charging { return "Charging" }
         if onAC { return "Not charging" }
         return "On battery"
@@ -84,6 +87,7 @@ struct BatteryState: Equatable {
 
     var detail: String {
         if charged && onAC { return "Connected to power" }
+        if charging && (finishing || percent >= 100) { return "Almost full" }
         guard let minutesLeft else { return onAC ? "Estimating time until full" : "Estimating time remaining" }
         return charging ? "\(Battery.duration(minutesLeft)) until full" : "\(Battery.duration(minutesLeft)) remaining"
     }
@@ -105,6 +109,7 @@ enum Battery {
         s.percent = max > 0 ? Int((Double(current) / Double(max) * 100).rounded()) : current
         s.charging = ps[kIOPSIsChargingKey] as? Bool ?? false
         s.charged = ps[kIOPSIsChargedKey] as? Bool ?? false
+        s.finishing = ps["Is Finishing Charge"] as? Bool ?? false
         s.onAC = (ps[kIOPSPowerSourceStateKey] as? String) == kIOPSACPowerValue
         let minutes = s.charging ? ps[kIOPSTimeToFullChargeKey] as? Int : ps[kIOPSTimeToEmptyKey] as? Int
         s.minutesLeft = minutes.flatMap { $0 > 0 && $0 < 6000 ? $0 : nil }
@@ -117,10 +122,7 @@ enum Battery {
             func number(_ key: String) -> NSNumber? { (reg[key] ?? data[key]) as? NSNumber }
             s.cycles = number("CycleCount")?.intValue
             s.designCycles = number("DesignCycleCount9C")?.intValue
-            let full = number("AppleRawMaxCapacity") ?? number("NominalChargeCapacity")
-            if let full, let design = number("DesignCapacity") {
-                s.health = healthPercent(full: full.doubleValue, design: design.doubleValue)
-            }
+            // Temperature is hidden from non-root processes on recent macOS; the row shows only when it is readable.
             if let t = number("Temperature") ?? number("VirtualTemperature"), t.doubleValue > 0 { s.temperature = t.doubleValue / 100 }
             if let volts = number("Voltage"), let amps = number("InstantAmperage") ?? number("Amperage"), amps.int64Value != 0 {
                 s.watts = power(millivolts: volts.doubleValue, milliamps: Double(amps.int64Value))
@@ -145,16 +147,45 @@ enum Battery {
         return props?.takeRetainedValue() as? [String: Any]
     }
 
-    /// Maximum capacity as macOS reports it: today's full charge against the design capacity, capped at 100.
-    static func healthPercent(full: Double, design: Double) -> Int? {
-        guard design > 0, full > 0 else { return nil }
-        return min(100, Int((full / design * 100).rounded()))
+    /// Maximum capacity and condition exactly as System Settings shows them. The registry hides the raw
+    /// capacity from non-root processes, so this asks system_profiler, which takes about a second.
+    static func profilerHealth() -> ProfilerHealth {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
+        p.arguments = ["-json", "SPPowerDataType"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return ProfilerHealth() }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return parseProfiler(data)
+    }
+
+    static func parseProfiler(_ data: Data) -> ProfilerHealth {
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let items = root["SPPowerDataType"] as? [[String: Any]],
+              let info = items.lazy.compactMap({ $0["sppower_battery_health_info"] as? [String: Any] }).first
+        else { return ProfilerHealth() }
+        var h = ProfilerHealth()
+        if let max = info["sppower_battery_health_maximum_capacity"] as? String {
+            h.maximumCapacity = Int(max.filter(\.isNumber))
+        }
+        if let health = info["sppower_battery_health"] as? String {
+            h.condition = health == "Good" ? "Normal" : "Service Recommended"
+        }
+        return h
     }
 
     /// Watts flowing in (positive) or out (negative).
     static func power(millivolts: Double, milliamps: Double) -> Double { millivolts * milliamps / 1_000_000 }
 
     static func duration(_ minutes: Int) -> String { String(format: "%d:%02d", minutes / 60, minutes % 60) }
+}
+
+struct ProfilerHealth: Equatable, Sendable {
+    var maximumCapacity: Int?
+    var condition: String?
 }
 
 enum BarShows: String, CaseIterable {
@@ -179,9 +210,19 @@ final class BatteryMonitor: ObservableObject {
     @AppStorage("barShows") var barShows = BarShows.percent
 
     private var timer: Timer?
+    private var healthTimer: Timer?
     private var observer: NSObjectProtocol?
+    private var profiler = ProfilerHealth()
+
+    /// Fixed values for the README snapshot, so the published image never shows this Mac's battery.
+    static let sample = BatteryState(percent: 82, charging: false, charged: false, onAC: false, minutesLeft: 312,
+                                     cycles: 143, designCycles: 1000, health: 97, condition: "Normal", temperature: 30.5, watts: -6.4)
 
     init() {
+        if StatusPopover.isSnapshot {
+            state = Self.sample
+            return
+        }
         state = Battery.read()
         // macOS calls this whenever percentage, power source or time estimate changes.
         if let source = IOPSNotificationCreateRunLoopSource({ _ in
@@ -197,10 +238,26 @@ final class BatteryMonitor: ObservableObject {
             MainActor.assumeIsolated { self?.refresh() }
         }
         timer?.tolerance = 3
+        loadHealth()
+        // Maximum capacity moves over weeks; a slow re-read keeps a long-running app honest.
+        healthTimer = Timer.scheduledTimer(withTimeInterval: 1800, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.loadHealth() }
+        }
+    }
+
+    private func loadHealth() {
+        Task { [weak self] in
+            let health = await Task.detached(priority: .utility) { Battery.profilerHealth() }.value
+            self?.profiler = health
+            self?.refresh()
+        }
     }
 
     func refresh() {
-        let now = Battery.read()
+        guard !StatusPopover.isSnapshot else { return }
+        var now = Battery.read()
+        now?.health = profiler.maximumCapacity
+        if let condition = profiler.condition { now?.condition = condition }
         if now != state { state = now }
     }
 }
@@ -324,10 +381,19 @@ struct Details: View {
             }
             if let t = state.temperature {
                 DetailRow(symbol: "thermometer.medium", title: "Temperature",
-                          value: Measurement(value: t, unit: UnitTemperature.celsius)
-                            .formatted(.measurement(width: .abbreviated, numberFormatStyle: .number.precision(.fractionLength(1)))))
+                          value: Self.celsius(t))
             }
         }
+    }
+}
+
+extension Details {
+    /// NumberFormatter honours the decimal mark chosen in System Settings; FormatStyle follows the region instead.
+    static func celsius(_ t: Double) -> String {
+        let f = NumberFormatter()
+        f.minimumFractionDigits = 1
+        f.maximumFractionDigits = 1
+        return (f.string(from: t as NSNumber) ?? String(format: "%.1f", t)) + "\u{00B0}C"
     }
 }
 

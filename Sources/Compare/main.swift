@@ -442,7 +442,7 @@ struct LineView: View {
     var body: some View {
         HStack(alignment: .top, spacing: 4) {
             if let line {
-                Text(number(line)).foregroundStyle(.tertiary).frame(width: side == .unified ? 46 : 20, alignment: .trailing)
+                Text(number(line)).foregroundStyle(.tertiary).frame(width: side == .unified ? 52 : 28, alignment: .trailing)
                 Text(sign(line)).foregroundStyle(color(line)).frame(width: 9)
                 Text(Self.attributed(line))
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -462,8 +462,14 @@ struct LineView: View {
         switch side {
         case .left: l.oldNumber.map(String.init) ?? ""
         case .right: l.newNumber.map(String.init) ?? ""
-        case .unified: String(format: "%3@ %3@", l.oldNumber.map(String.init) ?? "", l.newNumber.map(String.init) ?? "")
+        case .unified: Self.pad(l.oldNumber) + " " + Self.pad(l.newNumber)
         }
+    }
+
+    /// Right-aligns a line number in three columns; String(format:) ignores widths on %@.
+    static func pad(_ n: Int?) -> String {
+        let s = n.map(String.init) ?? ""
+        return String(repeating: " ", count: max(0, 3 - s.count)) + s
     }
 
     private func sign(_ l: DiffLine) -> String { l.kind == .delete ? "\u{2212}" : l.kind == .insert ? "+" : "" }

@@ -101,7 +101,8 @@ enum Codec {
             guard let data = Data(base64Encoded: s) else { return .failure(.invalid("Not valid Base64.")) }
             return utf8(data)
         case .url:
-            guard let s = text.removingPercentEncoding else { return .failure(.invalid("A % escape is broken or is not UTF-8.")) }
+            // Form and query strings write a space as "+", so it decodes to one.
+            guard let s = text.replacingOccurrences(of: "+", with: " ").removingPercentEncoding else { return .failure(.invalid("A % escape is broken or is not UTF-8.")) }
             return .success(s)
         case .html: return .success(decodeEntities(text))
         case .hex:
@@ -164,6 +165,7 @@ enum Codec {
     }
 
     /// Reads \uXXXX (with surrogate pairs), \u{X...}, \UXXXXXXXX, \xXX and the usual \n \t \r \" \\ escapes.
+    /// A run of \xXX escapes that forms valid UTF-8 decodes as bytes (Python, C); otherwise each is a code point (JavaScript).
     static func decodeEscapes(_ text: String) -> Result<String, CodecError> {
         var units: [UInt16] = []
         let chars = Array(text.unicodeScalars)
@@ -197,9 +199,13 @@ enum Codec {
                 guard let v = hex(i + 2, 8), append(v) else { return .failure(.invalid("\\U needs eight hex digits of a valid code point.")) }
                 i += 10
             case "x":
-                guard let v = hex(i + 2, 2) else { return .failure(.invalid("\\x needs two hex digits.")) }
-                units.append(UInt16(v))
-                i += 4
+                var run: [UInt8] = []
+                while i + 1 < chars.count, chars[i] == "\\", chars[i + 1] == "x" {
+                    guard let v = hex(i + 2, 2) else { return .failure(.invalid("\\x needs two hex digits.")) }
+                    run.append(UInt8(v))
+                    i += 4
+                }
+                if let s = String(bytes: run, encoding: .utf8) { units += Array(s.utf16) } else { units += run.map(UInt16.init) }
             default:
                 let map: [Unicode.Scalar: String] = ["n": "\n", "t": "\t", "r": "\r", "\"": "\"", "'": "'", "\\": "\\", "0": "\0", "/": "/"]
                 units += Array((map[k] ?? "\\" + String(k)).utf16)
@@ -232,7 +238,9 @@ enum Codec {
            decodes(.unicode) { return .unicode }
         if s.range(of: "%[0-9a-fA-F]{2}", options: .regularExpression) != nil, decodes(.url) { return .url }
         if s.range(of: "&(#[0-9]+|#[xX][0-9a-fA-F]+|[a-zA-Z]+);", options: .regularExpression) != nil, decodes(.html) { return .html }
-        if s.count >= 4, s.range(of: "^(0x)?([0-9a-fA-F]{2}[ :]?)+$", options: .regularExpression) != nil, decodes(.hex) { return .hex }
+        // Short digit runs like "2024" are years and numbers far more often than hex.
+        let hexLooking = s.count >= 8 || s.hasPrefix("0x") || s.contains(" ") || s.contains(":")
+        if hexLooking, s.range(of: "^(0x)?([0-9a-fA-F]{2}[ :]?)+$", options: .regularExpression) != nil, decodes(.hex) { return .hex }
         if s.count >= 4, s.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil, s.contains(where: { $0 == "-" || $0 == "_" }),
            decodes(.base64URL) { return .base64URL }
         if s.count >= 4, s.range(of: "^[A-Za-z0-9+/\\s]+={0,2}$", options: .regularExpression) != nil, decodes(.base64) { return .base64 }
