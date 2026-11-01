@@ -185,16 +185,30 @@ final class TrafficMeter: ObservableObject {
     init() {
         start = Interfaces.counters()
         last = start
-        // Screenshots sample faster, then hold still so the layout settles before capture.
-        let snapshot = CommandLine.arguments.contains("--snapshot")
-        let interval = snapshot ? 0.2 : 1, launch = Date()
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                if snapshot && Date().timeIntervalSince(launch) > 1.3 { return }
-                self?.sample()
-            }
+        // Screenshots go on a public page: show fixed demo traffic, never this Mac's interfaces.
+        if StatusPopover.isSnapshot {
+            loadDemo()
+            return
         }
-        timer?.tolerance = interval / 10
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sample() }
+        }
+        timer?.tolerance = 0.1
+    }
+
+    private func loadDemo() {
+        history = (0..<Self.capacity).map { i in
+            let t = Double(i)
+            let down = 2_400_000 + 1_600_000 * sin(t / 5) + 900_000 * sin(t / 1.7) + (i > 44 && i < 52 ? 3_500_000 : 0)
+            let up = 380_000 + 220_000 * sin(t / 3.3 + 1) + 90_000 * cos(t / 1.3)
+            return (max(down, 60_000), max(up, 20_000))
+        }
+        down = history.last?.down ?? 0
+        up = history.last?.up ?? 0
+        totals = [
+            InterfaceTotal(id: "en0", name: "Wi-Fi", received: 1_842_000_000, sent: 212_400_000),
+            InterfaceTotal(id: "en7", name: "USB 10/100/1000 LAN", received: 386_000_000, sent: 41_300_000),
+        ]
     }
 
     private func sample() {
@@ -215,12 +229,14 @@ final class TrafficMeter: ObservableObject {
         lastTime = time
 
         for (name, c) in now where start[name] == nil { start[name] = c }
+        // Idle tunnels only send keepalives; list a tunnel once it carried real traffic.
+        let tunnelFloor: UInt64 = 64_000
         if now.keys.contains(where: { names[$0] == nil && Interfaces.isPhysical($0) }) { names = Interfaces.displayNames() }
         totals = now.compactMap { name, c in
             guard !Interfaces.isHidden(name), let s = start[name] else { return nil }
             let r = c.received >= s.received ? c.received - s.received : c.received
             let t = c.sent >= s.sent ? c.sent - s.sent : c.sent
-            guard r + t > 0 else { return nil }
+            guard r + t > (name.hasPrefix("utun") ? tunnelFloor : 0) else { return nil }
             return InterfaceTotal(id: name, name: names[name] ?? (name.hasPrefix("utun") ? "VPN" : name), received: r, sent: t)
         }
         .sorted { $0.received + $0.sent > $1.received + $1.sent }
@@ -245,7 +261,7 @@ struct FlowView: View {
             }
             .padding(.horizontal, 16)
             .padding(.top, 16)
-            MirrorChart(history: meter.history, capacity: TrafficMeter.capacity)
+            MirrorChart(history: meter.history, capacity: TrafficMeter.capacity, bits: meter.bits)
                 .frame(height: 96)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
@@ -313,6 +329,7 @@ struct RateBlock: View {
 struct MirrorChart: View {
     let history: [(down: Double, up: Double)]
     let capacity: Int
+    let bits: Bool
 
     var body: some View {
         Canvas { ctx, size in
@@ -341,7 +358,7 @@ struct MirrorChart: View {
             }
             series(history.map(\.down), sign: 1, colors: Palette.down)
             series(history.map(\.up), sign: -1, colors: Palette.up)
-            ctx.draw(Text(Rate.full(peak, bits: false)).font(.system(size: 9, weight: .medium)).foregroundStyle(.tertiary),
+            ctx.draw(Text(Rate.full(peak, bits: bits)).font(.system(size: 9, weight: .medium)).foregroundStyle(.tertiary),
                      at: CGPoint(x: 2, y: 2), anchor: .topLeading)
         }
     }

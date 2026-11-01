@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         status = StatusPopover(symbol: "flame.fill", accessibilityLabel: "Hogs") {
             HogsView().environmentObject(self.table)
         }
+        table.isOpen = { [weak self] in self?.status.isShown ?? false }
     }
 }
 
@@ -33,8 +34,28 @@ struct Proc: Identifiable, Equatable {
     /// Resident memory in bytes.
     let memory: UInt64
     let command: String
+    /// Set only for demo rows, which have no running process to take an icon from.
+    var bundleID: String? = nil
 
     var id: Int32 { pid }
+}
+
+enum Demo {
+    /// Fixed rows for screenshots, which go on a public page: never this Mac's process list.
+    static let procs: [Proc] = [
+        Proc(pid: 812, cpu: 48.6, memory: 2_310_000_000, command: "Xcode", bundleID: "com.apple.dt.Xcode"),
+        Proc(pid: 1204, cpu: 31.2, memory: 1_640_000_000, command: "Safari", bundleID: "com.apple.Safari"),
+        Proc(pid: 402, cpu: 18.9, memory: 610_000_000, command: "WindowServer"),
+        Proc(pid: 1533, cpu: 12.4, memory: 980_000_000, command: "Photos", bundleID: "com.apple.Photos"),
+        Proc(pid: 977, cpu: 7.8, memory: 420_000_000, command: "Music", bundleID: "com.apple.Music"),
+        Proc(pid: 1388, cpu: 5.1, memory: 1_120_000_000, command: "Mail", bundleID: "com.apple.mail"),
+        Proc(pid: 0, cpu: 4.6, memory: 52_000_000, command: "kernel_task"),
+        Proc(pid: 1610, cpu: 3.3, memory: 760_000_000, command: "Notes", bundleID: "com.apple.Notes"),
+        Proc(pid: 655, cpu: 2.2, memory: 180_000_000, command: "Finder", bundleID: "com.apple.finder"),
+        Proc(pid: 1702, cpu: 1.4, memory: 330_000_000, command: "Preview", bundleID: "com.apple.Preview"),
+        Proc(pid: 318, cpu: 0.9, memory: 96_000_000, command: "mds_stores"),
+        Proc(pid: 1820, cpu: 0.6, memory: 540_000_000, command: "Calendar", bundleID: "com.apple.iCal"),
+    ]
 }
 
 enum PS {
@@ -76,14 +97,21 @@ final class ProcessTable: ObservableObject {
     @Published private(set) var loaded = false
     @AppStorage("sort") var sort = Sort.cpu
 
+    /// Whether the panel is on screen; set by the app delegate once the status item exists.
+    var isOpen: () -> Bool = { false }
     private var timer: Timer?
     private var busy = false
 
     init() {
+        if StatusPopover.isSnapshot {
+            all = Demo.procs
+            loaded = true
+            return
+        }
         refresh()
-        // Sample every 2 seconds, only while the panel is open (the popover activates the app).
+        // Sample every 2 seconds, only while the panel is open.
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { if NSApp.isActive { self?.refresh() } }
+            MainActor.assumeIsolated { if self?.isOpen() == true { self?.refresh() } }
         }
         timer?.tolerance = 0.3
     }
@@ -93,11 +121,12 @@ final class ProcessTable: ObservableObject {
         return Array(sorted.prefix(Self.rows))
     }
 
-    var totalCPU: Double { all.reduce(0) { $0 + $1.cpu } }
+    /// Share of the whole machine: ps reports 100% per core, so the raw sum can pass 1000% on a big Mac.
+    var totalCPU: Double { all.reduce(0) { $0 + $1.cpu } / Double(max(ProcessInfo.processInfo.activeProcessorCount, 1)) }
     var totalMemory: UInt64 { all.reduce(0) { $0 + $1.memory } }
 
     func refresh() {
-        guard !busy else { return }
+        guard !busy, !StatusPopover.isSnapshot else { return }
         busy = true
         Task.detached(priority: .utility) {
             let procs = PS.snapshot()
@@ -216,7 +245,7 @@ struct HogsView: View {
     private var summary: String {
         let count = "\(table.all.count) processes"
         return table.sort == .cpu ? "\(count), \(Format.cpu(table.totalCPU)) CPU in total"
-            : "\(count), \(Format.memory(table.totalMemory)) resident"
+            : "\(count), \(Format.memory(table.totalMemory)) resident in sum"
     }
 }
 
@@ -226,13 +255,18 @@ struct ProcRow: View {
     let fraction: Double
     @State private var hovering = false
 
+    private var demoIcon: NSImage? {
+        guard let id = proc.bundleID, let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { return nil }
+        return NSWorkspace.shared.icon(forFile: url.path)
+    }
+
     var body: some View {
-        let app = NSRunningApplication(processIdentifier: proc.pid)
+        let app = StatusPopover.isSnapshot ? nil : NSRunningApplication(processIdentifier: proc.pid)
         let quittable = ProcessTable.quittable(app)
         let colors = table.sort == .cpu ? Palette.accent : Palette.memory
         HStack(spacing: 10) {
             Group {
-                if let icon = app?.icon {
+                if let icon = app?.icon ?? demoIcon {
                     Image(nsImage: icon).resizable()
                 } else {
                     Image(systemName: "gearshape.2.fill").font(.system(size: 13)).foregroundStyle(.tertiary)

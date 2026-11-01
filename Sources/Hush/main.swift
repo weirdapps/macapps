@@ -31,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotKey = HotKey(keyCode: kVK_ANSI_M, modifiers: cmdKey | optionKey) { [weak self] in
             self?.mic.toggle(feedback: true)
         }
+        mic.hotKeyReady = StatusPopover.isSnapshot || hotKey?.isRegistered == true
         mic.$muted.sink { [weak self] muted in
             self?.status.setSymbol(muted ? "mic.slash.fill" : "mic.fill", label: muted ? "Microphone muted" : "Microphone live")
         }
@@ -46,12 +47,23 @@ final class Microphone: ObservableObject {
     @Published private(set) var deviceName = "No input device"
     @AppStorage("playSound") var playSound = true
     @AppStorage("showHUD") var showHUD = true
+    /// False when another app already owns the shortcut, so the panel stops advertising it.
+    @Published var hotKeyReady = true
 
-    /// Input volume saved before muting, for devices without a mute control.
-    private var savedVolume: [AudioDeviceID: Float32] = [:]
+    /// Input volume saved before muting, for devices without a mute control, by device name.
+    /// Kept in defaults so a relaunch while muted still restores the user's level.
+    private var savedVolume: [String: Float] {
+        get { UserDefaults.standard.dictionary(forKey: "savedVolume") as? [String: Float] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "savedVolume") }
+    }
     private var timer: Timer?
 
     init() {
+        // Screenshots go on a public page: a fixed device name, never this Mac's.
+        if StatusPopover.isSnapshot {
+            deviceName = "MacBook Pro Microphone"
+            return
+        }
         refresh()
         var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
                                                  mScope: kAudioObjectPropertyScopeGlobal,
@@ -77,11 +89,14 @@ final class Microphone: ObservableObject {
         guard let device = Microphone.defaultInput() else { return }
         if Microphone.hasMute(device) {
             Microphone.setMute(device, wanted)
-        } else if wanted {
-            savedVolume[device] = Microphone.volume(device) ?? 1
-            Microphone.setVolume(device, 0)
         } else {
-            Microphone.setVolume(device, max(savedVolume[device] ?? 1, 0.05))
+            let key = Microphone.name(device) ?? String(device)
+            if wanted {
+                savedVolume[key] = Microphone.volume(device) ?? 1
+                Microphone.setVolume(device, 0)
+            } else {
+                Microphone.setVolume(device, max(savedVolume[key] ?? 1, 0.05))
+            }
         }
         refresh()
         guard feedback else { return }
@@ -182,9 +197,14 @@ struct HushView: View {
                         .lineLimit(1)
                 }
                 HStack(spacing: 6) {
-                    Text("Toggle from anywhere").font(.system(size: 11)).foregroundStyle(.tertiary)
-                    KeyCap("⌥⌘M")
-                    Text("or right-click the icon").font(.system(size: 11)).foregroundStyle(.tertiary)
+                    if mic.hotKeyReady {
+                        Text("Toggle from anywhere").font(.system(size: 11)).foregroundStyle(.tertiary)
+                        KeyCap("⌥⌘M")
+                        Text("or right-click the icon").font(.system(size: 11)).foregroundStyle(.tertiary)
+                    } else {
+                        Text("⌥⌘M is taken by another app. Right-click the icon to toggle.")
+                            .font(.system(size: 11)).foregroundStyle(.tertiary)
+                    }
                 }
             }
             .padding(.top, 26)

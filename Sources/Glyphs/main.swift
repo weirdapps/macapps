@@ -57,6 +57,8 @@ enum Catalog {
         "÷": "divide division", "−": "minus", "∆": "delta increment", "→": "right arrow", "←": "left arrow",
         "✓": "check tick", "✔": "check tick heavy", "✗": "cross x", "✘": "cross x heavy", "★": "star", "☆": "star outline",
         "♥": "heart", "‰": "per mille", "№": "numero number",
+        "“": "left double quote", "”": "right double quote", "‘": "left single quote", "’": "right single quote apostrophe",
+        "„": "low double quote", "‚": "low single quote",
     ]
 
     static func glyphs(_ chars: String) -> [Glyph] {
@@ -110,6 +112,14 @@ final class GlyphModel: ObservableObject {
     @AppStorage("recent") private var recentStorage = "→ • … « » ⌘ € ½ ✓" { willSet { objectWillChange.send() } }
     @Published var query = ""
     @Published var hovered: Glyph?
+
+    init() {
+        // Screenshots use their own keys, so they show the defaults and never this Mac's recents.
+        if StatusPopover.isSnapshot {
+            _category = AppStorage(wrappedValue: "Arrows", "snapshot.category")
+            _recentStorage = AppStorage(wrappedValue: "→ • … « » ⌘ € ½ ✓", "snapshot.recent")
+        }
+    }
 
     var recent: [Glyph] {
         recentStorage.split(separator: " ").compactMap { s in Catalog.all.first { $0.char == String(s) } }

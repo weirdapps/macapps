@@ -23,6 +23,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         status = StatusPopover(symbol: "number", accessibilityLabel: "Hash") {
             HashView().environmentObject(self.model)
         }
+        // Semitransient keeps the panel open while a file is dragged in from Finder.
+        status.behavior = .semitransient
+        model.reopen = { [weak self] in self?.status.show() }
     }
 }
 
@@ -78,15 +81,19 @@ struct MultiHasher {
         return h.finalize()
     }
 
-    /// The algorithm whose digest equals a pasted hash. Ignores case, spaces, colons and a leading "sha256:" style label.
+    /// The algorithm whose digest equals a pasted hash. Finds the digest inside lines such as
+    /// "sha256:<hex>", "<hex>  file.zip" (shasum) and "SHA256 (file.zip) = <hex>" (BSD); ignores case.
     static func match(_ expected: String, in digests: [Algo: String]) -> Algo? {
-        var s = expected.lowercased().filter { !$0.isWhitespace && $0 != ":" }
-        if let label = ["sha256", "sha384", "sha512", "sha1", "md5", "sha-256", "sha-384", "sha-512", "sha-1"].first(where: { s.hasPrefix($0) }),
-           s.count > label.count, s.dropFirst(label.count).allSatisfy(\.isHexDigit) {
-            s.removeFirst(label.count)
+        let lower = expected.lowercased()
+        // Whole input with separators removed covers "ab:cd:..." and "ab cd ..." spacing.
+        var candidates = [lower.filter { !$0.isWhitespace && $0 != ":" }]
+        // Each hex run of a digest's length covers labels, file names and "(file) =" around it.
+        candidates += lower.split(whereSeparator: { !$0.isHexDigit }).map(String.init)
+            .filter { [32, 40, 64, 96, 128].contains($0.count) }
+        for candidate in candidates {
+            if let algo = Algo.allCases.first(where: { digests[$0] == candidate }) { return algo }
         }
-        guard !s.isEmpty else { return nil }
-        return Algo.allCases.first { digests[$0] == s }
+        return nil
     }
 }
 
@@ -102,6 +109,8 @@ final class HashModel: ObservableObject {
     @Published private(set) var fileError: String?
     @AppStorage("uppercase") var uppercase = false
 
+    /// Shows the panel again after a modal open panel closed it.
+    var reopen: (() -> Void)?
     private var job: Task<Void, Never>?
     private var generation = 0
 
@@ -157,6 +166,7 @@ final class HashModel: ObservableObject {
         panel.canChooseDirectories = false
         NSApp.activate(ignoringOtherApps: true)
         if panel.runModal() == .OK, let url = panel.url { hash(file: url) }
+        reopen?()
     }
 
     func display(_ digest: String) -> String { uppercase ? digest.uppercased() : digest }
