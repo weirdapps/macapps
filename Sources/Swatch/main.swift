@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store.closePanel = { [weak self] in self?.status.close() }
         status.onSecondaryClick = { [weak self] in self?.store.pick() }
         hotKey = HotKey(keyCode: kVK_ANSI_C, modifiers: cmdKey | optionKey) { [weak self] in self?.store.pick() }
+        store.hotKeyReady = StatusPopover.isSnapshot || hotKey?.isRegistered == true
     }
 }
 
@@ -114,7 +115,11 @@ enum Format: String, CaseIterable, Identifiable {
 
 @MainActor
 final class SwatchStore: ObservableObject {
-    @Published var history: [RGB] { didSet { Storage.save(history, app: "Swatch", file: "history.json") } }
+    @Published var history: [RGB] {
+        didSet { if !StatusPopover.isSnapshot { Storage.save(history, app: "Swatch", file: "history.json") } }
+    }
+    /// False when another app owns the shortcut, so the panel does not advertise one that never fires.
+    @Published var hotKeyReady = false
     @Published var current: RGB?
     @AppStorage("copyFormat") var copyFormat: Format = .hex
     @AppStorage("copyOnPick") var copyOnPick = true
@@ -122,7 +127,14 @@ final class SwatchStore: ObservableObject {
     private let sampler = NSColorSampler()
 
     init() {
-        history = Storage.load([RGB].self, app: "Swatch", file: "history.json") ?? []
+        if StatusPopover.isSnapshot {
+            // Fixed demo colours and settings, never the user's own; nothing is saved.
+            UserDefaults.standard.setVolatileDomain(["copyFormat": Format.hex.rawValue, "copyOnPick": true],
+                                                    forName: UserDefaults.argumentDomain)
+            history = ["#3B82F6", "#F97316", "#10B981", "#EF4444", "#8B5CF6", "#FACC15", "#0F172A", "#EC4899"].compactMap { RGB(hex: $0) }
+        } else {
+            history = Storage.load([RGB].self, app: "Swatch", file: "history.json") ?? []
+        }
         current = history.first
     }
 
@@ -195,7 +207,8 @@ struct SwatchView: View {
             } else {
                 VStack(spacing: 8) {
                     Image(systemName: "eyedropper").font(.system(size: 26)).foregroundStyle(.tertiary)
-                    Text("Press Pick or ⌥⌘C, then click anywhere on screen to sample a colour.")
+                    Text(store.hotKeyReady ? "Press Pick or ⌥⌘C, then click anywhere on screen to sample a colour."
+                                           : "Press Pick, then click anywhere on screen to sample a colour.")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -211,7 +224,7 @@ struct SwatchView: View {
                     .padding(.bottom, 12)
             }
             Divider().opacity(0.5)
-            PanelFooter(name: "Swatch", shortcut: "⌥⌘C") {
+            PanelFooter(name: "Swatch", shortcut: store.hotKeyReady ? "⌥⌘C" : nil) {
                 Toggle("Copy When Picked", isOn: $store.copyOnPick)
                 Picker("Copy As", selection: $store.copyFormat) {
                     ForEach(Format.allCases) { Text($0.rawValue).tag($0) }
@@ -311,6 +324,7 @@ struct HistoryGrid: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

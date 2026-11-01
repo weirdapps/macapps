@@ -80,14 +80,26 @@ enum TableCodec {
         let lines = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         guard !lines.isEmpty else { return nil }
         if lines.count >= 2, lines[0].contains("|"), isSeparatorRow(lines[1]) { return .markdown }
-        // Count delimiters outside quotes on the first line.
-        let first = lines[0]
+        // Count delimiters outside quotes in the first record, which may run over several lines inside quotes,
+        // and count the records, so a sentence with a comma is not taken for a table.
         var counts: [Character: Int] = ["\t": 0, ",": 0, ";": 0]
-        var quoted = false
-        for c in first {
-            if c == "\"" { quoted.toggle() } else if !quoted, counts[c] != nil { counts[c]! += 1 }
+        var quoted = false, records = 0, recordHasText = false
+        for c in text {
+            if c == "\"" {
+                quoted.toggle()
+                recordHasText = true
+            } else if !quoted, c == "\n" || c == "\r\n" || c == "\r" {
+                if recordHasText { records += 1 }
+                recordHasText = false
+            } else {
+                if !c.isWhitespace { recordHasText = true }
+                if !quoted, records == 0, counts[c] != nil { counts[c]! += 1 }
+            }
         }
+        if recordHasText { records += 1 }
+        // A tab means a spreadsheet range, even a single row; commas and semicolons need a second row.
         if counts["\t"]! > 0 { return .delimited("\t") }
+        guard records >= 2 else { return nil }
         if counts[";"]! > counts[","]! { return .delimited(";") }
         if counts[","]! > 0 { return .delimited(",") }
         return nil
@@ -221,7 +233,10 @@ enum TableCodec {
 
 @MainActor
 final class TabulaModel: ObservableObject {
-    @Published private(set) var source = ""
+    @Published private(set) var source = "" { didSet { parse() } }
+    /// Parsed once per clipboard change, not on every redraw: a large CSV would otherwise stall the panel.
+    @Published private(set) var format: Format?
+    @Published private(set) var table: Table?
     @AppStorage("alignment") var alignment: ColumnAlignment = .none { willSet { objectWillChange.send() } }
     @AppStorage("useTabs") var useTabs = false { willSet { objectWillChange.send() } }
     @AppStorage("pad") var pad = true { willSet { objectWillChange.send() } }
@@ -232,9 +247,29 @@ final class TabulaModel: ObservableObject {
     private var timer: Timer?
 
     init() {
+        if StatusPopover.isSnapshot {
+            // A fixed demo table and settings, never the user's clipboard; nothing is read or saved.
+            UserDefaults.standard.setVolatileDomain(["alignment": ColumnAlignment.none.rawValue, "useTabs": false, "pad": true,
+                                                     "guardFormulas": false], forName: UserDefaults.argumentDomain)
+            source = "City,Country,Population\nAthens,Greece,664046\nLisbon,Portugal,545796\nOslo,Norway,709037\n"
+            parse() // didSet does not run for assignments made in init.
+            return
+        }
         poll()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll() }
+        }
+        // Common modes, so a copy made while a menu is open still shows up.
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    private func parse() {
+        format = TableCodec.detect(source)
+        switch format {
+        case .markdown: table = TableCodec.parseMarkdown(source)
+        case .delimited(let d): table = TableCodec.parseDelimited(source, delimiter: d)
+        case nil: table = nil
         }
     }
 
@@ -242,16 +277,6 @@ final class TabulaModel: ObservableObject {
         guard pasteboard.changeCount != lastChange else { return }
         lastChange = pasteboard.changeCount
         withAnimation(.snappy) { source = pasteboard.string(forType: .string) ?? "" }
-    }
-
-    var format: Format? { TableCodec.detect(source) }
-
-    var table: Table? {
-        switch format {
-        case .markdown: TableCodec.parseMarkdown(source)
-        case .delimited(let d): TableCodec.parseDelimited(source, delimiter: d)
-        case nil: nil
-        }
     }
 
     var output: String {

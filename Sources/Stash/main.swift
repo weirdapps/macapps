@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         store.onCopied = { [weak self] in self?.status.close() }
         hotKey = HotKey(keyCode: kVK_ANSI_S, modifiers: cmdKey | optionKey) { [weak self] in self?.status.toggle() }
+        store.hotKeyReady = StatusPopover.isSnapshot || hotKey?.isRegistered == true
     }
 }
 
@@ -39,15 +40,27 @@ struct Snippet: Codable, Identifiable, Equatable {
 
 @MainActor
 final class SnippetStore: ObservableObject {
-    @Published var snippets: [Snippet] { didSet { Storage.save(snippets, app: "Stash", file: "snippets.json") } }
+    @Published var snippets: [Snippet] {
+        didSet { if !StatusPopover.isSnapshot { Storage.save(snippets, app: "Stash", file: "snippets.json") } }
+    }
+    /// False when another app owns ⌥⌘S, so the footer does not advertise a shortcut that never fires.
+    @Published var hotKeyReady = false
     @Published var query = ""
     /// The snippet being edited; a new one has an id not yet in `snippets`.
     @Published var editing: Snippet?
     var onCopied: (() -> Void)?
 
     init() {
-        snippets = Storage.load([Snippet].self, app: "Stash", file: "snippets.json") ?? []
+        // A snapshot shows fixed demo snippets, never the user's own.
+        snippets = StatusPopover.isSnapshot ? SnippetStore.demo : Storage.load([Snippet].self, app: "Stash", file: "snippets.json") ?? []
     }
+
+    static let demo = [
+        Snippet(title: "Home address", text: "221B Baker Street\nLondon NW1 6XE"),
+        Snippet(title: "Meeting link", text: "https://example.com/meet/standup"),
+        Snippet(title: "Thanks reply", text: "Thanks, got it. I will get back to you by Friday."),
+        Snippet(title: "Shrug", text: "¯\\_(ツ)_/¯"),
+    ]
 
     var filtered: [Snippet] {
         let q = query.trimmingCharacters(in: .whitespaces)
@@ -123,7 +136,7 @@ struct StashView: View {
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
             Divider().opacity(0.5)
-            PanelFooter(name: "Stash", shortcut: "⌥⌘S") {
+            PanelFooter(name: "Stash", shortcut: store.hotKeyReady ? "⌥⌘S" : nil) {
                 Button("New Snippet") { withAnimation(.snappy) { store.newSnippet() } }.keyboardShortcut("n")
             }
         }
@@ -197,9 +210,13 @@ struct ListPane: View {
                     .padding(.horizontal, 8)
                     .padding(.bottom, 8)
                 }
+                // A drop between rows ends the drag too, so the dragged row does not stay faded.
+                .onDrop(of: [.text], isTargeted: nil) { _ in dragging = nil; return true }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .popoverDidShow)) { _ in
+            // A drag dropped outside the list never reaches performDrop; do not leave its row faded.
+            dragging = nil
             DispatchQueue.main.async { searchFocused = true }
         }
     }

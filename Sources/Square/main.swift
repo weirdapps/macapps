@@ -24,6 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         status = StatusPopover(symbol: "qrcode", accessibilityLabel: "Square") {
             SquareView().environmentObject(self.model)
         }
+        // Stays open while the user drags an image in from Finder, picks a colour or saves a PNG.
+        status.behavior = .semitransient
     }
 }
 
@@ -58,12 +60,13 @@ enum QR {
         return context.createCGImage(output, from: inner)
     }
 
-    /// Renders crisp square modules at `size` pixels with a four module quiet zone, as the standard asks.
+    /// Renders crisp square modules in an image exactly `size` pixels wide, with at least a four module quiet zone,
+    /// as the standard asks. Modules stay whole pixels; the spare pixels go to the quiet zone.
     static func image(_ text: String, correction: Correction, size: Int, foreground: CGColor, background: CGColor) -> CGImage? {
         guard let grid = modules(text, correction: correction) else { return nil }
-        let count = grid.width + 8
-        let scale = max(1, size / count)
-        let side = scale * count
+        let scale = max(1, size / (grid.width + 8))
+        let side = max(size, scale * (grid.width + 8))
+        let margin = (side - scale * grid.width) / 2
         guard let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
@@ -76,7 +79,7 @@ enum QR {
         for y in 0..<grid.height {
             for x in 0..<grid.width where bytes[y * row + x * bpp] < 128 {
                 // Image rows run top down; the context's y axis runs bottom up.
-                ctx.fill(CGRect(x: (x + 4) * scale, y: (grid.height - 1 - y + 4) * scale, width: scale, height: scale))
+                ctx.fill(CGRect(x: margin + x * scale, y: margin + (grid.height - 1 - y) * scale, width: scale, height: scale))
             }
         }
         return ctx.makeImage()
@@ -127,9 +130,24 @@ final class SquareModel: ObservableObject {
         set { backgroundHex = newValue.hex }
     }
 
+    /// Init pins the settings to their defaults in a snapshot, so the public screenshot never shows the user's choices.
+    init() {
+        if StatusPopover.isSnapshot {
+            UserDefaults.standard.setVolatileDomain(["correction": Correction.M.rawValue, "size": 1024, "foreground": "111827",
+                                                     "background": "FFFFFF"], forName: UserDefaults.argumentDomain)
+        }
+    }
+
+    private var cache: (key: String, image: CGImage?)?
+
+    /// The rendered code, made once per change of text or setting rather than on every redraw.
     var image: CGImage? {
-        QR.image(text, correction: correction, size: size,
-                 foreground: NSColor(foreground).cgColor, background: NSColor(background).cgColor)
+        let key = [text, correctionRaw, String(size), foregroundHex, backgroundHex].joined(separator: "\u{0}")
+        if let cache, cache.key == key { return cache.image }
+        let image = QR.image(text, correction: correction, size: size,
+                             foreground: NSColor(foreground).cgColor, background: NSColor(background).cgColor)
+        cache = (key, image)
+        return image
     }
 
     var lowContrast: Bool { QR.contrast(NSColor(foreground).cgColor, NSColor(background).cgColor) < 3 }

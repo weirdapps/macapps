@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             SumView().environmentObject(self.model)
         }
         hotKey = HotKey(keyCode: kVK_ANSI_K, modifiers: cmdKey | optionKey) { [weak self] in self?.status.toggle() }
+        model.hotKeyReady = StatusPopover.isSnapshot || hotKey?.isRegistered == true
     }
 }
 
@@ -51,7 +52,42 @@ struct Calculator {
     static let trig: [String: (Double) -> Double] = ["sin": sin, "cos": cos, "tan": tan]
     static let constants: [String: Double] = ["pi": .pi, "π": .pi, "e": M_E]
 
+    /// Reads a run of digits with separators: "1,234.5" and "1.234,5" are both 1234.5. A lone comma is the decimal
+    /// point where the region writes one (3,5), and groups thousands where it does not (1,000).
+    static func number(_ raw: String, decimalComma: Bool) -> Double? {
+        let commas = raw.filter { $0 == "," }.count, dots = raw.filter { $0 == "." }.count
+        /// "1,234,567" with `,` gives "1234567"; nil unless every group after the first has three digits.
+        func grouped(_ s: Substring, by sep: Character) -> String? {
+            let parts = s.split(separator: sep, omittingEmptySubsequences: false)
+            guard parts.count > 1, !parts[0].isEmpty, parts[0].count <= 3, parts.dropFirst().allSatisfy({ $0.count == 3 }) else { return nil }
+            return parts.joined()
+        }
+        var s = raw
+        if commas > 0 && dots > 0 {
+            // The separator that comes last is the decimal point; the other one groups thousands.
+            let decimal: Character = raw.lastIndex(of: ",")! > raw.lastIndex(of: ".")! ? "," : "."
+            let group: Character = decimal == "," ? "." : ","
+            let parts = raw.split(separator: decimal, omittingEmptySubsequences: false)
+            guard parts.count == 2, !parts[1].contains(group) else { return nil }
+            guard let whole = parts[0].contains(group) ? grouped(parts[0], by: group) : String(parts[0]) else { return nil }
+            s = whole + "." + parts[1]
+        } else if commas > 0 {
+            if decimalComma && commas == 1 {
+                s = raw.replacingOccurrences(of: ",", with: ".")
+            } else if let g = grouped(Substring(raw), by: ",") {
+                s = g
+            } else {
+                return nil
+            }
+        } else if dots > 1 {
+            guard let g = grouped(Substring(raw), by: ".") else { return nil }
+            s = g
+        }
+        return Double(s)
+    }
+
     static func tokenize(_ text: String) throws -> [(Token, Int)] {
+        let decimalComma = Locale.current.decimalSeparator == ","
         var out: [(Token, Int)] = []
         let chars = Array(text)
         var i = 0
@@ -60,7 +96,9 @@ struct Calculator {
             if c.isWhitespace { i += 1; continue }
             if c.isNumber || c == "." {
                 let start = i
-                while i < chars.count, chars[i].isNumber || chars[i] == "." { i += 1 }
+                // A comma joins the number only between digits: 1,234 and 3,5.
+                while i < chars.count, chars[i].isNumber || chars[i] == "."
+                    || (chars[i] == "," && i > start && i + 1 < chars.count && chars[i + 1].isNumber) { i += 1 }
                 // Exponent: 1e5, 2.5E-3.
                 if i < chars.count, chars[i] == "e" || chars[i] == "E", i + 1 < chars.count,
                    chars[i + 1].isNumber || ((chars[i + 1] == "-" || chars[i + 1] == "+") && i + 2 < chars.count && chars[i + 2].isNumber) {
@@ -68,7 +106,7 @@ struct Calculator {
                     while i < chars.count, chars[i].isNumber { i += 1 }
                 }
                 let s = String(chars[start..<i])
-                guard let v = Double(s) else { throw CalcError(message: "\u{201C}\(s)\u{201D} is not a number.", position: start) }
+                guard let v = number(s, decimalComma: decimalComma) else { throw CalcError(message: "\u{201C}\(s)\u{201D} is not a number.", position: start) }
                 out.append((.number(v), start))
                 continue
             }
@@ -243,7 +281,10 @@ struct Calculator {
             // 1.5e+20 reads better as 1.5e20.
             s = s.replacingOccurrences(of: "e+", with: "e").replacingOccurrences(of: "e-0", with: "e-").replacingOccurrences(of: "e0", with: "e")
         }
-        if grouping, !s.contains("e"), let dot = s.firstIndex(of: "."), let whole = Int64(s[..<dot]) {
+        if grouping, !s.contains("e"), !s.contains("."), let whole = Int64(s) {
+            // Twelve significant digits can round the fraction away: 123456789012.5 prints as 123456789012.
+            s = whole.formatted(.number.grouping(.automatic).locale(Locale(identifier: "en_US")))
+        } else if grouping, !s.contains("e"), let dot = s.firstIndex(of: "."), let whole = Int64(s[..<dot]) {
             let head = whole == 0 && s.hasPrefix("-") ? "-0" : whole.formatted(.number.grouping(.automatic).locale(Locale(identifier: "en_US")))
             s = head + s[dot...]
         }
@@ -263,10 +304,26 @@ final class SumModel: ObservableObject {
     @Published private(set) var history: [Entry] = []
     @Published private(set) var ans: Double = 0
     @AppStorage("degrees") var degrees = false
+    /// False when another app owns the shortcut, so the footer does not advertise one that never fires.
+    @Published var hotKeyReady = false
 
     init() {
-        history = Storage.load([Entry].self, app: "Sum", file: "history.json") ?? []
+        if StatusPopover.isSnapshot {
+            // Fixed demo history and settings, never the user's own; nothing is saved.
+            UserDefaults.standard.setVolatileDomain(["degrees": false], forName: UserDefaults.argumentDomain)
+            history = ["1200 * 1.24", "2 ^ 10 / sqrt(16)", "sin(pi / 6)", "365 * 24"].compactMap { e in
+                guard case .success(let v) = Calculator().evaluate(e) else { return nil }
+                return Entry(expression: e, value: v)
+            }
+        } else {
+            history = Storage.load([Entry].self, app: "Sum", file: "history.json") ?? []
+        }
         ans = history.first?.value ?? 0
+    }
+
+    private func saveHistory() {
+        guard !StatusPopover.isSnapshot else { return }
+        Storage.save(history, app: "Sum", file: "history.json")
     }
 
     var calculator: Calculator { Calculator(ans: ans, degrees: degrees) }
@@ -281,12 +338,12 @@ final class SumModel: ObservableObject {
         }
         ans = v
         input = ""
-        Storage.save(history, app: "Sum", file: "history.json")
+        saveHistory()
     }
 
     func clearHistory() {
         history = []
-        Storage.save(history, app: "Sum", file: "history.json")
+        saveHistory()
     }
 
     func copy(_ v: Double) {
@@ -310,7 +367,7 @@ struct SumView: View {
             Divider().opacity(0.5)
             HistoryList()
             Divider().opacity(0.5)
-            PanelFooter(name: "Sum", shortcut: "⌥⌘K") {
+            PanelFooter(name: "Sum", shortcut: model.hotKeyReady ? "⌥⌘K" : nil) {
                 Toggle("Angles in Degrees", isOn: $model.degrees)
                 Divider()
                 Button("Clear History") { model.clearHistory() }
@@ -415,7 +472,7 @@ struct HistoryList: View {
                 .frame(height: 170)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 3) {
+                    VStack(spacing: 3) {
                         ForEach(model.history) { HistoryRow(entry: $0) }
                     }
                     .padding(8)
