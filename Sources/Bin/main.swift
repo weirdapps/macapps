@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Kit
 import SwiftUI
+import UniformTypeIdentifiers
 
 IconKit.handleCommandLine(draw: appIcon)
 
@@ -81,11 +82,40 @@ enum Trash {
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".Trash")
     }
 
-    /// Top-level names, or nil when macOS does not let this app read the folder.
+    /// Top-level names in the home Trash and in each external volume's Trash,
+    /// or nil when macOS does not let this app read the home Trash (no Full Disk Access).
     static func names() -> [URL]? {
-        try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [])
+        guard let home = list(url) else { return nil }
+        // Only reached with access granted, so reading other volumes never raises a permission prompt.
+        return home + volumeTrashes.flatMap { list($0) ?? [] }
+    }
+
+    /// `/Volumes/<name>/.Trashes/<uid>` for every mounted volume other than the startup disk.
+    static var volumeTrashes: [URL] {
+        let volumes = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: nil, options: [.skipHiddenVolumes]) ?? []
+        return volumes
+            .filter { $0.path != "/" && !$0.path.hasPrefix("/System/") }
+            .map { $0.appendingPathComponent(".Trashes/\(getuid())", isDirectory: true) }
+    }
+
+    private static func list(_ dir: URL) -> [URL]? {
+        try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [])
             .filter { $0.lastPathComponent != ".DS_Store" }
     }
+
+    /// Made-up contents for published screenshots; nothing is read from the real Trash.
+    static let demo: TrashContents = {
+        let items: [(String, Int64)] = [
+            ("Holiday photos", 1_240_000_000),
+            ("Screen Recording 2026-10-28.mov", 386_000_000),
+            ("Design mockups.zip", 52_400_000),
+            ("Quarterly report draft.pdf", 8_300_000),
+            ("Invoice 1042.pdf", 210_000),
+            ("notes.txt", 4_000),
+        ]
+        let largest = items.map { TrashItem(url: URL(fileURLWithPath: "/Demo/Trash").appendingPathComponent($0.0), bytes: $0.1) }
+        return TrashContents(count: 14, bytes: 1_712_600_000, largest: largest)
+    }()
 
     /// Size on disk of a file or a whole folder tree.
     static func size(of item: URL) -> Int64 {
@@ -133,7 +163,13 @@ final class TrashWatcher: ObservableObject {
     private var timer: Timer?
     private var busy = false
 
+    private let snapshot = CommandLine.arguments.contains("--snapshot")
+
     init() {
+        if snapshot {
+            state = .ready(Trash.demo)
+            return
+        }
         refresh(force: true)
         // Listing the top level is cheap; the full size is only recomputed when that listing changes.
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
@@ -143,7 +179,7 @@ final class TrashWatcher: ObservableObject {
     }
 
     func refresh(force: Bool) {
-        guard !busy else { return }
+        guard !busy, !snapshot else { return }
         let names = Trash.names()
         guard force || names != lastNames else { return }
         lastNames = names
@@ -158,6 +194,10 @@ final class TrashWatcher: ObservableObject {
     }
 
     func openTrash() { NSWorkspace.shared.open(Trash.url) }
+
+    func openFullDiskAccess() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
+    }
 
     func reveal(_ item: TrashItem) { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
 }
@@ -178,7 +218,11 @@ struct BinView: View {
                 ProgressView().controlSize(.small).padding(.vertical, 50)
             case .denied:
                 Message(symbol: "lock.fill", title: "The Trash is private",
-                        text: "macOS only shows the Trash to apps with Full Disk Access. Bin does not ask for it, so open the Trash in Finder instead.")
+                        text: "macOS only shows the Trash to apps with Full Disk Access. Turn it on for Bin in System Settings, then open this panel again.")
+                Button("Grant Full Disk Access") { trash.openFullDiskAccess() }
+                    .buttonStyle(.link)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .padding(.bottom, 14)
             case .ready(let contents) where contents.count == 0:
                 Message(symbol: "sparkles", title: "The Trash is empty", text: "Nothing to clean up right now.")
             case .ready(let contents):
@@ -247,7 +291,7 @@ struct ItemRow: View {
 
     var body: some View {
         HStack(spacing: 9) {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: item.url.path))
+            Image(nsImage: icon)
                 .resizable()
                 .frame(width: 22, height: 22)
             Text(item.url.lastPathComponent)
@@ -267,6 +311,13 @@ struct ItemRow: View {
         .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hovering = h } }
         .onTapGesture { trash.reveal(item) }
         .help("Show in Finder")
+    }
+
+    /// The file's own icon, or its type's icon for the made-up snapshot items.
+    private var icon: NSImage {
+        if FileManager.default.fileExists(atPath: item.url.path) { return NSWorkspace.shared.icon(forFile: item.url.path) }
+        let ext = item.url.pathExtension
+        return NSWorkspace.shared.icon(for: ext.isEmpty ? .folder : UTType(filenameExtension: ext) ?? .data)
     }
 }
 

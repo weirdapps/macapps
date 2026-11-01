@@ -37,6 +37,11 @@ final class Clipboard: ObservableObject {
 
     init() {
         lastChange = pasteboard.changeCount
+        // Published screenshots show demo text, never the real clipboard.
+        if CommandLine.arguments.contains("--snapshot") {
+            text = "Let's ship the new release before Friday's review."
+            return
+        }
         text = pasteboard.string(forType: .string) ?? ""
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll() }
@@ -90,20 +95,32 @@ enum Style: String, CaseIterable, Identifiable {
 
     func convert(_ text: String) -> String {
         switch self {
-        case .upper: return text.uppercased()
-        case .lower: return text.lowercased()
+        case .upper: return text.up
+        case .lower: return text.low
         case .title: return CaseConverter.title(text)
         case .sentence: return CaseConverter.sentence(text)
         case .camel:
-            let w = CaseConverter.words(text).map { $0.lowercased() }
+            let w = CaseConverter.words(text).map { $0.low }
             guard let first = w.first else { return "" }
             return first + w.dropFirst().map(CaseConverter.capitalized).joined()
-        case .pascal: return CaseConverter.words(text).map { CaseConverter.capitalized($0.lowercased()) }.joined()
-        case .snake: return CaseConverter.words(text).map { $0.lowercased() }.joined(separator: "_")
-        case .kebab: return CaseConverter.words(text).map { $0.lowercased() }.joined(separator: "-")
-        case .constant: return CaseConverter.words(text).map { $0.uppercased() }.joined(separator: "_")
+        case .pascal: return CaseConverter.words(text).map { CaseConverter.capitalized($0.low) }.joined()
+        case .snake: return CaseConverter.words(text).map { $0.low }.joined(separator: "_")
+        case .kebab: return CaseConverter.words(text).map { $0.low }.joined(separator: "-")
+        case .constant: return CaseConverter.words(text).map { $0.up }.joined(separator: "_")
         }
     }
+}
+
+/// Greek rules for whole-word case mapping: final sigma when lowering, no tonos in capitals.
+/// They leave Latin text as the plain mapping would. Capitalising one letter keeps the tonos (Άλφα).
+enum Greek {
+    // A static, not a main.swift global: those are set only once top-level code reaches them.
+    static let locale = Locale(identifier: "el")
+}
+
+extension StringProtocol {
+    var up: String { uppercased(with: Greek.locale) }
+    var low: String { lowercased(with: Greek.locale) }
 }
 
 enum CaseConverter {
@@ -157,7 +174,7 @@ enum CaseConverter {
     }
 
     static func title(_ text: String) -> String {
-        let source = isShouting(text) ? text.lowercased() : text
+        let source = isShouting(text) ? text.low : text
         return source.split(separator: "\n", omittingEmptySubsequences: false).map { titleLine(String($0)) }.joined(separator: "\n")
     }
 
@@ -182,13 +199,16 @@ enum CaseConverter {
     }
 
     private static func titleWord(_ word: String, force: Bool) -> String {
-        if isSpecial(word) { return word }
+        // An all-caps word of five letters or more is shouting, not an acronym like NASA.
+        let letters = word.filter(\.isLetter)
+        let shouted = letters.count >= 5 && letters.allSatisfy(\.isUppercase)
+        if isSpecial(word) && !shouted { return word }
         // Leading punctuation such as quotes or brackets stays in front.
         let prefix = word.prefix { !$0.isLetter && !$0.isNumber }
         let core = String(word.dropFirst(prefix.count))
-        let bare = core.lowercased().trimmingCharacters(in: .punctuationCharacters)
-        if !force && smallWords.contains(bare) { return prefix + core.lowercased() }
-        return prefix + capitalized(core)
+        let bare = core.low.trimmingCharacters(in: .punctuationCharacters)
+        if !force && smallWords.contains(bare) { return prefix + core.low }
+        return prefix + capitalized(shouted ? core.low : core)
     }
 
     static func sentence(_ text: String) -> String {
@@ -199,14 +219,14 @@ enum CaseConverter {
         func flush() {
             guard !word.isEmpty else { return }
             var w = word
-            if !shouting && isSpecial(w) && w.filter(\.isLetter).allSatisfy(\.isUppercase) {
-                // Keep acronyms such as NASA.
-            } else {
-                w = w.lowercased()
+            // Keep acronyms (NASA) and mixed-case names (iPhone, McDonald's) as written.
+            let keep = !shouting && isSpecial(w)
+            if !keep {
+                w = w.low
                 if w == "i" || w.hasPrefix("i'") || w.hasPrefix("i\u{2019}") { w = "I" + w.dropFirst() }
             }
             if capitalizeNext, let idx = w.firstIndex(where: \.isLetter) {
-                w.replaceSubrange(idx...idx, with: String(w[idx]).uppercased())
+                if !keep { w.replaceSubrange(idx...idx, with: String(w[idx]).uppercased()) }
                 capitalizeNext = false
             } else if capitalizeNext && w.contains(where: \.isNumber) {
                 capitalizeNext = false

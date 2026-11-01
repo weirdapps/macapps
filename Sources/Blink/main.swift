@@ -36,6 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateStatus()
     }
 
+    func applicationWillTerminate(_ notification: Notification) { coach.persist() }
+
     private func updateStatus() {
         if coach.paused {
             status.setSymbol("eye.slash", label: "Blink, paused")
@@ -109,20 +111,29 @@ final class BreakCoach: ObservableObject {
 
     private var timer: Timer?
     private var lastTick = Date()
+    private var ticks = 0
     private let overlay = BreakOverlay()
-    private let demo = CommandLine.arguments.contains("--snapshot-break")
+    /// Snapshot runs show fixed demo numbers and never read or write the real stats.
+    private let demo = CommandLine.arguments.contains("--snapshot-break") || CommandLine.arguments.contains("--snapshot")
 
     init() {
         clock = BreakClock(work: TimeInterval(UserDefaults.standard.object(forKey: "workMinutes") as? Int ?? 20) * 60)
-        // The break card snapshot needs no clock.
-        if demo { return }
+        // Snapshots need no clock.
+        if demo {
+            stats = Stats(taken: 5, skipped: 1, activeSeconds: 2 * 3600 + 25 * 60)
+            clock.active = 7 * 60
+            return
+        }
         if let saved = Storage.load(Stats.self, app: "Blink", file: "today.json"), saved.day == BreakCoach.dayKey { stats = saved }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
     }
 
-    nonisolated static var dayKey: String { Date().formatted(.iso8601.year().month().day()) }
+    /// The local calendar day; the ISO 8601 style defaults to GMT, which would roll over at 02:00 in Athens.
+    nonisolated static var dayKey: String {
+        Date().formatted(Date.ISO8601FormatStyle(timeZone: .current).year().month().day())
+    }
 
     var paused: Bool { pausedUntil.map { $0 > Date() } ?? false }
     var untilBreak: TimeInterval { max(0, clock.work - clock.active) }
@@ -137,6 +148,9 @@ final class BreakCoach: ObservableObject {
         let now = Date()
         let dt = min(5, now.timeIntervalSince(lastTick)) // a sleeping Mac must not count as screen time
         lastTick = now
+        ticks += 1
+        // Screen time only changes here, so save it every minute rather than only on breaks.
+        if ticks % 60 == 0 { persist() }
         if stats.day != BreakCoach.dayKey { stats = Stats() }
         if let until = pausedUntil, until <= now { pausedUntil = nil }
 
@@ -190,7 +204,7 @@ final class BreakCoach: ObservableObject {
 
     func pause(for seconds: TimeInterval) { pausedUntil = Date().addingTimeInterval(seconds) }
 
-    private func persist() { if !demo { Storage.save(stats, app: "Blink", file: "today.json") } }
+    func persist() { if !demo { Storage.save(stats, app: "Blink", file: "today.json") } }
 }
 
 // MARK: - Break overlay

@@ -33,7 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateTitle() {
-        let primary = book.interfaces.first?.addresses.first { $0.family == .v4 }
+        // The first IPv4 across interfaces, so an IPv6-only primary interface does not blank the title.
+        let primary = book.interfaces.lazy.flatMap(\.addresses).first { $0.family == .v4 }
         status.setTitle(book.showInBar ? primary?.text ?? "" : "")
     }
 }
@@ -130,17 +131,19 @@ enum Addresses {
         return names
     }
 
-    /// Documentation-range stand-ins (RFC 3849) so published screenshots never show a real global address.
-    static func redacted(_ list: [NetInterface]) -> [NetInterface] {
-        list.map { i in
-            var copy = i
-            copy.addresses = i.addresses.enumerated().map { n, a in
-                a.family == .v6 && !a.isLinkLocal && !a.text.lowercased().hasPrefix("fd")
-                    ? IPAddress(text: "2001:db8:85a3::8a2e:370:\(7334 + n)", family: .v6) : a
-            }
-            return copy
-        }
-    }
+    /// Fixed documentation-range addresses (RFC 5737, RFC 3849) for published screenshots.
+    /// Nothing is read from the Mac, so no real interface or address can leak.
+    static let demo: [NetInterface] = [
+        NetInterface(id: "en0", name: "Wi-Fi", addresses: [
+            IPAddress(text: "192.0.2.24", family: .v4),
+            IPAddress(text: "2001:db8:85a3::8a2e:370:7334", family: .v6),
+        ]),
+        NetInterface(id: "utun4", name: "VPN", addresses: [
+            IPAddress(text: "192.0.2.101", family: .v4),
+            IPAddress(text: "fd00:db8::52c:1", family: .v6),
+        ]),
+    ]
+    static let demoPublic = "203.0.113.42"
 }
 
 @MainActor
@@ -156,6 +159,11 @@ final class AddressBook: ObservableObject {
     private var timer: Timer?
 
     init() {
+        if snapshot {
+            interfaces = Addresses.demo
+            publicIP = .value(Addresses.demoPublic)
+            return
+        }
         refresh()
         // Addresses change with the network; a light poll catches DHCP renewals and VPNs.
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
@@ -165,7 +173,8 @@ final class AddressBook: ObservableObject {
     }
 
     func refresh() {
-        let now = snapshot ? Addresses.redacted(Addresses.read()) : Addresses.read()
+        guard !snapshot else { return }
+        let now = Addresses.read()
         if now != interfaces { interfaces = now }
     }
 
