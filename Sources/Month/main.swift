@@ -36,8 +36,8 @@ enum Cal {
     /// ISO 8601: weeks start on Monday and week 1 holds the year's first Thursday.
     static let iso: Calendar = {
         var c = Calendar(identifier: .iso8601)
-        c.locale = .current
-        c.timeZone = .current
+        c.locale = .autoupdatingCurrent
+        c.timeZone = .autoupdatingCurrent
         return c
     }()
 

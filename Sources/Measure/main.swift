@@ -77,14 +77,19 @@ struct TextStats: Equatable {
             .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
             .prefix(6).map { ($0.key, $0.value) }
 
+        // Greek ends a question with ";" (or U+037E), which the tokenizer does not read as a sentence end.
+        let greek = NLLanguageRecognizer.dominantLanguage(for: text) == .greek
+        let sentenceText = greek
+            ? text.replacingOccurrences(of: ";", with: "?").replacingOccurrences(of: "\u{037E}", with: "?")
+            : text
         let sentenceTokenizer = NLTokenizer(unit: .sentence)
-        sentenceTokenizer.string = text
-        sentenceTokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
-            if text[range].contains(where: { $0.isLetter || $0.isNumber }) { sentences += 1 }
+        sentenceTokenizer.string = sentenceText
+        sentenceTokenizer.enumerateTokens(in: sentenceText.startIndex..<sentenceText.endIndex) { range, _ in
+            if sentenceText[range].contains(where: { $0.isLetter || $0.isNumber }) { sentences += 1 }
             return true
         }
 
-        let allLines = text.components(separatedBy: .newlines)
+        let allLines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: .newlines)
         lines = allLines.count - (allLines.last?.isEmpty == true ? 1 : 0)
         // A paragraph is a run of non-blank lines.
         var inParagraph = false
@@ -97,7 +102,7 @@ struct TextStats: Equatable {
 
     static func duration(_ seconds: Double) -> String {
         if seconds < 1 { return "0 sec" }
-        if seconds < 60 { return "\(Int(seconds.rounded())) sec" }
+        if seconds < 59.5 { return "\(Int(seconds.rounded())) sec" }
         let minutes = Int((seconds / 60).rounded())
         if minutes < 60 { return "\(minutes) min" }
         return "\(minutes / 60) h \(minutes % 60) min"
@@ -116,7 +121,19 @@ final class ClipboardStats: ObservableObject {
     private var lastChange = -1
     private var timer: Timer?
 
+    /// Shown by `--snapshot` instead of the clipboard, which may hold anything.
+    static let demoText = """
+    The best tools disappear into the work. You reach for them without thinking, they do one job well, and then they get out of the way.
+
+    A menu bar app earns its place by being there the moment you need it. Copy a paragraph, glance up, and the numbers are already waiting.
+    """
+
     init() {
+        if StatusPopover.isSnapshot {
+            text = ClipboardStats.demoText
+            stats = TextStats(ClipboardStats.demoText)
+            return
+        }
         poll()
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll() }
@@ -126,11 +143,16 @@ final class ClipboardStats: ObservableObject {
     private func poll() {
         guard pasteboard.changeCount != lastChange else { return }
         lastChange = pasteboard.changeCount
+        // Passwords from a password manager are marked concealed; never show or measure them.
+        if pasteboard.types?.contains(NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")) == true { return }
         let new = pasteboard.string(forType: .string) ?? ""
+        let stamp = lastChange
         // Very large clipboards are measured off the main thread.
         Task.detached(priority: .userInitiated) {
             let stats = TextStats(new)
             await MainActor.run {
+                // A newer clipboard may have finished first; keep the newest.
+                guard stamp == self.lastChange else { return }
                 withAnimation(.snappy) {
                     self.text = new
                     self.stats = stats
@@ -153,6 +175,8 @@ final class ClipboardStats: ObservableObject {
         """
         pasteboard.clearContents()
         pasteboard.setString(summary, forType: .string)
+        // Keep measuring the user's text, not the summary we just wrote.
+        lastChange = pasteboard.changeCount
         HUD.show(symbol: "ruler.fill", title: "Copied", tint: Color.measure[1])
     }
 }

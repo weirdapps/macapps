@@ -27,8 +27,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             NudgeView().environmentObject(self.store)
         }
         hotKey = HotKey(keyCode: kVK_ANSI_R, modifiers: cmdKey | optionKey) { [weak self] in self?.status.toggle() }
-        UNUserNotificationCenter.current().delegate = self
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        // A snapshot never asks for notification permission (and has no bundle to ask with when run bare).
+        if !StatusPopover.isSnapshot {
+            UNUserNotificationCenter.current().delegate = self
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        }
         store.$reminders
             .sink { [weak self] list in
                 self?.status.setSymbol(list.isEmpty ? "bell" : "bell.badge.fill", label: "Nudge, \(list.count) pending")
@@ -98,7 +101,13 @@ final class ReminderStore: ObservableObject {
     private var timer: Timer?
 
     init() {
-        reminders = Storage.load([Reminder].self, app: "Nudge", file: "reminders.json") ?? []
+        if StatusPopover.isSnapshot {
+            // Fixed demo reminders, never the user's own.
+            reminders = [("Stretch and refill water", 1200.0), ("Call the dentist", 5400), ("Pick up the dry cleaning", 15000)]
+                .map { Reminder(text: $0.0, due: Date().addingTimeInterval($0.1)) }
+        } else {
+            reminders = Storage.load([Reminder].self, app: "Nudge", file: "reminders.json") ?? []
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
@@ -141,7 +150,10 @@ final class ReminderStore: ObservableObject {
         HUD.show(symbol: "bell.badge.fill", title: due.count == 1 ? due[0].text : "\(due.count) reminders", tint: Accent.solid)
     }
 
-    private func persist() { Storage.save(reminders, app: "Nudge", file: "reminders.json") }
+    private func persist() {
+        guard !StatusPopover.isSnapshot else { return }
+        Storage.save(reminders, app: "Nudge", file: "reminders.json")
+    }
 }
 
 // MARK: - Views
@@ -214,7 +226,11 @@ struct NudgeView: View {
                 ForEach(NudgeView.presets, id: \.0) { label, seconds in
                     Chip(label) { create(due: Date().addingTimeInterval(seconds)) }
                 }
-                Chip(pickingTime ? "Cancel" : "At…", filled: pickingTime) { withAnimation(.snappy) { pickingTime.toggle() } }
+                Chip(pickingTime ? "Cancel" : "At…", filled: pickingTime) {
+                    // Start the picker an hour from now, not an hour from when the panel was first built.
+                    if !pickingTime { at = Date().addingTimeInterval(3600) }
+                    withAnimation(.snappy) { pickingTime.toggle() }
+                }
             }
             .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty && !pickingTime)
 

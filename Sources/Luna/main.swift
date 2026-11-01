@@ -117,6 +117,7 @@ struct LunaView: View {
             }
         }
         .frame(width: 320)
+        .onReceive(NotificationCenter.default.publisher(for: .popoverDidShow)) { _ in model.offset = 0 }
     }
 }
 
@@ -225,6 +226,7 @@ struct LitShape: Shape {
     }
 }
 
+/// Drawn as seen from the north; the southern view turns the whole disc upside down, which also swaps the lit side.
 struct MoonDisc: View {
     let illumination: Double
     let waxing: Bool
@@ -234,12 +236,12 @@ struct MoonDisc: View {
         ZStack {
             Circle().fill(Color(white: 0.16))
             Maria().fill(Color(white: 0.135))
-            LitShape(illumination: illumination, rightLit: waxing != southern)
+            LitShape(illumination: illumination, rightLit: waxing)
                 .fill(RadialGradient(colors: [Color(white: 0.98), Color(red: 0.86, green: 0.85, blue: 0.8)],
                                      center: .init(x: 0.4, y: 0.35), startRadius: 0, endRadius: 90))
             Maria()
                 .fill(Color(red: 0.55, green: 0.55, blue: 0.56).opacity(0.2))
-                .mask(LitShape(illumination: illumination, rightLit: waxing != southern))
+                .mask(LitShape(illumination: illumination, rightLit: waxing))
             Circle().strokeBorder(.white.opacity(0.08), lineWidth: 1)
         }
         .rotationEffect(.degrees(southern ? 180 : 0))

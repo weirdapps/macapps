@@ -73,7 +73,12 @@ final class ClockStore: ObservableObject {
     private struct Saved: Codable { var cities: [City]; var pinned: UUID? }
 
     init() {
-        if let saved = Storage.load(Saved.self, app: "Meridian", file: "cities.json") {
+        if StatusPopover.isSnapshot {
+            // Fixed demo cities, never the user's own list or home time zone.
+            cities = [("London", "Europe/London"), ("New York", "America/New_York"), ("Tokyo", "Asia/Tokyo"), ("Sydney", "Australia/Sydney")]
+                .map { City(name: $0.0, timeZoneID: $0.1) }
+            pinned = nil
+        } else if let saved = Storage.load(Saved.self, app: "Meridian", file: "cities.json") {
             cities = saved.cities
             pinned = saved.pinned
         } else {
@@ -83,9 +88,12 @@ final class ClockStore: ObservableObject {
                 .filter { $0.1 != here }
                 .map { City(name: $0.0, timeZoneID: $0.1) }
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.now = Date() }
         }
+        // Common modes keep the clocks ticking while the time travel slider is dragged.
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 
     var displayed: Date { now.addingTimeInterval(offset * 60) }
@@ -105,7 +113,10 @@ final class ClockStore: ObservableObject {
 
     func move(from: IndexSet, to: Int) { cities.move(fromOffsets: from, toOffset: to) }
 
-    private func persist() { Storage.save(Saved(cities: cities, pinned: pinned), app: "Meridian", file: "cities.json") }
+    private func persist() {
+        guard !StatusPopover.isSnapshot else { return }
+        Storage.save(Saved(cities: cities, pinned: pinned), app: "Meridian", file: "cities.json")
+    }
 }
 
 enum Clock {
@@ -186,7 +197,7 @@ struct MeridianView: View {
                     }
                     .padding(.horizontal, 10)
                 }
-                .frame(height: min(CGFloat(store.cities.count) * 76 + 4, 360))
+                .frame(height: min(CGFloat(store.cities.count) * 70 + 4, 360))
                 TimeTravel()
             }
             Divider().opacity(0.5)
@@ -350,8 +361,32 @@ struct CitySearch: View {
     private var results: [(name: String, id: String, region: String)] {
         let q = query.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return Array(CitySearch.all.prefix(40)) }
-        return CitySearch.all.filter { $0.name.localizedCaseInsensitiveContains(q) || $0.id.localizedCaseInsensitiveContains(q) }
+        let aliases = CitySearch.aliases.filter { $0.name.localizedCaseInsensitiveContains(q) }
+            .map { (name: $0.name, id: $0.id, region: String($0.id.split(separator: "/").first ?? "")) }
+        let zones = CitySearch.all.filter {
+            $0.name.localizedCaseInsensitiveContains(q) || $0.id.localizedCaseInsensitiveContains(q)
+                || (TimeZone(identifier: $0.id)?.localizedName(for: .generic, locale: .current)?.localizedCaseInsensitiveContains(q) ?? false)
+        }
+        return aliases + zones
     }
+
+    /// Well known cities that are not the name of their time zone.
+    static let aliases: [(name: String, id: String)] = [
+        ("San Francisco", "America/Los_Angeles"), ("Seattle", "America/Los_Angeles"), ("San Diego", "America/Los_Angeles"),
+        ("Las Vegas", "America/Los_Angeles"), ("Washington", "America/New_York"), ("Boston", "America/New_York"),
+        ("Miami", "America/New_York"), ("Atlanta", "America/New_York"), ("Philadelphia", "America/New_York"),
+        ("Dallas", "America/Chicago"), ("Houston", "America/Chicago"), ("Austin", "America/Chicago"),
+        ("Montreal", "America/Toronto"), ("Rio de Janeiro", "America/Sao_Paulo"),
+        ("Thessaloniki", "Europe/Athens"), ("Heraklion", "Europe/Athens"), ("Patras", "Europe/Athens"),
+        ("Larnaca", "Asia/Nicosia"), ("Limassol", "Asia/Nicosia"),
+        ("Manchester", "Europe/London"), ("Edinburgh", "Europe/London"), ("Geneva", "Europe/Zurich"),
+        ("Frankfurt", "Europe/Berlin"), ("Munich", "Europe/Berlin"), ("Hamburg", "Europe/Berlin"),
+        ("Milan", "Europe/Rome"), ("Barcelona", "Europe/Madrid"), ("Mumbai", "Asia/Kolkata"),
+        ("New Delhi", "Asia/Kolkata"), ("Delhi", "Asia/Kolkata"), ("Bangalore", "Asia/Kolkata"),
+        ("Beijing", "Asia/Shanghai"), ("Shenzhen", "Asia/Shanghai"), ("Abu Dhabi", "Asia/Dubai"),
+        ("Osaka", "Asia/Tokyo"), ("Kyoto", "Asia/Tokyo"), ("Canberra", "Australia/Sydney"),
+        ("Wellington", "Pacific/Auckland"), ("Cape Town", "Africa/Johannesburg"), ("Tel Aviv", "Asia/Jerusalem"),
+    ]
 
     var body: some View {
         VStack(spacing: 8) {
@@ -368,7 +403,7 @@ struct CitySearch: View {
 
             ScrollView {
                 LazyVStack(spacing: 1) {
-                    ForEach(results, id: \.id) { result in
+                    ForEach(Array(results.enumerated()), id: \.offset) { _, result in
                         SearchRow(name: result.name, detail: "\(result.region) · \(Clock.time(Date(), in: TimeZone(identifier: result.id) ?? .current))") {
                             onPick(result.id)
                         }
