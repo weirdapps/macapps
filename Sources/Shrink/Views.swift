@@ -7,6 +7,10 @@ enum Theme {
     static let deep = Color(red: 0x0E / 255, green: 0x7C / 255, blue: 0x86 / 255)
     static let accent = Color(red: 0x14 / 255, green: 0xA2 / 255, blue: 0x9C / 255)
     static let gradient = LinearGradient(colors: [light, deep], startPoint: .topLeading, endPoint: .bottomTrailing)
+    /// Teal for text: the deep end in light mode, a brighter teal in dark mode so it still reads on a dark row.
+    static let text = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? rgb(0x3FD9C2) : rgb(0x0E7C86)
+    })
 }
 
 struct ContentView: View {
@@ -132,7 +136,11 @@ struct ImageTable: View {
     private func kind(_ item: ImageItem) -> String {
         guard let info = item.info else { return item.state == .loading ? "Reading\u{2026}" : "Unreadable" }
         let from = Shrinker.typeName(info.type)
-        if let out = item.output { return "\(from) to \(Shrinker.typeName(out.type))" }
+        if let out = item.output {
+            let to = Shrinker.typeName(out.type)
+            if to != from { return "\(from) to \(to)" }
+            return out.width == info.width && out.height == info.height ? "\(from), recompressed" : "\(from), resized"
+        }
         return from
     }
 }
@@ -177,7 +185,7 @@ struct AccentText: View {
         Text(text)
             .monospacedDigit()
             .fontWeight(.medium)
-            .foregroundStyle(prominence == .increased ? AnyShapeStyle(.white) : AnyShapeStyle(Theme.deep))
+            .foregroundStyle(prominence == .increased ? AnyShapeStyle(.white) : AnyShapeStyle(Theme.text))
     }
 }
 
@@ -277,12 +285,13 @@ struct SummaryBar: View {
                     .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Theme.gradient))
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text("Saved \(Shrinker.bytes(model.savedBytes))")
+                        Text(model.savedBytes >= 0 ? "Saved \(Shrinker.bytes(model.savedBytes))"
+                                                   : "Grew by \(Shrinker.bytes(-model.savedBytes))")
                             .font(.system(size: 17, weight: .bold, design: .rounded))
                             .contentTransition(.numericText())
-                        Text("\(model.savedPercent)% smaller")
+                        Text(model.savedPercent >= 0 ? "\(model.savedPercent)% smaller" : "\(-model.savedPercent)% larger")
                             .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Theme.deep)
+                            .foregroundStyle(model.savedPercent >= 0 ? AnyShapeStyle(Theme.text) : AnyShapeStyle(.orange))
                     }
                     .monospacedDigit()
                     Text(detail).font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
@@ -290,7 +299,9 @@ struct SummaryBar: View {
             }
         } else {
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(model.items.count) \(model.items.count == 1 ? "image" : "images") ready")
+                let ready = model.processable.count
+                Text(ready > 0 ? "\(ready) \(ready == 1 ? "image" : "images") ready"
+                     : model.items.contains { $0.state == .loading } ? "Reading images\u{2026}" : "No readable images")
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                 Text(model.settings.summary).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
             }
@@ -379,11 +390,12 @@ struct SettingsPanel: View {
     }
 
     private var example: String {
+        let source = URL(fileURLWithPath: "/photo.jpg")
         let type = Shrinker.outputType(sourceType: "public.jpeg", hasAlpha: false, format: model.settings.format)
-        let ext = Shrinker.fileExtension(for: type, source: URL(fileURLWithPath: "/photo.jpg"))
-        let suffix = Shrinker.sanitizedSuffix(model.settings.suffix)
-        // Non-breaking hyphens keep the file name on one line.
-        return "photo\(suffix).\(ext)".replacingOccurrences(of: "-", with: "\u{2011}")
+        // The real naming rule, so an empty suffix shows the number it gets instead of the original's own name.
+        let name = Shrinker.outputURL(for: source, type: type, settings: model.settings, taken: [], previous: nil) { _ in false }
+        // Non-breaking hyphens and spaces keep the file name on one line.
+        return name.lastPathComponent.replacingOccurrences(of: "-", with: "\u{2011}").replacingOccurrences(of: " ", with: "\u{00A0}")
     }
 
     private var outputNote: String {

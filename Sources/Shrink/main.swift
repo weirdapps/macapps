@@ -106,6 +106,8 @@ enum Demo {
             ("Banner.png", "public.png", 1600, 400, 381_447, 7, 1600, 400, 142_305),
             ("Snow on Parnitha.jpg", "public.jpeg", 5184, 3456, 6_204_881, 8, 2048, 1365, 498_330),
             ("Market stall.HEIC", "public.heic", 4032, 3024, 2_652_090, 9, 2048, 1536, 655_472),
+            ("Ferry to Milos.jpg", "public.jpeg", 4000, 3000, 5_118_204, 10, 2048, 1536, 610_557),
+            ("Vineyard, Nemea.HEIC", "public.heic", 4032, 3024, 3_004_662, 11, 2048, 1536, 688_019),
         ]
         let items = rows.map { r in
             let url = URL(fileURLWithPath: "/Users/demo/Pictures/Trip/\(r.0)")
@@ -132,6 +134,8 @@ enum Demo {
             (0x1FC8B0, 0x9FF0E2, 0x0E7C86, 0x0A5560),
             (0x8DB6D9, 0xE8F1F8, 0xFFFFFF, 0x6C8197),
             (0xFFD36B, 0xFFF3CF, 0xE0603C, 0x2F7A4C),
+            (0x4F9BE0, 0xBFE2FA, 0x2E6FA8, 0x1D4E7A),
+            (0xC9B6F2, 0xF6EEFF, 0x9C7FC4, 0x5E7A3A),
         ]
         let p = skies[palette % skies.count]
         let size = NSSize(width: 120, height: 96)

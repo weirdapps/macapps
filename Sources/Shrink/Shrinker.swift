@@ -239,6 +239,21 @@ enum Shrinker {
         }
     }
 
+    /// Destinations for a whole batch, in order. Every source in the batch is off limits, so an image that an earlier
+    /// run produced and that was later added to the list is never overwritten while it is being read, and no two
+    /// images claim the same name.
+    /// `reserved` adds the other files in the list that are not in the batch.
+    static func plan(_ entries: [(source: URL, type: UTType, previous: URL?)], reserved: [URL] = [], settings: ShrinkSettings,
+                     exists: (URL) -> Bool) -> [URL] {
+        var taken = Set((entries.map(\.source) + reserved).map { $0.standardizedFileURL.path.lowercased() })
+        return entries.map { entry in
+            let url = outputURL(for: entry.source, type: entry.type, settings: settings, taken: taken, previous: entry.previous,
+                                exists: exists)
+            taken.insert(url.path.lowercased())
+            return url
+        }
+    }
+
     /// Resizes and re-encodes `source` into `destination` with ImageIO. Orientation is baked into the pixels, the colour
     /// profile is kept, and metadata is copied unless the settings strip it. Writes through a temporary file, so a failed
     /// run never leaves a half-written image, and refuses outright to write over the source.

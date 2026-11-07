@@ -171,16 +171,17 @@ final class ShrinkModel: ObservableObject {
         let candidates = processable
         guard !candidates.isEmpty else { return }
         // Plan every destination first, on one thread, so two images in a batch never claim the same name.
-        var taken = Set<String>()
+        // Every image in the list counts as an original, not only the ones in this batch.
+        let entries = candidates.compactMap { item in
+            item.info.map { (source: item.url,
+                             type: Shrinker.outputType(sourceType: $0.type, hasAlpha: $0.hasAlpha, format: settings.format),
+                             previous: item.output?.url) }
+        }
+        let others = items.filter { $0.info == nil }.map(\.url)
+        let destinations = Shrinker.plan(entries, reserved: others, settings: settings) { FileManager.default.fileExists(atPath: $0.path) }
         var jobs: [Job] = []
-        for item in candidates {
-            guard let info = item.info else { continue }
-            let type = Shrinker.outputType(sourceType: info.type, hasAlpha: info.hasAlpha, format: settings.format)
-            let dest = Shrinker.outputURL(for: item.url, type: type, settings: settings, taken: taken, previous: item.output?.url) {
-                FileManager.default.fileExists(atPath: $0.path)
-            }
-            taken.insert(dest.path.lowercased())
-            jobs.append(Job(id: item.id, source: item.url, destination: dest, type: type))
+        for (item, (entry, dest)) in zip(candidates, zip(entries, destinations)) {
+            jobs.append(Job(id: item.id, source: entry.source, destination: dest, type: entry.type))
             update(item.id) { $0.state = .queued }
         }
         let settings = settings

@@ -16,6 +16,7 @@ enum SelfTest {
         naming()
         formats()
         settingsRoundTrip()
+        planning()
         files()
         print("\(passes) passed, \(failures) failed")
         return failures == 0 ? 0 : 1
@@ -186,6 +187,49 @@ enum SelfTest {
         check((try? Shrinker.shrink(jpeg, to: tiff, type: .tiff, settings: s)) != nil && Shrinker.info(of: tiff)?.width == 150, "writes TIFF")
         check((try? Shrinker.shrink(dir.appendingPathComponent("broken.png"), to: dir.appendingPathComponent("b2.png"), type: .png,
                                     settings: s)) == nil, "broken source fails cleanly")
+
+        // An empty file is listed but never readable, and never crashes.
+        let empty = dir.appendingPathComponent("empty.jpg")
+        FileManager.default.createFile(atPath: empty.path, contents: Data())
+        check(Shrinker.info(of: empty) == nil && Shrinker.thumbnail(of: empty, maxPixel: 64) == nil, "empty file has no info")
+        check((try? Shrinker.shrink(empty, to: dir.appendingPathComponent("empty-small.jpg"), type: .jpeg, settings: s)) == nil,
+              "empty file fails cleanly")
+
+        // Unicode names survive the trip.
+        let greek = dir.appendingPathComponent("Φωτογραφία ü 🌅.png")
+        write(makeImage(40, 30, alpha: false), to: greek, type: .png, props: [:])
+        let greekOut = Shrinker.outputURL(for: greek, type: .jpeg, settings: ShrinkSettings(), taken: [], previous: nil) { _ in false }
+        check(greekOut.lastPathComponent == "Φωτογραφία ü 🌅-small.jpg", "unicode output name")
+        check((try? Shrinker.shrink(greek, to: greekOut, type: .jpeg, settings: s)) != nil, "unicode file shrinks")
+
+        // Odd pixel formats: grey with alpha, 16 bits per channel, CMYK. Each must encode to every format.
+        let odd: [(String, CGImage?)] = [("grey alpha", makeImage(48, 36, space: CGColorSpace(name: CGColorSpace.linearGray)!, bits: 8,
+                                                                    info: CGImageAlphaInfo.premultipliedLast.rawValue)),
+                                         ("16 bit", makeImage(48, 36, space: CGColorSpace(name: CGColorSpace.sRGB)!, bits: 16,
+                                                              info: CGImageAlphaInfo.premultipliedLast.rawValue)),
+                                         ("CMYK", makeImage(48, 36, space: CGColorSpace(name: CGColorSpace.genericCMYK)!, bits: 8,
+                                                            info: CGImageAlphaInfo.none.rawValue))]
+        for (label, image) in odd {
+            guard let image else { check(false, "make \(label) image"); continue }
+            let source = dir.appendingPathComponent("odd \(label).tiff")
+            write(image, to: source, type: .tiff, props: [:])
+            for type in [UTType.jpeg, .png, .tiff] + (Shrinker.writableTypes.contains(UTType.heic.identifier) ? [.heic] : []) {
+                let target = dir.appendingPathComponent("odd \(label) out.\(type.preferredFilenameExtension ?? "img")")
+                let r = try? Shrinker.shrink(source, to: target, type: type, settings: s)
+                check(r != nil && Shrinker.info(of: target)?.width == 24, "\(label) to \(Shrinker.typeName(type.identifier))")
+            }
+        }
+    }
+
+    /// Batch planning: an output never lands on any image in the list, even one that an earlier run produced.
+    private static func planning() {
+        let a = URL(fileURLWithPath: "/tmp/pics/a.jpg")
+        let own = URL(fileURLWithPath: "/tmp/pics/a-small.jpg") // a's earlier output, now also in the list as a source.
+        let plan = Shrinker.plan([(a, UTType.jpeg, own), (own, UTType.jpeg, nil)], settings: ShrinkSettings()) { [a, own].contains($0) }
+        check(plan.count == 2 && plan[0].path != own.path, "an earlier output that is now in the list is not overwritten (\(plan.map(\.lastPathComponent)))")
+        check(Set(plan.map { $0.path.lowercased() }).count == 2 && !plan.contains(a) && !plan.contains(own), "plan never targets a source")
+        let free = Shrinker.plan([(a, UTType.jpeg, own)], settings: ShrinkSettings()) { [a, own].contains($0) }
+        check(free == [own], "own earlier output is replaced when it is not in the list")
     }
 
     private static func makeImage(_ w: Int, _ h: Int, alpha: Bool) -> CGImage {
@@ -206,6 +250,13 @@ enum SelfTest {
             ctx.fillEllipse(in: CGRect(x: w / 4, y: h / 4, width: w / 2, height: h / 2))
         }
         return ctx.makeImage()!
+    }
+
+    private static func makeImage(_ w: Int, _ h: Int, space: CGColorSpace, bits: Int, info: UInt32) -> CGImage? {
+        let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: bits, bytesPerRow: 0, space: space, bitmapInfo: info)
+        ctx?.setFillColor(CGColor(gray: 0.4, alpha: 0.8))
+        ctx?.fill(CGRect(x: 4, y: 4, width: w - 8, height: h - 8))
+        return ctx?.makeImage()
     }
 
     private static func write(_ image: CGImage, to url: URL, type: UTType, props: [CFString: Any]) {
