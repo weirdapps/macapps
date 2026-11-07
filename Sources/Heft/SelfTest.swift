@@ -101,6 +101,15 @@ enum SelfTest {
             let app = base.appendingPathComponent("Tool.app/Contents")
             try fm.createDirectory(at: app, withIntermediateDirectories: true)
             try Data(count: 80_000).write(to: app.appendingPathComponent("binary"))
+            try Data(count: 40_000).write(to: base.appendingPathComponent("hard.bin"))
+            try fm.linkItem(at: base.appendingPathComponent("hard.bin"), to: base.appendingPathComponent("hard copy.bin"))
+            let apps = base.appendingPathComponent("apps")
+            for name in ["One.app", "Two.app", "Three.app"] {
+                let c = apps.appendingPathComponent("\(name)/Contents")
+                try fm.createDirectory(at: c, withIntermediateDirectories: true)
+                try Data(count: 20_000).write(to: c.appendingPathComponent("binary"))
+            }
+            try fm.createDirectory(at: base.appendingPathComponent("empty"), withIntermediateDirectories: true)
             try fm.createSymbolicLink(at: base.appendingPathComponent("loop"), withDestinationURL: sub)
             let locked = base.appendingPathComponent("locked")
             try fm.createDirectory(at: locked, withIntermediateDirectories: true)
@@ -117,21 +126,32 @@ enum SelfTest {
         guard let root = Scanner.scan(base, progress: progress) else { check(false, "scan finished"); return }
         let expectedFiles = alloc("photos/2026/a.jpg") + alloc("photos/b.png") + alloc("notes.txt") + alloc("tiny.swift")
         let appSize = alloc("Tool.app/Contents/binary")
+        let hardSize = alloc("hard.bin")
+        let appsSize = ["One", "Two", "Three"].reduce(Int64(0)) { $0 + alloc("apps/\($1).app/Contents/binary") }
         let link = root.child(named: "loop")
         check(link != nil && link!.isFolder == false && link!.size < 10_000, "symlinks are not followed")
-        check(root.size == expectedFiles + appSize + (link?.size ?? 0), "root size is the sum of allocated sizes")
+        check(root.size == expectedFiles + appSize + hardSize + appsSize + (link?.size ?? 0), "root size is the sum of allocated sizes")
+        let hard = [root.child(named: "hard.bin")?.size, root.child(named: "hard copy.bin")?.size]
+        check(hard.contains(0) && hard.contains(hardSize), "a hard linked file counts its bytes once")
+        let appsNode = root.child(named: "apps")
+        check(appsNode?.children.count == 3 && appsNode?.children.allSatisfy { !$0.isFolder && $0.kind == .apps && $0.size > 0 } == true
+              && appsNode?.size == appsSize, "a folder of apps sizes every bundle")
+        check(root.child(named: "empty")?.emptyReason?.title == "This folder is empty", "an empty folder says so")
+        check(root.child(named: "locked")?.emptyReason?.title == "Heft could not read this folder", "an unreadable folder says why it is blank")
+        check(root.emptyReason == nil, "a folder with bytes draws normally")
         check(root.child(named: "photos")?.size == alloc("photos/2026/a.jpg") + alloc("photos/b.png"), "folder sizes add up their contents")
         check(root.child(named: "photos")?.child(named: "2026")?.child(named: "a.jpg")?.kind == .images, "files get their kind")
         let tool = root.child(named: "Tool.app")
         check(tool?.isFolder == false && tool?.kind == .apps && tool?.size == appSize, "app bundles count as one app")
         check(root.child(named: "locked")?.unreadable == true && progress.snapshot.skipped == 1, "unreadable folders are flagged and skipped")
-        check(root.count == 6, "file count includes every file, app and link (got \(root.count))")
+        check(root.count == 11, "file count includes every file, app and link (got \(root.count))")
         check(root.kindSize(.images) == alloc("photos/2026/a.jpg") + alloc("photos/b.png"), "image total is right")
         check(root.children.first?.name == "photos", "largest child comes first")
         let a = root.child(named: "photos")?.child(named: "2026")?.child(named: "a.jpg")
         check(a?.url.standardizedFileURL.path == base.appendingPathComponent("photos/2026/a.jpg").standardizedFileURL.path, "paths come from the parent chain")
         check(a.map { root.find(ObjectIdentifier($0)) === $0 } ?? false, "find locates a node by identity")
-        check(progress.snapshot.files >= 6, "progress counts files")
+        check(progress.snapshot.files >= 11, "progress counts files")
+        check(progress.snapshot.bytes == root.size, "live byte counter ends at the total (got \(progress.snapshot.bytes))")
 
         let cancelled = ScanProgress()
         cancelled.cancel()
@@ -152,5 +172,12 @@ enum SelfTest {
         check(root.kindSize(.video) == before.2 - film.size, "detaching updates kind totals")
         check(film.lineage.count == 1, "a detached node has no parent")
         check(movies.lineage.map(\.name) == ["dimitris", "Movies"], "lineage runs from the root down")
+        check(zip(root.children, root.children.dropFirst()).allSatisfy { $0.size >= $1.size }, "detaching keeps every level sorted largest first")
+        let tiles = Treemap.layout(root, in: CGRect(x: 0, y: 0, width: 800, height: 560))
+        let top = tiles.filter { $0.depth == 0 }
+        check(top.filter { $0.node == nil }.count <= 1 && top.count >= 8, "the treemap still lays out every big folder after a delete")
+        let lone = Demo.folder("only", [Demo.file("a.mov", 100)])
+        lone.children[0].detach()
+        check(lone.size == 0 && lone.emptyReason?.title == "This folder is empty", "a folder emptied by the Trash shows the empty state")
     }
 }

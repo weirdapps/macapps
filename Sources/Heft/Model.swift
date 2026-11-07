@@ -177,7 +177,7 @@ final class Node: Identifiable, @unchecked Sendable {
                 sizes[c.kind.rawValue] += c.size
             }
         }
-        children.sort { $0.size != $1.size ? $0.size > $1.size : $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        sortChildren()
         size = total
         count = files
         kindSizes = sizes
@@ -192,9 +192,23 @@ final class Node: Identifiable, @unchecked Sendable {
             n.size -= size
             n.count -= count
             if !n.kindSizes.isEmpty { for k in FileKind.allCases { n.kindSizes[k.rawValue] -= kindSize(k) } }
+            // Shrinking can move a folder down among its siblings; the treemap relies on largest first.
+            n.parent?.sortChildren()
             p = n.parent
         }
         self.parent = nil
+    }
+
+    func sortChildren() {
+        children.sort { $0.size != $1.size ? $0.size > $1.size : $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    /// Why a folder draws nothing, or nil when it has bytes to show.
+    var emptyReason: (title: String, message: String)? {
+        guard size <= 0 else { return nil }
+        if unreadable { return ("Heft could not read this folder", "macOS did not allow access to its contents, so nothing in it was counted.") }
+        if children.isEmpty { return ("This folder is empty", "There are no files in it to add up.") }
+        return ("Nothing here takes up space", "The items in this folder use no disk space of their own.")
     }
 
     func find(_ id: ObjectIdentifier) -> Node? {
@@ -217,7 +231,16 @@ final class ScanProgress: @unchecked Sendable {
     private var path = ""
     private var skipped = 0
     private var cancelled = false
+    private var links = Set<Inode>()
     let kinds = KindCache()
+
+    struct Inode: Hashable { let device: Int64; let inode: UInt64 }
+
+    /// True the first time a hard linked file is seen, so its bytes count once, as they do on disk.
+    func firstSighting(_ id: Inode) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return links.insert(id).inserted
+    }
 
     func add(files f: Int, bytes b: Int64, path p: String) {
         lock.lock(); files += f; bytes += b; path = p; lock.unlock()
@@ -234,7 +257,7 @@ final class ScanProgress: @unchecked Sendable {
 
 enum Scanner {
     static let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .isSymbolicLinkKey, .isVolumeKey,
-                                         .totalFileAllocatedSizeKey, .fileAllocatedSizeKey]
+                                         .totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .linkCountKey]
 
     /// Walks `url` and returns its tree with allocated sizes, or nil when cancelled. Unreadable folders are kept, empty and flagged.
     static func scan(_ url: URL, progress: ScanProgress) -> Node? {
@@ -246,6 +269,15 @@ enum Scanner {
 
     private static func allocated(_ v: URLResourceValues) -> Int64 {
         Int64(v.totalFileAllocatedSize ?? v.fileAllocatedSize ?? 0)
+    }
+
+    /// Allocated bytes of a file, or 0 for the second and later paths of a hard linked file.
+    private static func fileBytes(_ url: URL, _ v: URLResourceValues, progress: ScanProgress) -> Int64 {
+        let bytes = allocated(v)
+        guard (v.linkCount ?? 1) > 1, bytes > 0 else { return bytes }
+        var st = stat()
+        guard lstat(url.path, &st) == 0 else { return bytes }
+        return progress.firstSighting(.init(device: Int64(st.st_dev), inode: UInt64(st.st_ino))) ? bytes : 0
     }
 
     private static func scanFolder(_ node: Node, at url: URL, depth: Int, progress: ScanProgress) {
@@ -262,6 +294,7 @@ enum Scanner {
         let keySet = Set(keys)
         var kids: [Node] = []
         var folders: [(Node, URL)] = []
+        var bundles: [(Node, URL)] = []
         var files = 0
         var bytes: Int64 = 0
         kids.reserveCapacity(items.count)
@@ -271,23 +304,31 @@ enum Scanner {
             if v.isDirectory == true && v.isSymbolicLink != true {
                 if v.isVolume == true { continue } // Another volume mounted inside: not this folder's bytes.
                 if v.isPackage == true && item.pathExtension.lowercased() == "app" {
-                    let app = Node(name: name, isFolder: false, kind: .apps, size: treeSize(item, progress: progress))
+                    let app = Node(name: name, isFolder: false, kind: .apps)
                     kids.append(app)
+                    bundles.append((app, item))
                     files += 1
-                    bytes += app.size
                 } else {
                     let folder = Node(name: name, isFolder: true, kind: .other)
                     kids.append(folder)
                     folders.append((folder, item))
                 }
             } else {
-                let file = Node(name: name, isFolder: false, kind: progress.kinds.kind(of: name), size: allocated(v))
+                let file = Node(name: name, isFolder: false, kind: progress.kinds.kind(of: name),
+                                size: fileBytes(item, v, progress: progress))
                 kids.append(file)
                 files += 1
                 bytes += file.size
             }
         }
         progress.add(files: files, bytes: bytes, path: url.path)
+        // App bundles are sized in parallel too: /Applications is hundreds of them.
+        if bundles.count > 1 {
+            let list = bundles
+            DispatchQueue.concurrentPerform(iterations: list.count) { i in list[i].0.size = treeSize(list[i].1, progress: progress) }
+        } else {
+            for (app, u) in bundles { app.size = treeSize(u, progress: progress) }
+        }
         if depth < 2 && folders.count > 1 {
             let list = folders
             DispatchQueue.concurrentPerform(iterations: list.count) { i in
@@ -302,13 +343,22 @@ enum Scanner {
 
     /// Total allocated bytes of a bundle, without keeping its contents.
     private static func treeSize(_ url: URL, progress: ScanProgress) -> Int64 {
-        guard let e = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey],
+        let sizeKeys: Set<URLResourceKey> = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .linkCountKey]
+        guard let e = FileManager.default.enumerator(at: url, includingPropertiesForKeys: Array(sizeKeys),
                                                      options: [], errorHandler: { _, _ in true }) else { return 0 }
-        var total: Int64 = 0
+        var total: Int64 = 0, pending: Int64 = 0, seen = 0
         for case let u as URL in e {
             if progress.isCancelled { break }
-            if let v = try? u.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey]) { total += allocated(v) }
+            if let v = try? u.resourceValues(forKeys: sizeKeys) {
+                let b = fileBytes(u, v, progress: progress)
+                total += b
+                pending += b
+            }
+            seen += 1
+            // Keep the live counter moving while a big bundle such as Xcode is added up.
+            if seen % 512 == 0 { progress.add(files: 0, bytes: pending, path: url.path); pending = 0 }
         }
+        progress.add(files: 0, bytes: pending, path: url.path)
         return total
     }
 }
@@ -552,9 +602,12 @@ final class HeftModel: ObservableObject {
         phase = .scanning
         let start = Date()
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.pull(p) }
         }
+        // Common modes, so the counters keep moving while a menu is open.
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
         Task.detached(priority: .userInitiated) {
             let tree = Scanner.scan(url, progress: p)
             await MainActor.run { self.finish(tree, progress: p, started: start, restoring: path) }
@@ -575,6 +628,8 @@ final class HeftModel: ObservableObject {
         timer = nil
         progress = nil
         guard let tree else {
+            // Cancelled: the tree on screen is still the earlier one, and Rescan should scan that again.
+            scanURL = root?.rootURL
             phase = root == nil ? .empty : .ready
             return
         }
@@ -639,7 +694,8 @@ final class HeftModel: ObservableObject {
 
     func confirmTrash(_ node: Node) {
         pendingTrash = nil
-        guard !isDemo else { return }
+        // The tree could have been replaced by a rescan while the dialog was up.
+        guard !isDemo, !isScanning, let root, node === root || node.isDescendant(of: root) else { return }
         do {
             try FileManager.default.trashItem(at: node.url, resultingItemURL: nil)
             if selected === node { selected = nil }

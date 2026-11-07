@@ -151,9 +151,20 @@ struct ReadyView: View {
             Divider()
             HStack(spacing: 0) {
                 Group {
-                    switch model.viewMode {
-                    case .treemap: TreemapView(model: model, folder: folder).padding(10)
-                    case .list: OutlineView(model: model, folder: folder)
+                    if let reason = folder.emptyReason {
+                        ContentUnavailableView {
+                            Label(reason.title, systemImage: folder.unreadable ? "lock.fill" : "folder")
+                        } description: {
+                            Text(reason.message)
+                        } actions: {
+                            if model.canGoUp { Button("Enclosing Folder") { model.goUp() } }
+                            Button("Choose Another Folder\u{2026}") { model.chooseFolder() }
+                        }
+                    } else {
+                        switch model.viewMode {
+                        case .treemap: TreemapView(model: model, folder: folder).padding(10)
+                        case .list: OutlineView(model: model, folder: folder)
+                        }
                     }
                 }
                 .id(ObjectIdentifier(folder))
@@ -422,7 +433,9 @@ struct TreemapCanvas: View, Equatable {
             let mid = (lo + hi + 1) / 2
             if w(String(text.prefix(mid)) + "\u{2026}") <= width { lo = mid } else { hi = mid - 1 }
         }
-        return lo == 0 ? "" : String(text.prefix(lo)) + "\u{2026}"
+        // "Render 2.…" reads badly: drop the dots and spaces the cut left at the end.
+        let stem = String(text.prefix(lo)).replacingOccurrences(of: "[ .\\-_]+$", with: "", options: .regularExpression)
+        return stem.isEmpty ? "" : stem + "\u{2026}"
     }
 }
 
@@ -691,7 +704,8 @@ struct SelectionCard: View {
         } else {
             HStack(spacing: 10) {
                 Image(systemName: "cursorarrow.click.2").font(.system(size: 20)).foregroundStyle(.tertiary)
-                Text("Click a block to select it. Double-click a folder to open it.")
+                Text(model.viewMode == .treemap ? "Click a block to select it. Double-click a folder to open it."
+                                                : "Select a row to act on it. Double-click a folder to open it.")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
@@ -717,7 +731,9 @@ struct StatusBar: View {
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.accent)
                 Text(path(of: s)).lineLimit(1).truncationMode(.head)
             } else {
-                Text("Hover a block for its size. Click a folder\u{2019}s title to open it.").foregroundStyle(.secondary)
+                Text(model.viewMode == .treemap ? "Hover a block for its size. Click a folder\u{2019}s title to open it."
+                                                : "Click a column title to sort. Expand a folder with its disclosure triangle.")
+                    .foregroundStyle(.secondary)
             }
             Spacer(minLength: 12)
             if model.skipped > 0 {
