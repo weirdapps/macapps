@@ -37,6 +37,9 @@ struct ScoreApp: App {
                 Button("Delete Last Round") { model.removeLastRound() }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
                     .disabled((model.current?.rounds.isEmpty ?? true))
+                Button("Add Player") { model.addPlayer() }
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                    .disabled(!model.canAddPlayer)
                 Divider()
                 Button(model.current?.isOver == true ? "Resume Game" : "End Game") { model.toggleEnded() }
                     .keyboardShortcut("e")

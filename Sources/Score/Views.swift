@@ -32,9 +32,10 @@ struct ContentView: View {
     @ViewBuilder private var detail: some View {
         if let game = model.current {
             if model.showTotals {
-                BigTotalsView(model: model, game: game)
+                BigTotalsView(model: model, game: game).id(game.id)
             } else {
-                GameView(model: model, game: game)
+                // A fresh view per game, so a cell being edited can never commit into the next game selected.
+                GameView(model: model, game: game).id(game.id)
             }
         } else if model.games.isEmpty {
             ContentUnavailableView {
@@ -269,6 +270,11 @@ struct PlayerCard: View {
         )
         .shadow(color: .black.opacity(0.06), radius: 3, y: 1)
         .animation(.snappy, value: game.totals)
+        .contextMenu {
+            Button("Add Player") { model.addPlayer() }.disabled(!model.canAddPlayer)
+            Button("Remove \(player.name)", role: .destructive) { model.removePlayer(index) }
+                .disabled(game.players.count <= 1)
+        }
     }
 
     private func add(_ n: Int) {
@@ -385,7 +391,7 @@ struct ScoreTable: View {
                     VStack(spacing: 4) {
                         ForEach(game.rounds.indices, id: \.self) { r in
                             row(label: roundLabel(r)) { p in
-                                ScoreCell(value: game.rounds[r][p], isCurrent: r == game.rounds.count - 1) { value in
+                                ScoreCell(value: game.score(round: r, player: p), isCurrent: r == game.rounds.count - 1) { value in
                                     model.update(game.id, "Edit Score") { $0.setScore(value, round: r, player: p) }
                                 }
                             }
@@ -411,10 +417,16 @@ struct ScoreTable: View {
             Divider()
             row(label: Text("Total").font(.system(size: 12, weight: .bold))) { p in
                 let leads = game.leaders.contains(p)
-                HStack(spacing: 4) {
-                    if leads { Image(systemName: "crown.fill").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.goldGradient) }
-                    Text("\(game.total(p))")
-                        .contentTransition(.numericText(value: Double(game.total(p))))
+                let total = Text("\(game.total(p))")
+                    .contentTransition(.numericText(value: Double(game.total(p))))
+                // The crown only when the column has room for it; a narrow column keeps the number on one line.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 4) {
+                        if leads { Image(systemName: "crown.fill").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.goldGradient) }
+                        total
+                    }
+                    .fixedSize()
+                    total.lineLimit(1).minimumScaleFactor(0.5)
                 }
                 .font(.system(size: 15, weight: .bold, design: .rounded))
                 .monospacedDigit()
@@ -446,7 +458,7 @@ struct ScoreTable: View {
         HStack(spacing: 8) {
             label.frame(width: 52, alignment: .leading)
             ForEach(game.players.indices, id: \.self) { p in
-                cell(p).frame(minWidth: 56, maxWidth: .infinity)
+                cell(p).frame(minWidth: 44, maxWidth: .infinity)
             }
         }
         .padding(.horizontal, 14)
@@ -497,19 +509,27 @@ struct BigTotalsView: View {
     @ObservedObject var model: ScoreModel
     let game: Game
 
-    private var rows: [[Int]] {
-        let n = game.players.count
-        let perRow = n <= 4 ? n : Int((Double(n) / 2).rounded(.up))
-        return stride(from: 0, to: n, by: max(perRow, 1)).map { Array($0..<min($0 + perRow, n)) }
-    }
-
     var body: some View {
         VStack(spacing: 16) {
             if game.isOver { WinnerBanner(model: model, game: game) }
-            ForEach(rows, id: \.self) { row in
-                HStack(spacing: 16) {
-                    ForEach(row, id: \.self) { BigTile(model: model, game: game, index: $0) }
+            GeometryReader { geo in
+                let n = game.players.count
+                let digits = game.totals.map { String($0).count }.max() ?? 1
+                let columns = BigLayout.columns(count: n, digits: digits, in: geo.size)
+                let rows = Int((Double(n) / Double(columns)).rounded(.up))
+                let tile = BigLayout.tileSize(columns: columns, rows: rows, in: geo.size)
+                let numberSize = BigLayout.numberSize(tile: tile, digits: digits)
+                VStack(spacing: BigLayout.spacing) {
+                    ForEach(0..<rows, id: \.self) { row in
+                        HStack(spacing: BigLayout.spacing) {
+                            ForEach(row * columns..<min(row * columns + columns, n), id: \.self) { i in
+                                BigTile(model: model, game: game, index: i, numberSize: numberSize, wide: tile.width >= BigLayout.wideFooter)
+                                    .frame(width: tile.width, height: tile.height)
+                            }
+                        }
+                    }
                 }
+                .frame(width: geo.size.width, height: geo.size.height)
             }
         }
         .padding(20)
@@ -522,47 +542,56 @@ struct BigTile: View {
     @ObservedObject var model: ScoreModel
     let game: Game
     let index: Int
+    let numberSize: CGFloat
+    /// Wide tiles put the standing and the buttons on one footer row.
+    let wide: Bool
 
     private var player: Player { game.players[index] }
     private var leads: Bool { game.leaders.contains(index) }
 
     var body: some View {
-        VStack(spacing: 6) {
-            HStack {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
                 Text(ordinal(game.hasScores ? game.rank(of: index) : 1))
                     .font(.system(size: 13, weight: .bold, design: .rounded))
                     .foregroundStyle(leads ? .white : .secondary)
                     .padding(.horizontal, 9).padding(.vertical, 3)
                     .background(Capsule().fill(leads ? AnyShapeStyle(Theme.goldGradient) : AnyShapeStyle(.quaternary.opacity(0.6))))
                     .opacity(game.hasScores ? 1 : 0)
-                Spacer()
-                if leads { Image(systemName: "crown.fill").font(.system(size: 20, weight: .bold)).foregroundStyle(Theme.goldGradient) }
+                    .fixedSize()
+                Text(player.name)
+                    .font(.system(size: 22, weight: .semibold, design: .rounded))
+                    .foregroundStyle(PlayerColor.color(player.color))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                Spacer(minLength: 0)
+                if leads, wide { // A narrow tile keeps its room for the name; the gold badge marks the leader.
+                    Image(systemName: "crown.fill").font(.system(size: 20, weight: .bold)).foregroundStyle(Theme.goldGradient).fixedSize()
+                }
             }
+            .frame(height: BigLayout.header)
             Spacer(minLength: 0)
-            Text(player.name)
-                .font(.system(size: 26, weight: .semibold, design: .rounded))
-                .foregroundStyle(PlayerColor.color(player.color))
-                .lineLimit(1)
-            Capsule().fill(PlayerColor.color(player.color).gradient).frame(width: 40, height: 4)
             Text("\(game.total(index))")
-                .font(.system(size: 150, weight: .bold, design: .rounded))
+                .font(.system(size: numberSize, weight: .bold, design: .rounded))
                 .monospacedDigit()
                 .contentTransition(.numericText(value: Double(game.total(index))))
                 .lineLimit(1)
                 .minimumScaleFactor(0.3)
-                .padding(.vertical, 4)
-            Text(game.standingText(index) ?? " ")
-                .font(.system(size: 15, weight: .medium, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 12)
-            HStack(spacing: 8) {
-                QuickButton(label: "\u{2212}1", help: "Take 1 point off this round", large: true) { add(-1) }
-                QuickButton(label: "+1", help: "Add 1 point to this round", large: true) { add(1) }
-                QuickButton(label: "+5", help: "Add 5 points to this round", large: true) { add(5) }
+            Spacer(minLength: 0)
+            if wide {
+                HStack(spacing: 12) {
+                    standing
+                    Spacer(minLength: 0)
+                    buttons.frame(width: 190)
+                }
+            } else {
+                VStack(spacing: 6) {
+                    standing
+                    buttons
+                }
             }
         }
-        .padding(18)
+        .padding(BigLayout.padding)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -571,8 +600,58 @@ struct BigTile: View {
         .animation(.snappy, value: game.totals)
     }
 
+    private var standing: some View {
+        Text(game.standingText(index) ?? " ")
+            .font(.system(size: 15, weight: .medium, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+    }
+
+    private var buttons: some View {
+        HStack(spacing: 8) {
+            QuickButton(label: "\u{2212}1", help: "Take 1 point off this round", large: true) { add(-1) }
+            QuickButton(label: "+1", help: "Add 1 point to this round", large: true) { add(1) }
+            QuickButton(label: "+5", help: "Add 5 points to this round", large: true) { add(5) }
+        }
+    }
+
     private func add(_ n: Int) {
         withAnimation(.snappy) { model.update(game.id, n < 0 ? "Remove Point" : "Add Points") { $0.add(n, player: index) } }
+    }
+}
+
+/// Sizes the big totals grid: the column count that gives the biggest numbers, and one number size for every tile.
+enum BigLayout {
+    static let spacing: CGFloat = 16
+    static let padding: CGFloat = 18
+    static let header: CGFloat = 30
+    /// The narrowest tile whose standing and buttons fit on one footer row.
+    static let wideFooter: CGFloat = 330
+
+    /// The column count that makes the totals of `count` players with `digits` digits the largest in `size`.
+    static func columns(count: Int, digits: Int, in size: CGSize) -> Int {
+        guard count > 1 else { return 1 }
+        var best = 1, bestSize: CGFloat = -1
+        for c in 1...count {
+            let rows = Int((Double(count) / Double(c)).rounded(.up))
+            let size = numberSize(tile: tileSize(columns: c, rows: rows, in: size), digits: digits)
+            if size > bestSize + 0.5 { best = c; bestSize = size }
+        }
+        return best
+    }
+
+    static func tileSize(columns: Int, rows: Int, in size: CGSize) -> CGSize {
+        let c = CGFloat(max(columns, 1)), r = CGFloat(max(rows, 1))
+        return CGSize(width: max((size.width - spacing * (c - 1)) / c, 0), height: max((size.height - spacing * (r - 1)) / r, 0))
+    }
+
+    /// One font size for every tile, so the numbers line up and the longest total still fits.
+    static func numberSize(tile: CGSize, digits: Int) -> CGFloat {
+        let footer: CGFloat = tile.width >= wideFooter ? 44 : 44 + 6 + 20
+        let byHeight = (tile.height - padding * 2 - header - footer - 8) / 1.2
+        let byWidth = (tile.width - padding * 2 - 4) / (CGFloat(max(digits, 1)) * 0.62)
+        return max(28, min(byWidth, byHeight, 240))
     }
 }
 

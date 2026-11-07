@@ -81,7 +81,7 @@ struct Game: Codable, Identifiable, Hashable {
     }
 
     mutating func setScore(_ value: Int?, round r: Int, player p: Int) {
-        guard rounds.indices.contains(r), players.indices.contains(p) else { return }
+        guard rounds.indices.contains(r), players.indices.contains(p), rounds[r].indices.contains(p) else { return }
         rounds[r][p] = value
         settle()
     }
@@ -90,12 +90,53 @@ struct Game: Codable, Identifiable, Hashable {
     mutating func add(_ points: Int, player p: Int) {
         guard players.indices.contains(p) else { return }
         if rounds.isEmpty { addRound() }
-        rounds[rounds.count - 1][p] = (rounds[rounds.count - 1][p] ?? 0) + points
+        let last = rounds.count - 1
+        guard rounds[last].indices.contains(p) else { return }
+        rounds[last][p] = (rounds[last][p] ?? 0) + points
         settle()
     }
 
     mutating func addRound() {
         rounds.append(Array(repeating: nil, count: players.count))
+    }
+
+    /// Player p's points in round r; nil when blank or when the cell does not exist.
+    func score(round r: Int, player p: Int) -> Int? {
+        guard rounds.indices.contains(r), rounds[r].indices.contains(p) else { return nil }
+        return rounds[r][p]
+    }
+
+    /// Lets a player join mid game, with blank scores for the rounds already played.
+    mutating func addPlayer(_ player: Player) {
+        players.append(player)
+        for r in rounds.indices { rounds[r].append(nil) }
+        settle()
+    }
+
+    /// Removes a player and their column of scores. The last player always stays.
+    mutating func removePlayer(_ p: Int) {
+        guard players.count > 1, players.indices.contains(p) else { return }
+        players.remove(at: p)
+        for r in rounds.indices where rounds[r].indices.contains(p) { rounds[r].remove(at: p) }
+        settle()
+    }
+
+    /// The next player to add: the first free colour and a numbered name.
+    var nextPlayer: Player {
+        let used = Set(players.map(\.color))
+        let color = PlayerColor.all.indices.first { !used.contains($0) } ?? players.count % PlayerColor.all.count
+        return Player(name: "Player \(players.count + 1)", color: color)
+    }
+
+    /// Repairs a game read from disk so every round has exactly one cell per player.
+    func normalized() -> Game {
+        var game = self
+        game.rounds = rounds.map { round in
+            round.count >= players.count
+                ? Array(round.prefix(players.count))
+                : round + Array(repeating: nil, count: players.count - round.count)
+        }
+        return game
     }
 
     mutating func removeRound(_ r: Int) {
@@ -209,8 +250,23 @@ final class ScoreModel: ObservableObject {
 
     /// The user's library from Application Support.
     static func load() -> ScoreModel {
-        let library = Storage.load(Library.self, app: "Score", file: file)
+        let library = readLibrary(at: Storage.url(app: "Score", file: file))
         return ScoreModel(games: library?.games ?? [], selection: library?.selection, persists: true)
+    }
+
+    /// Reads a saved library and repairs its games. A file that exists but cannot be decoded is moved aside
+    /// as games-unreadable-<time>.json, so the next save never overwrites the only copy of someone's history.
+    static func readLibrary(at url: URL, now: Date = Date()) -> Library? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        if let library = try? JSONDecoder().decode(Library.self, from: data) {
+            return Library(games: library.games.map { $0.normalized() }, selection: library.selection)
+        }
+        if !data.isEmpty {
+            let aside = url.deletingLastPathComponent()
+                .appendingPathComponent("games-unreadable-\(Int(now.timeIntervalSince1970)).json")
+            try? FileManager.default.moveItem(at: url, to: aside)
+        }
+        return nil
     }
 
     private func save() {
@@ -298,6 +354,12 @@ final class ScoreModel: ObservableObject {
     }
 
     func addRound() { updateCurrent("New Round") { $0.addRound() } }
+    var canAddPlayer: Bool { (current?.players.count ?? Theme.maxPlayers) < Theme.maxPlayers }
+    func addPlayer() {
+        guard let game = current, canAddPlayer else { return }
+        updateCurrent("Add Player") { $0.addPlayer(game.nextPlayer) }
+    }
+    func removePlayer(_ p: Int) { updateCurrent("Remove Player") { $0.removePlayer(p) } }
     func removeLastRound() { updateCurrent("Delete Round") { $0.removeRound($0.rounds.count - 1) } }
     func toggleEnded() {
         guard let game = current else { return }

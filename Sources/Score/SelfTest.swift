@@ -72,6 +72,34 @@ enum SelfTest {
         hearts.add(40, player: 1)
         check(hearts.isOver && hearts.leaders == [1], "lowest wins ends when someone passes the target")
 
+        // Players joining and leaving mid game.
+        var m = Game(name: "Late", players: [a, b], target: 50)
+        m.addRound()
+        m.setScore(20, round: 0, player: 0)
+        m.addRound()
+        m.addPlayer(m.nextPlayer)
+        check(m.players.count == 3 && m.rounds.allSatisfy { $0.count == 3 }, "a late player gets a cell in every round")
+        check(m.players[2].name == "Player 3" && m.players[2].color == 2, "a late player gets a free colour and a name")
+        check(m.totals == [20, 0, 0], "a late player starts at 0")
+        m.setScore(60, round: 1, player: 2)
+        check(m.isOver, "a late player can reach the target")
+        m.removePlayer(2)
+        check(m.players.count == 2 && m.rounds.allSatisfy { $0.count == 2 } && m.totals == [20, 0], "removing a player drops their column")
+        check(!m.isOver, "removing the player over the target reopens the game")
+        m.removePlayer(0)
+        m.removePlayer(0)
+        check(m.players.map(\.name) == ["Ben"], "the last player cannot be removed")
+
+        // Damaged rounds, as a hand-edited or older file might hold.
+        var d = Game(name: "Damaged", players: [a, b, c])
+        d.rounds = [[5], [1, 2, 3, 4]]
+        check(d.score(round: 0, player: 2) == nil && d.score(round: 9, player: 0) == nil, "missing cells read as blank")
+        d.setScore(7, round: 0, player: 2)
+        d.add(1, player: 2)
+        check(d.totals == [6, 2, 4], "short rows never crash an edit")
+        let repaired = d.normalized()
+        check(repaired.rounds == [[5, nil, nil], [1, 2, 4]], "normalizing pads and trims rows to the players")
+
         // Rematch.
         let r = t.rematch()
         check(r.id != t.id && r.players.map(\.name) == ["Ann", "Ben"], "rematch keeps the players")
@@ -135,6 +163,62 @@ enum SelfTest {
             check(false, "persistence: \(error)")
         }
         try? FileManager.default.removeItem(at: url)
+
+        // Reading the library from disk, in a temporary folder.
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("score-selftest-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let saved = folder.appendingPathComponent("games.json")
+        check(ScoreModel.readLibrary(at: saved) == nil, "a missing library reads as empty")
+        var short = Game(name: "Old", players: [a, b])
+        short.rounds = [[3]]
+        if let data = try? JSONEncoder().encode(Library(games: [short], selection: short.id)) { try? data.write(to: saved) }
+        let read = ScoreModel.readLibrary(at: saved)
+        check(read?.games.first?.rounds == [[3, nil]] && read?.selection == short.id, "a saved library is read and repaired")
+        try? Data("{ not json".utf8).write(to: saved)
+        let stamp = Date(timeIntervalSince1970: 1_800_000_000)
+        check(ScoreModel.readLibrary(at: saved, now: stamp) == nil, "an unreadable library reads as empty")
+        let aside = folder.appendingPathComponent("games-unreadable-1800000000.json")
+        check(!FileManager.default.fileExists(atPath: saved.path) && FileManager.default.fileExists(atPath: aside.path),
+              "an unreadable library is moved aside, never overwritten")
+        try? Data().write(to: saved)
+        check(ScoreModel.readLibrary(at: saved) == nil && FileManager.default.fileExists(atPath: saved.path), "an empty file is left alone")
+        try? FileManager.default.removeItem(at: folder)
+
+        // Adding and removing players through the model, with undo.
+        let party = ScoreModel()
+        let undo2 = UndoManager()
+        undo2.groupsByEvent = false
+        party.undoManager = undo2
+        undo2.beginUndoGrouping()
+        party.start(Game(name: "Party", players: [a, b]))
+        undo2.endUndoGrouping()
+        for _ in 0..<(Theme.maxPlayers - 2) {
+            undo2.beginUndoGrouping()
+            party.addPlayer()
+            undo2.endUndoGrouping()
+        }
+        party.addPlayer()
+        check(party.current?.players.count == Theme.maxPlayers && !party.canAddPlayer, "players stop at the maximum")
+        undo2.undo()
+        check(party.current?.players.count == Theme.maxPlayers - 1, "undo takes back an added player")
+        undo2.beginUndoGrouping()
+        party.removePlayer(0)
+        undo2.endUndoGrouping()
+        check(party.current?.players.first?.name == "Ben", "remove player through the model")
+        check(!ScoreModel().canAddPlayer, "no player to add without a game")
+
+        // Big totals layout.
+        let pane = CGSize(width: 730, height: 548)
+        check(BigLayout.columns(count: 4, digits: 3, in: pane) == 2, "four players make a 2 by 2 grid in a landscape pane")
+        check(BigLayout.columns(count: 2, digits: 3, in: pane) == 2, "two players sit side by side")
+        check(BigLayout.columns(count: 1, digits: 3, in: pane) == 1 && BigLayout.columns(count: 0, digits: 1, in: pane) == 1,
+              "one or no player is one column")
+        check(BigLayout.columns(count: 8, digits: 3, in: CGSize(width: 1400, height: 500)) == 4, "eight players on a wide pane")
+        let tile = BigLayout.tileSize(columns: 2, rows: 2, in: pane)
+        check(tile.width == 357 && tile.height == 266, "tile size leaves room for the gaps")
+        let big = BigLayout.numberSize(tile: tile, digits: 3), longer = BigLayout.numberSize(tile: tile, digits: 6)
+        check(big > 60 && longer < big && big > 100 && longer * 6 * 0.62 <= tile.width - 40 + 0.5, "the number fits the longest total")
+        check(BigLayout.numberSize(tile: .zero, digits: 3) == 28, "a tiny tile keeps a readable minimum")
 
         // Demo data sanity.
         check(demo.current?.name == "Rummy" && demo.current?.resultText == "Maria leads", "demo leader")
