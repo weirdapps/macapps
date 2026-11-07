@@ -320,6 +320,7 @@ final class HexView: NSView, NSMenuItemValidation {
     }
 
     private func moveTo(_ target: Int, extend: Bool) {
+        guard model.hasBytes else { return }
         model.cursor = target
         if !extend { model.anchor = target }
         reveal(target, center: false)

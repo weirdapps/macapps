@@ -120,6 +120,40 @@ enum SelfTest {
         }
         check(ok, "model selection, jump and bookmarks")
 
+        // Regressions found in review.
+        check(HexFormat.parseOffset("+9223372036854775807", current: 10, count: 1000) == nil, "relative jump cannot overflow")
+        check(HexFormat.parseOffset("-9223372036854775807", current: 10, count: 1000) == nil, "relative jump back cannot overflow")
+        check(Inspector.utf8(Array("ab\u{E9}".utf8).dropLast(1).map { $0 }, truncated: true) == "ab", "UTF-8 of a cut selection keeps the text")
+        check(Inspector.utf8([0xC3], truncated: false) == nil, "UTF-8 still rejects invalid whole selections")
+        let empties = MainActor.assumeIsolated { () -> Bool in
+            let model = HexModel(demo: [], name: "empty.bin", cursor: 0, length: 1, bookmarks: [])
+            model.selectAll()
+            model.addBookmark()
+            model.useSelectionForFind()
+            return model.bookmarks.isEmpty && model.selectedBytes.isEmpty && model.inspectedBytes.isEmpty
+        }
+        check(empties, "select all, bookmark and find on an empty file do nothing")
+        let prefix = MainActor.assumeIsolated { () -> Bool in
+            let model = HexModel(demo: Array(repeating: 0x41, count: 4096), name: "a.bin", cursor: 0, length: 1, bookmarks: [])
+            model.selectAll()
+            return model.selectedBytes(prefix: 512).count == 512 && model.selectionLength == 4096
+                && model.selectedBytes(prefix: 9999).count == 4096
+        }
+        check(prefix, "a capped read of a big selection copies only the cap")
+        let routed = MainActor.assumeIsolated { () -> Bool in
+            let router = OpenRouter()
+            let a = URL(fileURLWithPath: "/tmp/a.bin"), b = URL(fileURLWithPath: "/tmp/b.bin")
+            router.open([a, b])
+            var claimed: [URL] = []
+            router.registerEmpty(UUID()) { claimed.append($0) }
+            router.registerEmpty(UUID()) { claimed.append($0) }
+            return claimed == [a, b]
+        }
+        check(routed, "files that arrive before any window are all delivered")
+        let medium = dir.appendingPathComponent("medium.bin")
+        try? Data(repeating: 7, count: 1000).write(to: medium)
+        check((try? ByteSource.open(medium)).map { $0.count == 1000 && $0[999] == 7 } == true, "small files are read into memory")
+
         let bookmarks = [Bookmark(offset: 5, length: 2, name: "x")]
         let round = (try? JSONDecoder().decode([Bookmark].self, from: JSONEncoder().encode(bookmarks))) ?? []
         check(round == bookmarks, "bookmarks round trip")

@@ -12,6 +12,9 @@ final class ByteSource: @unchecked Sendable {
 
     init(data: NSData) { self.data = data }
 
+    /// Files up to this size are copied into memory instead of mapped.
+    static let mapThreshold = 64 << 20
+
     static func open(_ url: URL) throws -> ByteSource {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
@@ -19,7 +22,10 @@ final class ByteSource: @unchecked Sendable {
         }
         if isDirectory.boolValue { throw HexError("Hex opens files, not folders.") }
         do {
-            return ByteSource(data: try NSData(contentsOf: url, options: [.alwaysMapped]))
+            // Small files are read into memory, so another app truncating them cannot crash the viewer. Big ones are
+            // mapped, which keeps a multi-gigabyte file instant.
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? Int.max
+            return ByteSource(data: try NSData(contentsOf: url, options: size <= mapThreshold ? [] : [.alwaysMapped]))
         } catch {
             throw HexError("Hex could not read this file. \(error.localizedDescription)")
         }
@@ -141,7 +147,14 @@ enum HexFormat {
         if s.hasPrefix("0x") { radix = 16; s.removeFirst(2) } else if s.hasSuffix("h") { radix = 16; s.removeLast() }
         if s.contains(where: { ("a"..."f").contains($0) }) { radix = 16 }
         guard !s.isEmpty, let value = Int(s, radix: radix) else { return nil }
-        let result = sign == 0 ? value : current + sign * value
+        let result: Int
+        if sign == 0 {
+            result = value
+        } else {
+            let (moved, overflow) = current.addingReportingOverflow(sign * value)
+            guard !overflow else { return nil }
+            result = moved
+        }
         guard count > 0, (0..<count).contains(result) else { return nil }
         return result
     }
@@ -207,10 +220,14 @@ enum Inspector {
         return padded.prefix(4) + " " + padded.suffix(4)
     }
 
-    /// The selection as UTF-8 text, or nil when it is not valid UTF-8.
-    static func utf8(_ bytes: [UInt8]) -> String? {
-        guard !bytes.isEmpty, let s = String(bytes: bytes, encoding: .utf8) else { return nil }
-        return HexFormat.text(Array(s.utf8))
+    /// The selection as UTF-8 text, or nil when it is not valid UTF-8. When `truncated` says the bytes are only the
+    /// start of a longer selection, a character cut off at the end is dropped rather than failing the whole decode.
+    static func utf8(_ bytes: [UInt8], truncated: Bool = false) -> String? {
+        guard !bytes.isEmpty else { return nil }
+        for drop in 0...(truncated ? min(3, bytes.count - 1) : 0) {
+            if let s = String(bytes: bytes.dropLast(drop), encoding: .utf8) { return HexFormat.text(Array(s.utf8)) }
+        }
+        return nil
     }
 }
 
@@ -321,9 +338,17 @@ final class HexModel: ObservableObject {
         if reveal { revealToken += 1 }
     }
 
-    func selectAll() { select(0...count - 1, reveal: false) }
+    func selectAll() {
+        guard hasBytes else { return }
+        select(0...count - 1, reveal: false)
+    }
 
     var selectedBytes: [UInt8] { source?.bytes(selection.lowerBound..<(selection.upperBound + 1)) ?? [] }
+
+    /// At most `limit` bytes from the start of the selection, without copying the rest of a huge selection.
+    func selectedBytes(prefix limit: Int) -> [UInt8] {
+        source?.bytes(selection.lowerBound..<(selection.lowerBound + min(limit, selection.count))) ?? []
+    }
 
     /// Up to 8 bytes from the selection start, for the value inspector.
     var inspectedBytes: [UInt8] { source?.bytes(selection.lowerBound..<(selection.lowerBound + 8)) ?? [] }
@@ -370,7 +395,7 @@ final class HexModel: ObservableObject {
 
     func useSelectionForFind() {
         guard hasBytes else { return }
-        let bytes = Array(selectedBytes.prefix(256))
+        let bytes = selectedBytes(prefix: 256)
         if let s = String(bytes: bytes, encoding: .utf8), !s.contains(where: { $0.isASCII && $0.asciiValue! < 0x20 }) {
             findMode = .text
             findText = s
@@ -510,7 +535,11 @@ final class OpenRouter {
     func registerEmpty(_ id: UUID, claim: @escaping (URL) -> Void) {
         emptyWindows.removeAll { $0.id == id }
         emptyWindows.append((id, claim))
-        if !pending.isEmpty { open(pending); pending.removeAll() }
+        if !pending.isEmpty {
+            let urls = pending
+            pending.removeAll()
+            open(urls)
+        }
     }
 
     func unregister(_ id: UUID) { emptyWindows.removeAll { $0.id == id } }

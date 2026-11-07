@@ -4,7 +4,7 @@ import SwiftUI
 
 IconKit.handleCommandLine(draw: appIcon)
 if CommandLine.arguments.contains("--selftest") { exit(SelfTest.run()) }
-Desktop.handleSnapshot(title: "Hex", size: CGSize(width: 1040, height: 660)) { MainActor.assumeIsolated { ViewerContent(model: .demo) } }
+Desktop.handleSnapshot(title: "Hex", size: CGSize(width: 1040, height: 720)) { MainActor.assumeIsolated { ViewerContent(model: .demo) } }
 HexApp.main()
 
 final class AppDelegate: NSObject, NSApplicationDelegate {

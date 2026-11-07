@@ -213,7 +213,7 @@ struct InspectorPanel: View {
         Form {
             if model.hasBytes {
                 Section("Selection") {
-                    LabeledContent("Offset") { mono("0x" + HexFormat.hex(model.selection.lowerBound, digits: 1)) + Text("  \(model.selection.lowerBound)").foregroundStyle(.secondary) }
+                    LabeledContent("Offset") { mono("0x" + HexFormat.hex(model.selection.lowerBound, digits: 1)) + Text("  (\(model.selection.lowerBound))").foregroundStyle(.secondary) }
                     LabeledContent("Length") { mono(model.selectionLength == 1 ? "1 byte" : "\(Inspector.count(model.selectionLength)) bytes") }
                 }
                 Section {
@@ -239,8 +239,8 @@ struct InspectorPanel: View {
                     Text("Values")
                 }
                 Section("UTF-8") {
-                    let bytes = Array(model.selectedBytes.prefix(512))
-                    if let text = Inspector.utf8(bytes) {
+                    let bytes = model.selectedBytes(prefix: 512)
+                    if let text = Inspector.utf8(bytes, truncated: model.selectionLength > bytes.count) {
                         Text(text + (model.selectionLength > 512 ? "\u{2026}" : ""))
                             .font(.system(size: 12, design: .monospaced))
                             .lineLimit(5)
