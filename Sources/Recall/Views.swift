@@ -29,6 +29,9 @@ struct ContentView: View {
                     StudyView(model: model, session: session)
                 } else if let deck = model.deck {
                     DeckView(model: model, deck: deck)
+                } else if !model.library.decks.isEmpty {
+                    ContentUnavailableView("No deck selected", systemImage: "sidebar.left",
+                                           description: Text("Choose a deck in the sidebar to see its cards and study it."))
                 } else {
                     EmptyLibrary(model: model, targeted: dropTargeted)
                 }
@@ -125,6 +128,10 @@ struct Sidebar: View {
                         .buttonStyle(.borderless)
                         .help("New deck")
                     Spacer()
+                    if model.importing {
+                        ProgressView().controlSize(.small)
+                        Text("Importing\u{2026}").font(.system(size: 11.5, weight: .medium)).foregroundStyle(.secondary)
+                    }
                     let due = model.totalDue
                     Text(due == 0 ? "Nothing due" : "\(due) due today")
                         .font(.system(size: 11.5, weight: .medium).monospacedDigit())
@@ -243,7 +250,8 @@ struct DeckView: View {
     }
 
     private var table: some View {
-        Table(rows, selection: $model.selectedCards, sortOrder: $sortOrder) {
+        let rows = self.rows
+        return Table(rows, selection: $model.selectedCards, sortOrder: $sortOrder) {
             TableColumn("#", value: \.position) { Text("\($0.position + 1)").foregroundStyle(.tertiary).monospacedDigit() }
                 .width(34)
             TableColumn("Front", value: \.front) { Text($0.front).lineLimit(1) }
@@ -378,6 +386,7 @@ struct StudyView: View {
                 Spacer(minLength: 16)
                 if let card = model.card(session.current, in: session.deckID) {
                     CardFace(card: card, revealed: session.revealed)
+                        .layoutPriority(-1)
                         .id(card.id)
                         .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity),
                                                 removal: .move(edge: .leading).combined(with: .opacity)))
@@ -479,6 +488,7 @@ struct CardFace: View {
         VStack(spacing: 0) {
             Text(Format.rich(card.front))
                 .font(.system(size: 30, weight: .semibold, design: .rounded))
+                .minimumScaleFactor(0.4)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, revealed ? 26 : 0)
@@ -486,6 +496,7 @@ struct CardFace: View {
                 Divider().padding(.horizontal, 40)
                 Text(Format.rich(card.back))
                     .font(.system(size: 21))
+                    .minimumScaleFactor(0.45)
                     .foregroundStyle(.primary.opacity(0.85))
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity)

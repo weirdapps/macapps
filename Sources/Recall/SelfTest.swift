@@ -171,6 +171,84 @@ enum SelfTest {
         model.save(draft)
         check("saving a draft adds a trimmed card", model.library.decks[0].cards.last?.front == "new" && model.library.decks[0].cards.count == 41)
 
+        // Undo of an edit made before a session must not end the session, and ending a session keeps the undo stack.
+        let deckB = Deck(name: "Undo", cards: [Card(front: "q1", back: "a1", created: now), Card(front: "q2", back: "a2", created: now)])
+        let m2 = RecallModel(library: Library(decks: [deckB]), persists: false, now: now)
+        let undo2 = UndoManager()
+        undo2.groupsByEvent = false
+        m2.undoManager = undo2
+        undo2.beginUndoGrouping()
+        m2.rename(deckB.id, to: "Renamed")
+        undo2.endUndoGrouping()
+        m2.session = Session(deckID: deckB.id, queue: deckB.cards.map(\.id), started: now)
+        undo2.undo()
+        check("undoing a rename keeps the session running", m2.session != nil && m2.library.decks[0].name == "Undo")
+        undo2.redo()
+        m2.endSession()
+        check("ending a session keeps earlier undo", undo2.canUndo)
+        // Undo that removes a card in the running queue drops it from the queue instead of showing a blank card.
+        undo2.beginUndoGrouping()
+        m2.save(RecallModel.CardDraft(deckID: deckB.id, front: "q3", back: "a3"))
+        undo2.endUndoGrouping()
+        let added = m2.library.decks[0].cards[2].id
+        m2.session = Session(deckID: deckB.id, queue: [added, deckB.cards[0].id], started: now)
+        undo2.undo()
+        check("undo removes a vanished card from the queue", m2.session?.queue == [deckB.cards[0].id] && m2.session?.finished == false)
+        m2.endSession()
+        undo2.beginUndoGrouping()
+        m2.deleteDeck(deckB.id)
+        undo2.endUndoGrouping()
+        check("deleting the last deck clears the selection", m2.selection == nil && m2.deck == nil)
+        undo2.undo()
+        check("undoing a deck delete selects it again", m2.selection == deckB.id)
+
+        // Importing the same file twice does not duplicate cards; a new name makes a new deck.
+        let m3 = RecallModel(library: Library(), persists: false, now: now)
+        let file = URL(fileURLWithPath: "/tmp/Verbs.csv")
+        let filePairs = [Pair(front: "ser", back: "to be"), Pair(front: "ir", back: "to go"), Pair(front: "ser", back: "to be")]
+        m3.apply([RecallModel.ParsedFile(url: file, pairs: filePairs)])
+        check("import makes a deck named after the file, without repeats", m3.library.decks.count == 1
+            && m3.library.decks[0].name == "Verbs" && m3.library.decks[0].cards.count == 2 && m3.selection == m3.library.decks[0].id)
+        m3.apply([RecallModel.ParsedFile(url: file, pairs: filePairs + [Pair(front: "dar", back: "to give")])])
+        check("reimport adds only the new card", m3.library.decks.count == 1 && m3.library.decks[0].cards.count == 3
+            && m3.notice?.message.contains("already there") == true)
+        m3.apply([RecallModel.ParsedFile(url: URL(fileURLWithPath: "/tmp/empty.csv"), pairs: []),
+                  RecallModel.ParsedFile(url: URL(fileURLWithPath: "/tmp/gone.csv"), pairs: nil)])
+        check("empty and unreadable files import nothing and say why", m3.library.decks.count == 1
+            && m3.notice?.title == "Nothing new to import" && m3.notice?.message.contains("could not be read") == true)
+
+        // File decoding and delimiters.
+        let utf16 = "front\tback\nκαλημέρα\tgood morning\n".data(using: .utf16LittleEndian)!
+        let decoded = CSV.decode(Data([0xFF, 0xFE]) + utf16)
+        let greek = CSV.cards(from: decoded, pathExtension: "txt")
+        check("UTF-16 Unicode text from Excel decodes", greek.count == 1 && greek[0].front == "καλημέρα")
+        check("UTF-8 with BOM decodes", CSV.cards(from: CSV.decode(Data([0xEF, 0xBB, 0xBF]) + Data("hola,hello".utf8))).first?.front == "hola")
+        check("Latin 1 bytes still decode", CSV.decode(Data([0x63, 0x61, 0x66, 0xE9, 0x2C, 0x78])) == "caf\u{E9},x")
+        check("a TSV line with commas in it stays a TSV", CSV.cards(from: "a, b, c\tletters\none, two\tnumbers").count == 2)
+        check("empty file has no cards", CSV.cards(from: "").isEmpty && CSV.cards(from: CSV.decode(Data())).isEmpty)
+        check("unicode fronts survive", CSV.cards(from: "日本,Japan\n🍎,apple").map(\.front) == ["日本", "🍎"])
+
+        // Plain text for the table: fast path matches the Markdown path.
+        check("plain text without markup is unchanged", Format.plain("hello world") == "hello world" && Format.plain("a\nb") == "a \u{00B7} b")
+        let bigDeck = (0..<5000).map { "front number \($0) with some words" }
+        let t0 = Date()
+        _ = bigDeck.map(Format.plain)
+        check("table text for 5000 cards takes under 0.2 s", Date().timeIntervalSince(t0) < 0.2)
+
+        // An unreadable library is moved aside, never overwritten.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("recall-selftest-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let broken = dir.appendingPathComponent("library.json")
+        try? Data("{\"decks\": [ oops".utf8).write(to: broken)
+        let loaded = RecallModel.loadLibrary(at: broken)
+        let aside = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        check("unreadable library is kept aside", loaded == nil && !FileManager.default.fileExists(atPath: broken.path)
+            && aside.contains { $0.hasPrefix("library (unreadable") })
+        try? JSONEncoder().encode(lib).write(to: broken)
+        check("readable library loads", RecallModel.loadLibrary(at: broken) == lib)
+        check("missing library is just empty", RecallModel.loadLibrary(at: dir.appendingPathComponent("none.json")) == nil)
+        try? FileManager.default.removeItem(at: dir)
+
         print("\(passed) checks passed, \(failed) failed")
         return failed == 0 ? 0 : 1
     }

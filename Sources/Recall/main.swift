@@ -109,7 +109,7 @@ extension RecallModel {
         func deck(_ name: String, _ pairs: [(String, String)], seed: Int) -> Deck {
             var d = Deck(name: name)
             let intervals = [1, 3, 6, 15, 24, 40, 2, 9, 31, 4]
-            let offsets = [0, 0, 1, 0, 3, 5, -1, 2, 12, 0, 7, 0, 4]
+            let offsets = [0, 1, 2, 0, 3, 5, -1, 2, 9, 0, 4, 1, 6, 10, 3, 0, 8, 2, 11]
             for (i, pair) in pairs.enumerated() {
                 var c = Card(front: pair.0, back: pair.1, created: now.addingTimeInterval(-60 * day + Double(i) * 60))
                 if (i + seed) % 6 != 5 {

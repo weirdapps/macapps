@@ -61,6 +61,11 @@ struct Deck: Codable, Identifiable, Hashable {
     var cards: [Card] = []
 }
 
+struct Pair: Hashable, Sendable {
+    var front: String
+    var back: String
+}
+
 struct Review: Codable, Hashable {
     var cardID: UUID
     var deckID: UUID
@@ -254,9 +259,11 @@ enum Format {
         return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
     }
 
-    /// One line of plain text for the table.
+    /// One line of plain text for the table. Text without markup skips the Markdown parser, which is slow on big decks.
     static func plain(_ text: String) -> String {
-        String(rich(text).characters)
+        let markup: Set<Character> = ["*", "_", "`", "[", "\\", "~", "<", "&"]
+        let stripped = text.contains(where: markup.contains) ? String(rich(text).characters) : text
+        return stripped
             .split(whereSeparator: \.isNewline).joined(separator: " \u{00B7} ")
             .trimmingCharacters(in: .whitespaces)
     }
@@ -273,9 +280,18 @@ enum CSV {
         let tabs = first.filter { $0 == "\t" }.count
         let commas = first.filter { $0 == "," }.count
         let semis = first.filter { $0 == ";" }.count
-        if tabs > 0 && tabs >= commas { return "\t" }
+        // A tab almost never appears in a comma file, while commas are common inside TSV text.
+        if tabs > 0 { return "\t" }
         if semis > commas { return ";" }
         return ","
+    }
+
+    /// Text from a file's bytes: UTF-8 (with or without a BOM), UTF-16 with a BOM (Excel's Unicode text), else Windows Latin 1.
+    static func decode(_ data: Data) -> String {
+        if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF]) {
+            if let text = String(data: data, encoding: .utf16) { return text }
+        }
+        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .windowsCP1252) ?? ""
     }
 
     /// RFC 4180 rows: quoted fields may hold delimiters, line breaks and doubled quotes.
@@ -383,7 +399,7 @@ final class RecallModel: ObservableObject {
         self.persists = persists
         self.now = now
         self.newPerDay = persists ? (UserDefaults.standard.object(forKey: "newPerDay") as? Int ?? 20) : 20
-        self.library = library ?? (persists ? Storage.load(Library.self, app: "Recall", file: "library.json") : nil) ?? Library()
+        self.library = library ?? (persists ? Self.loadLibrary() : nil) ?? Library()
         selection = self.library.decks.first?.id
         guard persists else { return }
         Self.shared = self
@@ -403,6 +419,16 @@ final class RecallModel: ObservableObject {
 
     // MARK: Persistence
 
+    /// Loads the saved library. A file that exists but cannot be read is moved aside first, so the next save never overwrites it.
+    nonisolated static func loadLibrary(at url: URL = Storage.url(app: "Recall", file: "library.json")) -> Library? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        if let library = try? JSONDecoder().decode(Library.self, from: data) { return library }
+        let stamp = Int(Date().timeIntervalSince1970)
+        let aside = url.deletingLastPathComponent().appendingPathComponent("library (unreadable \(stamp)).json")
+        try? FileManager.default.moveItem(at: url, to: aside)
+        return nil
+    }
+
     private func scheduleSave() {
         guard persists else { return }
         saveWork?.cancel()
@@ -419,24 +445,45 @@ final class RecallModel: ObservableObject {
 
     // MARK: Undo
 
-    /// Applies a change and registers its undo (library and session together, so an answer can be taken back).
-    func change(_ name: String, _ body: () -> Void) {
-        let before = (library, session)
+    /// Applies a change and registers its undo. Answers also restore the session, so an answer can be taken back;
+    /// every other change restores the library alone and leaves a running session alone.
+    func change(_ name: String, withSession: Bool = false, _ body: () -> Void) {
+        let before = (library, withSession ? session : nil)
         body()
-        registerUndo(name, restoring: before)
+        registerUndo(name, withSession: withSession, restoring: before)
     }
 
-    private func registerUndo(_ name: String, restoring state: (Library, Session?)) {
+    private func registerUndo(_ name: String, withSession: Bool, restoring state: (Library, Session?)) {
         guard let undoManager else { return }
         undoManager.registerUndo(withTarget: self) { model in
             MainActor.assumeIsolated {
-                let current = (model.library, model.session)
+                let current = (model.library, withSession ? model.session : nil)
                 model.library = state.0
-                model.session = state.1
-                model.registerUndo(name, restoring: current)
+                if withSession { model.session = state.1 }
+                model.reconcile()
+                model.registerUndo(name, withSession: withSession, restoring: current)
             }
         }
         undoManager.setActionName(name)
+    }
+
+    /// Keeps the selection and a running session pointing at decks and cards that still exist.
+    func reconcile() {
+        if let s = session {
+            if let deck = library.decks.first(where: { $0.id == s.deckID }) {
+                let ids = Set(deck.cards.map(\.id))
+                if s.queue.contains(where: { !ids.contains($0) }) {
+                    var t = s
+                    t.queue.removeAll { !ids.contains($0) }
+                    t.finished = t.queue.isEmpty
+                    session = t
+                }
+            } else {
+                session = nil
+            }
+        }
+        if deck == nil { selection = session?.deckID ?? library.decks.first?.id }
+        if let deck { selectedCards.formIntersection(deck.cards.map(\.id)) } else { selectedCards = [] }
     }
 
     // MARK: Lookups
@@ -473,9 +520,9 @@ final class RecallModel: ObservableObject {
         change("Delete Deck") {
             library.decks.remove(at: i)
             library.reviews.removeAll { $0.deckID == id }
-            if session?.deckID == id { session = nil }
         }
         if selection == id { selection = library.decks[safe: min(i, library.decks.count - 1)]?.id }
+        reconcile()
     }
 
     // MARK: Cards
@@ -511,12 +558,8 @@ final class RecallModel: ObservableObject {
         guard let d = deckIndex(selection), !ids.isEmpty else { return }
         change(ids.count == 1 ? "Delete Card" : "Delete Cards") {
             library.decks[d].cards.removeAll { ids.contains($0.id) }
-            if var s = session, s.deckID == library.decks[d].id {
-                s.queue.removeAll { ids.contains($0) }
-                s.finished = s.queue.isEmpty
-                session = s
-            }
         }
+        reconcile()
     }
 
     /// Forgets the schedule so the cards are new again.
@@ -568,7 +611,7 @@ final class RecallModel: ObservableObject {
               let c = library.decks[d].cards.firstIndex(where: { $0.id == id }) else { return }
         let date = Date()
         let card = library.decks[d].cards[c]
-        change("Answer") {
+        change("Answer", withSession: true) {
             library.decks[d].cards[c] = Scheduler.answer(card, grade, now: date)
             library.reviews.append(Review(cardID: id, deckID: s.deckID, date: date, grade: grade, wasNew: card.isNew))
             if library.reviews.count > Library.reviewLimit { library.reviews.removeFirst(library.reviews.count - Library.reviewLimit) }
@@ -580,7 +623,6 @@ final class RecallModel: ObservableObject {
     func endSession() {
         session = nil
         now = Date()
-        undoManager?.removeAllActions(withTarget: self)
     }
 
     // MARK: Import and export
@@ -593,37 +635,67 @@ final class RecallModel: ObservableObject {
         if let shared { shared.importFiles(urls) } else { pending += urls }
     }
 
+    @Published var importing = false
+
+    struct ParsedFile: Sendable {
+        var url: URL
+        var pairs: [Pair]?
+    }
+
+    /// Reads and parses one file; runs off the main thread.
+    nonisolated static func parse(_ url: URL) -> ParsedFile {
+        let ok = url.startAccessingSecurityScopedResource()
+        defer { if ok { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return ParsedFile(url: url, pairs: nil) }
+        let pairs = CSV.cards(from: CSV.decode(data), pathExtension: url.pathExtension).map { Pair(front: $0.front, back: $0.back) }
+        return ParsedFile(url: url, pairs: pairs)
+    }
+
     func importFiles(_ urls: [URL]) {
+        guard !urls.isEmpty, !importing else { return }
+        importing = true
+        Task {
+            let parsed = await Task.detached(priority: .userInitiated) { urls.map(Self.parse) }.value
+            importing = false
+            apply(parsed)
+        }
+    }
+
+    /// Adds parsed files as decks, named after the file; a deck with that name gets the cards it does not already have.
+    func apply(_ files: [ParsedFile]) {
         var lines: [String] = []
         var lastDeck: UUID?
         var total = 0
-        for url in urls {
-            let ok = url.startAccessingSecurityScopedResource()
-            defer { if ok { url.stopAccessingSecurityScopedResource() } }
-            guard let data = try? Data(contentsOf: url) else { lines.append("\(url.lastPathComponent) could not be read."); continue }
-            let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .windowsCP1252) ?? ""
-            let pairs = CSV.cards(from: text, pathExtension: url.pathExtension)
+        for file in files {
+            let url = file.url
+            guard let pairs = file.pairs else { lines.append("\(url.lastPathComponent) could not be read."); continue }
             guard !pairs.isEmpty else { lines.append("\(url.lastPathComponent) has no rows with a front and a back."); continue }
             let name = url.deletingPathExtension().lastPathComponent
+            let existing = library.decks.firstIndex { $0.name == name }
+            var seen = Set(existing.map { library.decks[$0].cards.map { Pair(front: $0.front, back: $0.back) } } ?? [])
+            let fresh = pairs.filter { seen.insert($0).inserted }
+            let skipped = pairs.count - fresh.count
             let base = Date()
-            let cards = pairs.enumerated().map { Card(front: $1.front, back: $1.back, created: base.addingTimeInterval(Double($0) * 0.001)) }
-            change("Import") {
-                if let i = library.decks.firstIndex(where: { $0.name == name }) {
-                    library.decks[i].cards += cards
-                    lastDeck = library.decks[i].id
-                } else {
-                    let deck = Deck(name: name, cards: cards)
-                    library.decks.append(deck)
-                    lastDeck = deck.id
+            let cards = fresh.enumerated().map { Card(front: $1.front, back: $1.back, created: base.addingTimeInterval(Double($0) * 0.001)) }
+            if !cards.isEmpty {
+                change("Import") {
+                    if let i = existing {
+                        library.decks[i].cards += cards
+                    } else {
+                        library.decks.append(Deck(name: name, cards: cards))
+                    }
                 }
             }
+            lastDeck = library.decks.first { $0.name == name }?.id
             total += cards.count
-            lines.append("\(cards.count) cards into \u{201C}\(name)\u{201D}.")
+            let into = "\(cards.count) card\(cards.count == 1 ? "" : "s") into \u{201C}\(name)\u{201D}"
+            lines.append(skipped == 0 ? into + "." : into + ", \(skipped) already there.")
         }
         now = Date()
         if let lastDeck, session == nil { selection = lastDeck }
-        notice = Notice(title: total > 0 ? "Imported \(total) card\(total == 1 ? "" : "s")" : "Nothing to import",
-                        message: lines.joined(separator: "\n") + (total > 0 ? "" : "\nEach row needs a front and a back, separated by a comma or a tab."))
+        notice = Notice(title: total > 0 ? "Imported \(total) card\(total == 1 ? "" : "s")" : "Nothing new to import",
+                        message: lines.joined(separator: "\n")
+                            + (lines.contains { $0.hasSuffix("back.") } ? "\nEach row needs a front and a back, separated by a comma or a tab." : ""))
     }
 
     func openImportPanel() {
