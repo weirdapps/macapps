@@ -90,6 +90,57 @@ enum SelfTest {
         check(Metrics.title(fileName: "Keynote.txt", text: "x") == "Keynote", "title from file name")
         check(Metrics.title(fileName: ".txt", text: "\nFirst line\nmore") == "First line", "title from first line")
 
+        // Keeping the place when the text reflows.
+        var reflow = PromptClock()
+        reflow.limit = 4000
+        reflow.offset = 500
+        reflow.rescale(by: 1.5)
+        check(reflow.offset == 750, "a larger text size keeps the reader on the same words")
+        reflow.limit = 600
+        reflow.rescale(by: 1)
+        check(reflow.offset == 600, "a reflow never scrolls past the end")
+        reflow.rescale(by: .nan)
+        check(reflow.offset == 600, "a bad reflow factor is ignored")
+
+        // Importing files: encodings, line breaks, binaries, rich text, empty and huge files.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cue-selftest-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        func write(_ name: String, _ data: Data) -> URL {
+            let url = dir.appendingPathComponent(name)
+            try? data.write(to: url)
+            return url
+        }
+        var utf16 = Data([0xFF, 0xFE])
+        utf16.append("Καλημέρα\r\nworld".data(using: .utf16LittleEndian)!)
+        check(Importer.text(from: write("notepad.txt", utf16)) == "Καλημέρα\nworld", "UTF-16 files with a byte order mark import")
+        check(Importer.text(from: write("bom.txt", Data([0xEF, 0xBB, 0xBF]) + Data("Hi".utf8))) == "Hi", "the UTF-8 byte order mark is dropped")
+        check(Importer.text(from: write("mac.txt", Data("one\rtwo\r\nthree".utf8))) == "one\ntwo\nthree", "old Mac and Windows line breaks become one kind")
+        check(Importer.text(from: write("latin.txt", Data([0x63, 0x61, 0x66, 0xE9]))) == "café", "a Latin-1 file still imports")
+        check(Importer.text(from: write("binary.txt", Data([0x50, 0x4B, 0x03, 0x04, 0x00, 0x00]))) == nil, "binary files are refused")
+        check(Importer.text(from: write("empty.txt", Data())) == "", "an empty file imports as an empty script")
+        check(Importer.text(from: write("huge.txt", Data(repeating: 0x61, count: Importer.maxBytes + 1))) == nil, "huge files are refused")
+        let rtf = Data(#"{\rtf1\ansi{\fonttbl\f0 Helvetica;}\f0 Hello \b bold\b0  world.\par Second line}"#.utf8)
+        let rtfText = Importer.text(from: write("talk.rtf", rtf))
+        check(rtfText?.hasPrefix("Hello bold world.\nSecond line") == true, "rich text imports as plain words")
+        check(Importer.text(from: dir) == nil, "a folder is not a script")
+        let original = write("keep.txt", Data("Original".utf8))
+        let importModel = MainActor.assumeIsolated { () -> (Int, String?) in
+            let model = CueModel(persists: false)
+            let added = model.importFiles([original, dir.appendingPathComponent("binary.txt")])
+            return (added, model.selected?.title)
+        }
+        check(importModel.0 == 1 && importModel.1 == "keep", "importing skips the unreadable and titles from the file name")
+        check((try? String(contentsOf: original, encoding: .utf8)) == "Original", "importing never changes the original file")
+
+        // A library file that no longer reads is moved aside, not overwritten.
+        let broken = write("scripts.json", Data("{not json".utf8))
+        let recovered = MainActor.assumeIsolated { CueModel.loadScripts(at: broken) }
+        let aside = (try? FileManager.default.contentsOfDirectory(atPath: dir.path))?.contains { $0.hasPrefix("scripts.unreadable-") } ?? false
+        check(recovered.count == 1 && aside && !FileManager.default.fileExists(atPath: broken.path), "an unreadable library is kept aside")
+        let missing = MainActor.assumeIsolated { CueModel.loadScripts(at: dir.appendingPathComponent("none.json")) }
+        check(missing.first?.title == "Welcome to Cue", "a first launch seeds the welcome script")
+
         // Persistence round trip.
         let scripts = [Script(title: "One", text: "Hello there"), Script(title: "", text: "")]
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("cue-selftest-\(UUID().uuidString).json")
@@ -119,6 +170,29 @@ enum SelfTest {
             return model.scripts.count == 2 && model.selection == model.scripts[0].id
         }
         check(ok, "new, edit, delete and undo delete in the library")
+
+        let redo = MainActor.assumeIsolated { () -> Bool in
+            let model = CueModel(persists: false)
+            model.newScript()
+            let undo = UndoManager()
+            undo.groupsByEvent = false
+            undo.beginUndoGrouping()
+            model.delete(model.scripts[0].id, undo: undo)
+            undo.endUndoGrouping()
+            undo.undo()
+            guard model.scripts.count == 1, undo.canRedo else { return false }
+            undo.redo()
+            return model.scripts.isEmpty && model.selection == nil
+        }
+        check(redo, "a deleted script can be redeleted with redo")
+
+        let dup = MainActor.assumeIsolated { () -> String? in
+            let model = CueModel(persists: false)
+            model.scripts = [Script(title: "  ", text: "x")]
+            model.duplicate(model.scripts[0].id)
+            return model.selected?.title
+        }
+        check(dup == "Untitled script copy", "duplicating an untitled script names the copy sensibly")
 
         print(failures == 0 ? "All \(checks) checks passed." : "\(failures) of \(checks) checks failed.")
         return failures == 0 ? 0 : 1

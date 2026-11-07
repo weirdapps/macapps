@@ -67,7 +67,7 @@ struct CueCommands: Commands {
             Toggle("Show Reading Line", isOn: $model.settings.showReadingLine).keyboardShortcut("l", modifiers: [.command, .shift])
             Toggle("Count Down Before Start", isOn: $model.settings.countdown)
             Divider()
-            Picker("Display", selection: $model.settings.displayID) {
+            Picker("Display", selection: model.pickerDisplay) {
                 Text("Main Display").tag(UInt32(0))
                 ForEach(NSScreen.screens.dropFirst(), id: \.displayID) { screen in
                     Text(screen.localizedName).tag(screen.displayID)

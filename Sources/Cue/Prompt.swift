@@ -124,6 +124,7 @@ struct ReadingLine: View {
 final class PromptEngine: ObservableObject {
     @Published var clock = PromptClock()
     @Published var flash: String?
+    var textHeight = 0.0
     let script: Script
     private var flashTask: Task<Void, Never>?
 
@@ -151,7 +152,11 @@ struct PromptScreen: View {
             let s = model.settings
             ZStack {
                 PromptStage(text: engine.script.text, settings: s, offset: engine.clock.offset, size: geo.size) { height in
+                    let old = engine.textHeight
+                    engine.textHeight = Double(height)
                     engine.clock.limit = max(0, Double(height) - s.lineHeight * 0.7)
+                    // A new size or margin reflows the text: stay on the same words.
+                    if old > 0, height > 0 { engine.clock.rescale(by: Double(height) / old) }
                 }
                 VStack(spacing: 0) {
                     hud(s)

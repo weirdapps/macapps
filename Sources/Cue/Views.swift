@@ -56,7 +56,7 @@ struct ContentView: View {
                     .disabled(model.selected == nil)
             }
         }
-        .fileImporter(isPresented: $model.isImporting, allowedContentTypes: [.plainText, .text], allowsMultipleSelection: true) { result in
+        .fileImporter(isPresented: $model.isImporting, allowedContentTypes: Importer.contentTypes, allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { model.importFiles(urls) }
         }
     }
@@ -191,6 +191,15 @@ struct InspectorView: View {
                     SliderRow(title: "Speed", value: $model.settings.speed, range: PromptSettings.speedRange, step: 0.5) {
                         String(format: "%.1f", $0)
                     }
+                    Stepper(value: $model.settings.wordsPerMinute, in: PromptSettings.wpmRange, step: 5) {
+                        HStack {
+                            Text("Speaking pace")
+                            Spacer()
+                            Text("\(model.settings.wordsPerMinute) wpm").foregroundStyle(.secondary).monospacedDigit()
+                                .contentTransition(.numericText())
+                        }
+                    }
+                    .help("Used for the estimated length of each script")
                     Toggle("Count down 3, 2, 1", isOn: $model.settings.countdown)
                 }
                 Section("Text") {
@@ -206,16 +215,8 @@ struct InspectorView: View {
                         "\(Int(($0 * 100).rounded()))% down"
                     }
                 }
-                Section("Timing") {
-                    Stepper(value: $model.settings.wordsPerMinute, in: PromptSettings.wpmRange, step: 5) {
-                        LabeledContent("Pace", value: "\(model.settings.wordsPerMinute) wpm").monospacedDigit()
-                    }
-                    LabeledContent("Estimated length",
-                                   value: Metrics.spoken(Metrics.duration(words: script?.words ?? 0, wpm: model.settings.wordsPerMinute)))
-                        .monospacedDigit()
-                }
                 Section("Display") {
-                    Picker("Prompt on", selection: $model.settings.displayID) {
+                    Picker("Prompt on", selection: model.pickerDisplay) {
                         Text("Main display").tag(UInt32(0))
                         if !Desktop.isSnapshot {
                             ForEach(NSScreen.screens.dropFirst(), id: \.displayID) { screen in

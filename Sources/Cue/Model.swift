@@ -1,5 +1,6 @@
 import AppKit
 import Kit
+import UniformTypeIdentifiers
 import SwiftUI
 
 // MARK: - Data
@@ -114,6 +115,43 @@ enum Metrics {
     }
 }
 
+/// Reads a script out of a file someone dropped or picked: plain text in UTF-8, UTF-16 with a byte
+/// order mark, Windows Latin, or a rich text or Word document. Never writes to the file.
+enum Importer {
+    static let maxBytes = 5_000_000
+    static let richExtensions: Set<String> = ["rtf", "rtfd", "doc", "docx", "odt"]
+    static let contentTypes: [UTType] = [.text, .rtf, .rtfd] + ["doc", "docx", "odt"].compactMap { UTType(filenameExtension: $0) }
+
+    static func text(from url: URL) -> String? {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
+        if let size = values?.fileSize, size > maxBytes { return nil }
+        let ext = url.pathExtension.lowercased()
+        if richExtensions.contains(ext) {
+            guard let rich = try? NSAttributedString(url: url, options: [:], documentAttributes: nil) else { return nil }
+            return normalized(rich.string)
+        }
+        if values?.isDirectory == true { return nil }
+        guard let data = try? Data(contentsOf: url), data.count <= maxBytes else { return nil }
+        return decode(data).map(normalized)
+    }
+
+    /// Text from raw bytes, or nil when they look binary.
+    static func decode(_ data: Data) -> String? {
+        if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF]) {
+            return String(data: data, encoding: .utf16)
+        }
+        if data.starts(with: [0xEF, 0xBB, 0xBF]) { return String(data: data.dropFirst(3), encoding: .utf8) }
+        if data.contains(0) { return nil }
+        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .windowsCP1252) ?? String(data: data, encoding: .isoLatin1)
+    }
+
+    /// One kind of line break, so Windows and classic Mac files lay out like the rest.
+    static func normalized(_ text: String) -> String {
+        text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{2028}", with: "\n").replacingOccurrences(of: "\u{2029}", with: "\n")
+    }
+}
+
 /// The prompt's motion: a countdown, then scrolling at a rate until the last line reaches the reading line.
 struct PromptClock: Equatable {
     enum Phase: Equatable { case countdown(Double), playing, paused, finished }
@@ -160,6 +198,12 @@ struct PromptClock: Equatable {
         }
     }
 
+    /// Keeps the place when the text reflows (a new size or margin): the offset scales with the text height.
+    mutating func rescale(by factor: Double) {
+        guard factor.isFinite, factor > 0 else { return }
+        offset = min(max(0, offset * factor), limit)
+    }
+
     /// Moves the text by hand (arrow keys, scroll wheel); leaving the end makes it pausable again.
     mutating func nudge(by delta: Double) {
         offset = min(max(0, offset + delta), limit)
@@ -173,7 +217,7 @@ struct PromptClock: Equatable {
 final class CueModel: ObservableObject {
     @Published var scripts: [Script] { didSet { scheduleSave() } }
     @Published var selection: Script.ID?
-    @Published var settings: PromptSettings { didSet { if persists, settings != oldValue { Storage.save(settings, app: "Cue", file: "settings.json") } } }
+    @Published var settings: PromptSettings { didSet { if settings != oldValue { scheduleSave() } } }
     @Published var isImporting = false
 
     let persists: Bool
@@ -182,10 +226,14 @@ final class CueModel: ObservableObject {
     init(persists: Bool = true) {
         self.persists = persists
         if persists {
-            scripts = Storage.load([Script].self, app: "Cue", file: "scripts.json") ?? [Self.welcome]
+            scripts = Self.loadScripts()
             settings = Storage.load(PromptSettings.self, app: "Cue", file: "settings.json") ?? PromptSettings()
             NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.saveNow() }
+            }
+            // A display plugged in or out: refresh the display pickers.
+            NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.objectWillChange.send() }
             }
         } else {
             scripts = []
@@ -195,6 +243,22 @@ final class CueModel: ObservableObject {
     }
 
     var selected: Script? { scripts.first { $0.id == selection } }
+
+    /// The saved library, or the welcome script on a first launch. A file that no longer reads is moved
+    /// aside instead of being overwritten by the next save, so nothing is lost.
+    static func loadScripts(at url: URL = Storage.url(app: "Cue", file: "scripts.json")) -> [Script] {
+        guard let data = try? Data(contentsOf: url) else { return [welcome] }
+        if let scripts = try? JSONDecoder().decode([Script].self, from: data) { return scripts }
+        let aside = url.deletingPathExtension().appendingPathExtension("unreadable-\(Int(Date().timeIntervalSince1970)).json")
+        try? FileManager.default.moveItem(at: url, to: aside)
+        return [welcome]
+    }
+
+    /// The display the pickers show: a chosen display that is no longer connected reads as the main one.
+    var pickerDisplay: Binding<UInt32> {
+        Binding(get: { NSScreen.screens.dropFirst().contains { $0.displayID == self.settings.displayID } ? self.settings.displayID : 0 },
+                set: { self.settings.displayID = $0 })
+    }
 
     func binding(for id: Script.ID) -> Binding<Script>? {
         guard scripts.contains(where: { $0.id == id }) else { return nil }
@@ -220,10 +284,17 @@ final class CueModel: ObservableObject {
         _ = withAnimation(.snappy) { scripts.remove(at: i) }
         if selection == id { selection = scripts.indices.contains(i) ? scripts[i].id : scripts.last?.id }
         undo?.registerUndo(withTarget: self) { model in
-            MainActor.assumeIsolated {
-                model.scripts.insert(removed, at: min(i, model.scripts.count))
-                model.selection = removed.id
-            }
+            MainActor.assumeIsolated { model.restore(removed, at: i, undo: undo) }
+        }
+        undo?.setActionName("Delete Script")
+    }
+
+    /// The undo of a delete; registers the redo.
+    func restore(_ script: Script, at index: Int, undo: UndoManager?) {
+        withAnimation(.snappy) { scripts.insert(script, at: min(max(0, index), scripts.count)) }
+        selection = script.id
+        undo?.registerUndo(withTarget: self) { model in
+            MainActor.assumeIsolated { model.delete(script.id, undo: undo) }
         }
         undo?.setActionName("Delete Script")
     }
@@ -232,7 +303,7 @@ final class CueModel: ObservableObject {
         guard let i = scripts.firstIndex(where: { $0.id == id }) else { return }
         var copy = scripts[i]
         copy.id = UUID()
-        copy.title += " copy"
+        copy.title = copy.displayTitle + " copy"
         copy.modified = Date()
         scripts.insert(copy, at: i + 1)
         selection = copy.id
@@ -245,8 +316,7 @@ final class CueModel: ObservableObject {
         for url in urls {
             let access = url.startAccessingSecurityScopedResource()
             defer { if access { url.stopAccessingSecurityScopedResource() } }
-            guard let text = (try? String(contentsOf: url, encoding: .utf8)) ?? (try? String(contentsOf: url, encoding: .isoLatin1)),
-                  !text.contains("\u{0}") else { continue }
+            guard let text = Importer.text(from: url) else { continue }
             let script = Script(title: Metrics.title(fileName: url.lastPathComponent, text: text), text: text)
             scripts.insert(script, at: 0)
             selection = script.id
@@ -284,6 +354,7 @@ final class CueModel: ObservableObject {
         guard persists else { return }
         saveTask?.cancel()
         Storage.save(scripts, app: "Cue", file: "scripts.json")
+        Storage.save(settings, app: "Cue", file: "settings.json")
     }
 
     static let welcome = Script(title: "Welcome to Cue", text: """
