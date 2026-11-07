@@ -68,9 +68,28 @@ struct LoanInput: Codable, Equatable {
     var frequency: Frequency = .monthly
     var extra: Double = 0
 
+    static let maxYears = 50
+    static let maxMonths = 600
+
     var months: Int { unit == .years ? term * 12 : term }
-    var periods: Int { max(0, Int((Double(months) * Double(frequency.perYear) / 12).rounded())) }
+    /// Payments over the term; any term of at least a month has at least one payment.
+    var periods: Int { months > 0 ? max(1, Int((Double(months) * Double(frequency.perYear) / 12).rounded())) : 0 }
     var periodicRate: Double { rate / 100 / Double(frequency.perYear) }
+
+    /// Keeps the term between one and 50 years (600 months).
+    mutating func clampTerm() {
+        let limit = unit == .years ? Self.maxYears : Self.maxMonths
+        let clamped = min(max(term, 1), limit)
+        if clamped != term { term = clamped }
+    }
+
+    /// Switches the unit and keeps the same length of loan.
+    mutating func setUnit(_ new: TermUnit) {
+        guard new != unit else { return }
+        term = new == .months ? term * 12 : max(1, Int((Double(term) / 12).rounded()))
+        unit = new
+        clampTerm()
+    }
 }
 
 struct SavingsInput: Codable, Equatable {
@@ -261,6 +280,10 @@ enum Finance {
 enum Fmt {
     static func euro(_ x: Double) -> String { x.formatted(.currency(code: "EUR")) }
     static func euro0(_ x: Double) -> String { x.formatted(.currency(code: "EUR").precision(.fractionLength(0))) }
+    /// Whole euros when the amount has no cents, otherwise with cents.
+    static func euroAuto(_ x: Double) -> String {
+        x.formatted(.currency(code: "EUR").precision(.fractionLength(Finance.round2(x).rounded() == Finance.round2(x) ? 0 : 2)))
+    }
     /// Short axis labels: 250k, 1.2M.
     static func compact(_ x: Double) -> String {
         let a = abs(x)
@@ -331,24 +354,33 @@ final class LoanModel: ObservableObject {
         Storage.save(Saved(mode: mode, loan: loan, savings: savings), app: "Loan", file: "inputs.json")
     }
 
+    /// Asks where to save the CSV with a sheet on the window, writes it, then offers Reveal in Finder.
     func export() {
+        guard canExport, !Desktop.isSnapshot else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.commaSeparatedText]
         panel.nameFieldStringValue = mode == .loan ? "Loan schedule.csv" : "Savings plan.csv"
         panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let url = panel.url else { return }
         let text = mode == .loan ? Finance.loanCSV(loanResult.schedule) : Finance.savingsCSV(savingsResult)
-        do {
-            try text.write(to: url, atomically: true, encoding: .utf8)
-            let alert = NSAlert()
-            alert.messageText = "Exported \(url.lastPathComponent)"
-            alert.informativeText = mode == .loan ? "\(loanResult.schedule.count) payments written as CSV."
-                : "\(savingsResult.count) years written as CSV."
-            alert.addButton(withTitle: "OK")
-            alert.addButton(withTitle: "Reveal in Finder")
-            if alert.runModal() == .alertSecondButtonReturn { revealInFinder([url]) }
-        } catch {
-            NSAlert(error: error).runModal()
+        let summary = mode == .loan ? "\(loanResult.schedule.count) payments written as CSV."
+            : "\(max(0, savingsResult.count - 1)) years written as CSV."
+        let window = NSApp.keyWindow ?? NSApp.mainWindow
+        Task { @MainActor in
+            let response = if let window { await panel.beginSheetModal(for: window) } else { panel.runModal() }
+            guard response == .OK, let url = panel.url else { return }
+            let alert: NSAlert
+            do {
+                try text.write(to: url, atomically: true, encoding: .utf8)
+                alert = NSAlert()
+                alert.messageText = "Exported \(url.lastPathComponent)"
+                alert.informativeText = summary
+                alert.addButton(withTitle: "OK")
+                alert.addButton(withTitle: "Reveal in Finder")
+            } catch {
+                alert = NSAlert(error: error)
+            }
+            let answer = if let window { await alert.beginSheetModal(for: window) } else { alert.runModal() }
+            if answer == .alertSecondButtonReturn { revealInFinder([url]) }
         }
     }
 }

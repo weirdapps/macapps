@@ -3,7 +3,7 @@ import Kit
 import SwiftUI
 
 IconKit.handleCommandLine(draw: appIcon)
-if CommandLine.arguments.contains("--selftest") { exit(SelfTest.run()) }
+if CommandLine.arguments.contains("--selftest") { exit(MainActor.assumeIsolated { SelfTest.run() }) }
 Desktop.handleSnapshot(title: "Loan", size: CGSize(width: 1080, height: 700)) {
     MainActor.assumeIsolated { ContentView(model: CommandLine.arguments.contains("--savings") ? .demoSavings : .demo) }
 }
@@ -35,17 +35,19 @@ struct LoanApp: App {
                     .disabled(!model.canExport)
             }
             CommandMenu("Calculator") {
-                Picker("Mode", selection: $model.mode) {
-                    Text("Loan").keyboardShortcut("1").tag(Mode.loan)
-                    Text("Savings").keyboardShortcut("2").tag(Mode.savings)
-                }
-                .pickerStyle(.inline)
+                Toggle("Loan", isOn: modeBinding(.loan)).keyboardShortcut("1")
+                Toggle("Savings", isOn: modeBinding(.savings)).keyboardShortcut("2")
                 Divider()
                 Toggle("Schedule by Year", isOn: $model.byYear)
                     .keyboardShortcut("y")
                     .disabled(model.mode != .loan)
             }
         }
+    }
+
+    /// A checkmarked menu item that switches to `mode`.
+    private func modeBinding(_ mode: Mode) -> Binding<Bool> {
+        Binding(get: { model.mode == mode }, set: { if $0 { model.mode = mode } })
     }
 }
 
@@ -59,8 +61,8 @@ func appIcon() -> NSBitmapImageRep {
 
         // Rising curve behind the coin, from lower left to upper right.
         func curve(_ path: CGMutablePath) {
-            path.move(to: CGPoint(x: 120, y: 230))
-            path.addCurve(to: CGPoint(x: 862, y: 600), control1: CGPoint(x: 430, y: 236), control2: CGPoint(x: 660, y: 360))
+            path.move(to: CGPoint(x: 170, y: 250))
+            path.addCurve(to: CGPoint(x: 862, y: 600), control1: CGPoint(x: 450, y: 256), control2: CGPoint(x: 660, y: 360))
         }
 
         // Coin: drop shadow, rim, face.

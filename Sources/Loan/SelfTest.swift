@@ -2,7 +2,7 @@ import Foundation
 
 /// `Loan --selftest`: the formulas against known values.
 enum SelfTest {
-    static func run() -> Int32 {
+    @MainActor static func run() -> Int32 {
         var failures = 0, checks = 0
         func check(_ ok: Bool, _ what: String) {
             checks += 1
@@ -87,6 +87,38 @@ enum SelfTest {
         check(csv.count == 3 && csv[0] == "Payment,Date,Amount,Principal,Interest,Extra,Balance", "CSV has a header and a row per payment")
         check(csv[1] == "1,2026-02-15,1199.10,199.10,1000.00,0.00,199800.90", "CSV row uses plain numbers and ISO dates")
         check(Finance.savingsCSV(plan).split(separator: "\n").count == 12, "savings CSV has a row per year")
+
+        // Term units and limits.
+        var t = LoanInput(term: 25, unit: .years)
+        t.setUnit(.months)
+        check(t.unit == .months && t.term == 300, "switching to months keeps 25 years as 300 months")
+        t.setUnit(.years)
+        check(t.unit == .years && t.term == 25, "switching back gives 25 years")
+        t.term = 600; t.clampTerm()
+        check(t.term == 50, "a term typed as 600 years is held to 50")
+        t.setUnit(.months)
+        check(t.term == 600, "50 years is 600 months")
+        let short = LoanInput(principal: 1_000, rate: 5, term: 1, unit: .months, start: start, frequency: .quarterly)
+        check(short.periods == 1 && Finance.schedule(short, extra: 0, calendar: utc).count == 1,
+              "a one month loan paid quarterly still has one payment")
+        let model = LoanModel(persists: false)
+        model.loan.setUnit(.months)
+        model.reset()
+        check(model.loan.unit == .years && model.loan.term == 25, "New Calculation gives 25 years, not a converted term")
+
+        // Persistence round trip of the inputs.
+        let saved = LoanInput(principal: 123_456.78, rate: 2.9, term: 180, unit: .months, start: start, frequency: .fortnightly, extra: 75)
+        let decoded = (try? JSONEncoder().encode(saved)).flatMap { try? JSONDecoder().decode(LoanInput.self, from: $0) }
+        check(decoded == saved, "loan inputs survive a JSON round trip")
+
+        // Odd inputs never crash and never go negative.
+        let huge = LoanInput(principal: 1e12, rate: 99, term: 600, unit: .months, start: start, frequency: .weekly)
+        let h = Finance.schedule(huge, extra: 0, calendar: utc)
+        check(h.count == huge.periods && h.last?.balance == 0 && h.allSatisfy { $0.balance >= 0 }, "a huge loan at a huge rate still ends at zero")
+        check(Finance.schedule(LoanInput(principal: 1000, rate: -3), extra: 0).isEmpty, "a negative rate gives no schedule")
+        check(Finance.loan(LoanInput(principal: 1000, rate: 3, extra: -50)).schedule.count == Finance.loan(LoanInput(principal: 1000, rate: 3)).schedule.count,
+              "a negative extra payment is ignored")
+        check(Fmt.euroAuto(250).contains("250") && !Fmt.euroAuto(250).contains("00"), "whole extra amounts show no cents")
 
         print(failures == 0 ? "All \(checks) checks passed." : "\(failures) of \(checks) checks failed.")
         return failures == 0 ? 0 : 1

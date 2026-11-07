@@ -5,8 +5,12 @@ import SwiftUI
 enum Theme {
     static let light = Color(red: 0xF7 / 255, green: 0xC5 / 255, blue: 0x48 / 255)
     static let deep = Color(red: 0xC9 / 255, green: 0x8A / 255, blue: 0x12 / 255)
-    /// A darker gold for text, readable on white.
-    static let ink = Color(red: 0xA8 / 255, green: 0x6E / 255, blue: 0x08 / 255)
+    /// Gold for text: darker on light backgrounds, brighter on dark ones.
+    static let ink = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(srgbRed: 0xF2 / 255, green: 0xBE / 255, blue: 0x4A / 255, alpha: 1)
+            : NSColor(srgbRed: 0xA8 / 255, green: 0x6E / 255, blue: 0x08 / 255, alpha: 1)
+    })
     static let gradient = LinearGradient(colors: [light, deep], startPoint: .top, endPoint: .bottom)
     static let contributions = Color(red: 0x8E / 255, green: 0x9A / 255, blue: 0xAB / 255)
 }
@@ -17,7 +21,11 @@ struct ContentView: View {
     var body: some View {
         HStack(spacing: 0) {
             Group {
-                if model.mode == .loan { LoanInputs(input: $model.loan) } else { SavingsInputs(input: $model.savings) }
+                if model.mode == .loan {
+                    LoanInputs(input: $model.loan, result: model.loanResult)
+                } else {
+                    SavingsInputs(input: $model.savings, last: model.savingsResult.last)
+                }
             }
             .frame(width: 300)
             Divider()
@@ -86,6 +94,13 @@ struct RateField: View {
 
 struct LoanInputs: View {
     @Binding var input: LoanInput
+    let result: LoanResult
+
+    /// Switching the unit converts the term, so the loan keeps its length. Done here, not in onChange,
+    /// so New Calculation (which resets the unit too) does not convert the fresh term.
+    private var unit: Binding<TermUnit> {
+        Binding(get: { input.unit }, set: { input.setUnit($0) })
+    }
 
     var body: some View {
         Form {
@@ -99,20 +114,16 @@ struct LoanInputs: View {
                             .multilineTextAlignment(.trailing)
                             .monospacedDigit()
                             .frame(width: 48)
-                        Stepper("Term", value: $input.term, in: 1...(input.unit == .years ? 50 : 600)).labelsHidden()
-                        Picker("Unit", selection: $input.unit) {
+                        Stepper("Term", value: $input.term, in: 1...(input.unit == .years ? LoanInput.maxYears : LoanInput.maxMonths))
+                            .labelsHidden()
+                        Picker("Unit", selection: unit) {
                             ForEach(TermUnit.allCases) { Text($0.title).tag($0) }
                         }
                         .labelsHidden()
                         .fixedSize()
                     }
                 }
-                .onChange(of: input.term) { _, v in input.term = min(max(v, 1), 600) }
-                .onChange(of: input.unit) { old, new in
-                    // Keep the same length of loan when switching units.
-                    if old == .years, new == .months { input.term *= 12 }
-                    if old == .months, new == .years { input.term = max(1, Int((Double(input.term) / 12).rounded())) }
-                }
+                .onChange(of: input.term) { input.clampTerm() }
                 DatePicker("Start date", selection: $input.start, displayedComponents: .date)
                 Picker("Payments", selection: $input.frequency) {
                     ForEach(Frequency.allCases) { Text($0.title).tag($0) }
@@ -128,6 +139,12 @@ struct LoanInputs: View {
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            if !result.isEmpty {
+                Section("Where the money goes") {
+                    Breakdown(first: ("Amount borrowed", input.principal, Theme.contributions),
+                              second: ("Interest", result.totalInterest, Theme.deep))
+                }
+            }
         }
         .formStyle(.grouped)
     }
@@ -135,6 +152,7 @@ struct LoanInputs: View {
 
 struct SavingsInputs: View {
     @Binding var input: SavingsInput
+    let last: SavingsYear?
 
     var body: some View {
         Form {
@@ -164,12 +182,67 @@ struct SavingsInputs: View {
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            if let last, last.balance > 0 {
+                Section("Where the money comes from") {
+                    Breakdown(first: ("Paid in", last.contributed, Theme.contributions),
+                              second: ("Growth", max(0, last.growth), Theme.deep))
+                }
+            }
         }
         .formStyle(.grouped)
     }
 }
 
 // MARK: - Shared pieces
+
+/// A small donut of two parts with their amounts and shares beside it.
+struct Breakdown: View {
+    let first: (title: String, value: Double, color: Color)
+    let second: (title: String, value: Double, color: Color)
+
+    private var total: Double { max(first.value + second.value, 0.000_001) }
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Chart {
+                SectorMark(angle: .value("Amount", max(0, first.value)), innerRadius: .ratio(0.6), angularInset: 1.5)
+                    .foregroundStyle(first.color.opacity(0.75))
+                    .cornerRadius(3)
+                SectorMark(angle: .value("Amount", max(0, second.value)), innerRadius: .ratio(0.6), angularInset: 1.5)
+                    .foregroundStyle(Theme.gradient)
+                    .cornerRadius(3)
+            }
+            .chartLegend(.hidden)
+            .frame(width: 78, height: 78)
+            .overlay {
+                Text((second.value / total).formatted(.percent.precision(.fractionLength(0))))
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.ink)
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                row(first, swatch: AnyShapeStyle(first.color.opacity(0.75)))
+                row(second, swatch: AnyShapeStyle(Theme.gradient))
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 4)
+        .animation(.snappy, value: second.value)
+    }
+
+    private func row(_ part: (title: String, value: Double, color: Color), swatch: AnyShapeStyle) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 7) {
+            RoundedRectangle(cornerRadius: 2).fill(swatch).frame(width: 9, height: 9)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(part.title).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                Text(Fmt.euro0(part.value))
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .contentTransition(.numericText(value: part.value))
+            }
+        }
+    }
+}
 
 struct Card<Content: View>: View {
     @ViewBuilder var content: Content
@@ -292,7 +365,7 @@ struct LoanResults: View {
     private var summary: some View {
         HStack(spacing: 10) {
             Hero(title: paymentTitle, value: result.payment + input.extra,
-                 note: input.extra > 0 ? "\(Fmt.euro(result.payment)) plus \(Fmt.euro0(input.extra)) extra"
+                 note: input.extra > 0 ? "\(Fmt.euro(result.payment)) plus \(Fmt.euroAuto(input.extra)) extra"
                      : "\(result.schedule.count) payments")
                 .frame(width: 250)
             Stat(title: "Total interest", value: Fmt.euro0(result.totalInterest),
@@ -311,12 +384,9 @@ struct LoanResults: View {
                 .foregroundStyle(.white)
                 .frame(width: 26, height: 26)
                 .background(Circle().fill(Theme.gradient))
-            (Text("Paying \(Fmt.euro0(input.extra)) extra saves ")
-                + Text(Fmt.euro0(result.interestSaved)).bold().foregroundColor(Theme.ink)
-                + Text(" in interest and ")
-                + Text(Finance.duration(periods: result.periodsSaved, frequency: input.frequency)).bold().foregroundColor(Theme.ink)
-                + Text("."))
+            bannerText
                 .font(.system(size: 13))
+                .lineLimit(2)
             Spacer()
             Text("Without extra: \(Fmt.date(result.baseline.last?.date ?? .now))")
                 .font(.system(size: 11.5)).foregroundStyle(.secondary)
@@ -324,6 +394,15 @@ struct LoanResults: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.light.opacity(0.14)))
+    }
+
+    private var bannerText: Text {
+        let time = Text(Finance.duration(periods: result.periodsSaved, frequency: input.frequency)).bold().foregroundColor(Theme.ink)
+        let extra = Text("Paying \(Fmt.euroAuto(input.extra)) extra ")
+        // At 0% there is no interest to save, only time.
+        guard result.interestSaved >= 1 else { return extra + Text("pays it off ") + time + Text(" sooner.") }
+        return extra + Text("saves ") + Text(Fmt.euro0(result.interestSaved)).bold().foregroundColor(Theme.ink)
+            + Text(" in interest and ") + time + Text(".")
     }
 
     private var chart: some View {
@@ -430,7 +509,8 @@ struct SavingsResults: View {
                     Hero(title: "Future value", value: last.balance, note: "After \(input.years) \(input.years == 1 ? "year" : "years")")
                         .frame(width: 250)
                     Stat(title: "You put in", value: Fmt.euro0(last.contributed),
-                         note: "\(Fmt.euro0(input.monthly)) a month on top")
+                         note: input.monthly > 0 ? "\(Fmt.euroAuto(input.monthly)) a month"
+                             : "A single deposit")
                     Stat(title: "Growth", value: Fmt.euro0(last.growth),
                          note: last.balance > 0 ? "\(Int((last.growth / last.balance * 100).rounded()))% of the total" : nil)
                     Stat(title: "Effective rate", value: effectiveRate, note: "\(input.compounding.title) compounding")
