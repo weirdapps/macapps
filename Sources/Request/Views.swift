@@ -67,6 +67,7 @@ enum Theme {
 
 struct ContentView: View {
     @ObservedObject var model: Store
+    @Environment(\.undoManager) private var undoManager
 
     var body: some View {
         NavigationSplitView {
@@ -102,6 +103,8 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $model.showEnvironments) { EnvironmentsSheet(model: model) }
+        .onAppear { model.undoManager = undoManager }
+        .onChange(of: undoManager) { _, u in model.undoManager = u }
     }
 }
 
@@ -141,7 +144,7 @@ struct Sidebar: View {
                 Section(isExpanded: Binding(get: { !collapsed.contains(collection.id) },
                                             set: { if $0 { collapsed.remove(collection.id) } else { collapsed.insert(collection.id) } })) {
                     ForEach(collection.requests) { r in
-                        RequestRow(request: r, selected: model.selection == .request(r.id))
+                        RequestRow(request: r)
                             .tag(SidebarItem.request(r.id))
                             .contextMenu { requestMenu(r, in: collection) }
                     }
@@ -150,7 +153,7 @@ struct Sidebar: View {
                     }
                 } header: {
                     if model.renaming == collection.id {
-                        RenameField(name: $collection.name) { model.renaming = nil }
+                        RenameField(name: $collection.name) { model.finishRename() }
                     } else {
                         Text(collection.name)
                             .contextMenu {
@@ -165,7 +168,7 @@ struct Sidebar: View {
             if !model.history.isEmpty {
                 Section("History") {
                     ForEach(model.history.prefix(60)) { e in
-                        HistoryRow(entry: e, selected: model.selection == .history(e.id))
+                        HistoryRow(entry: e)
                             .tag(SidebarItem.history(e.id))
                             .contextMenu {
                                 Button("Save to Collection") { model.selection = .history(e.id); model.saveToCollection() }
@@ -178,6 +181,16 @@ struct Sidebar: View {
             }
         }
         .listStyle(.sidebar)
+        .overlay {
+            if model.workspace.collections.isEmpty && model.history.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "tray").font(.system(size: 26, weight: .light)).foregroundStyle(.tertiary)
+                    Text("No requests yet. Add one with + below.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }
+                .padding(20)
+            }
+        }
         .onDeleteCommand { model.deleteSelected() }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             HStack(spacing: 2) {
@@ -232,24 +245,23 @@ struct RenameField: View {
 
 struct MethodBadge: View {
     let method: HTTPMethod
-    var selected = false
+    /// Increased on a selected row in a focused list, where coloured text would clash with the accent.
+    @Environment(\.backgroundProminence) private var prominence
 
     var body: some View {
         Text(method == .DELETE ? "DEL" : method == .OPTIONS ? "OPT" : method.rawValue)
             .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-            
-            .foregroundStyle(selected ? AnyShapeStyle(.white.opacity(0.9)) : AnyShapeStyle(Theme.color(method)))
+            .foregroundStyle(prominence == .increased ? AnyShapeStyle(.white.opacity(0.9)) : AnyShapeStyle(Theme.color(method)))
             .frame(width: 38, alignment: .leading)
     }
 }
 
 struct RequestRow: View {
     let request: APIRequest
-    var selected = false
 
     var body: some View {
         HStack(spacing: 4) {
-            MethodBadge(method: request.method, selected: selected)
+            MethodBadge(method: request.method)
             Text(request.name.isEmpty ? "Untitled" : request.name).lineLimit(1)
         }
     }
@@ -257,7 +269,6 @@ struct RequestRow: View {
 
 struct HistoryRow: View {
     let entry: HistoryEntry
-    var selected = false
 
     private var path: String {
         guard let u = URL(string: entry.url) else { return entry.url }
@@ -267,7 +278,7 @@ struct HistoryRow: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            MethodBadge(method: entry.request.method, selected: selected)
+            MethodBadge(method: entry.request.method)
             VStack(alignment: .leading, spacing: 1) {
                 Text(path).lineLimit(1).truncationMode(.middle)
                 HStack(spacing: 5) {
@@ -397,7 +408,9 @@ struct ResolvedLine: View {
 
     var body: some View {
         if let r = model.current {
-            let missing = Template.unresolved(in: ([r.url] + r.params.map(\.value) + r.headers.map(\.value)).joined(separator: " "), model.variables)
+            let body = r.bodyKind == .none ? [] : r.bodyKind == .form ? r.form.map(\.value) : [r.body]
+            let missing = Template.unresolved(in: ([r.url] + r.params.map(\.value) + r.headers.map(\.value) + body).joined(separator: " "),
+                                              model.variables)
             if !missing.isEmpty {
                 Label("Not defined in \(model.activeEnvironment?.name ?? "any environment"): \(missing.map { "{{\($0)}}" }.joined(separator: ", "))",
                       systemImage: "exclamationmark.triangle.fill")
@@ -503,7 +516,8 @@ struct PairTable: View {
                 Divider().opacity(0.6)
                 ForEach(Array(rows.enumerated()), id: \.element.id) { index, _ in
                     PairRow(pair: binding(index), isBlank: index == pairs.count, keyTitle: keyTitle) {
-                        pairs.remove(at: index)
+                        let id = rows[index].id
+                        pairs.removeAll { $0.id == id }
                     }
                     Divider().opacity(0.4)
                 }
@@ -519,7 +533,11 @@ struct PairTable: View {
     }
 
     private func binding(_ index: Int) -> Binding<Pair> {
-        if index < pairs.count { return $pairs[index] }
+        if index < pairs.count {
+            let id = pairs[index].id
+            return Binding(get: { pairs.first { $0.id == id } ?? Pair(id: id) },
+                           set: { new in if let i = pairs.firstIndex(where: { $0.id == id }) { pairs[i] = new } })
+        }
         let id = blankID
         return Binding(get: { Pair(id: id) }, set: { new in
             guard !new.isBlank else { return }
@@ -592,12 +610,18 @@ struct BodyEditor: View {
                 ContentUnavailableView("No Body", systemImage: "doc", description: Text("Pick JSON, Form or Raw to send a body with this request."))
             case .json:
                 CodeEditor(text: $request.body, json: true)
+                    .id(request.id)
                     .background(Color(nsColor: .textBackgroundColor).opacity(0.6))
                 Divider().opacity(0.6)
-                JSONStatus(text: request.body)
+                JSONStatus(text: request.body, method: request.method)
             case .raw:
                 CodeEditor(text: $request.body)
+                    .id(request.id)
                     .background(Color(nsColor: .textBackgroundColor).opacity(0.6))
+                if [.GET, .HEAD].contains(request.method), !request.body.isEmpty {
+                    Divider().opacity(0.6)
+                    MethodBodyWarning(method: request.method)
+                }
             case .form:
                 PairTable(pairs: $request.form, keyTitle: "Field", valueTitle: "Value", hint: "Sent as application/x-www-form-urlencoded.")
             }
@@ -605,13 +629,31 @@ struct BodyEditor: View {
     }
 }
 
+struct MethodBodyWarning: View {
+    let method: HTTPMethod
+
+    var body: some View {
+        Label("A \(method.rawValue) request cannot carry a body. Switch the method to POST to send it.", systemImage: "exclamationmark.triangle.fill")
+            .font(.system(size: 11))
+            .foregroundStyle(.orange)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+    }
+}
+
 struct JSONStatus: View {
     let text: String
+    var method: HTTPMethod = .POST
 
     var body: some View {
         let error = JSONFormat.validate(text)
         HStack(spacing: 6) {
-            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if [.GET, .HEAD].contains(method), !text.isEmpty {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                Text("A \(method.rawValue) request cannot carry a body. Switch the method to POST to send it.").foregroundStyle(.secondary).lineLimit(1)
+            } else if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Image(systemName: "circle.dashed").foregroundStyle(.tertiary)
                 Text("Empty body").foregroundStyle(.secondary)
             } else if let error {
@@ -717,10 +759,10 @@ struct ResponseView: View {
         if result.body.isEmpty {
             ContentUnavailableView("Empty Body", systemImage: "doc", description: Text("The server sent no content."))
         } else if let text = result.text {
-            if model.responseTab == .pretty, result.isJSON, let pretty = JSONFormat.pretty(text) {
-                CodeViewer(content: Theme.highlighted(pretty))
+            if model.responseTab == .pretty, let pretty = result.pretty {
+                CodeViewer(key: "\(result.id)-pretty") { Theme.highlighted(pretty) }
             } else {
-                CodeViewer(content: Theme.plain(text))
+                CodeViewer(key: "\(result.id)-raw") { Theme.plain(text) }
             }
         } else {
             ContentUnavailableView("Binary Data", systemImage: "doc.zipper",
@@ -815,17 +857,22 @@ struct CodeEditor: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         let tv = scroll.documentView as! NSTextView
-        if tv.string != text {
-            let selection = tv.selectedRanges
-            tv.string = text
-            tv.selectedRanges = selection.filter { $0.rangeValue.upperBound <= (text as NSString).length }
+        if tv.string != text, !tv.hasMarkedText() {
+            // A change from outside (Format) goes through the text system so Edit > Undo can take it back.
+            let full = NSRange(location: 0, length: (tv.string as NSString).length)
+            if tv.shouldChangeText(in: full, replacementString: text) {
+                tv.replaceCharacters(in: full, with: text)
+                tv.didChangeText()
+            } else {
+                tv.string = text
+            }
+            colour(tv)
         }
-        colour(tv)
     }
 
     /// Syntax colour for JSON bodies, applied as attributes so typing and undo are untouched.
     func colour(_ tv: NSTextView) {
-        guard let storage = tv.textStorage else { return }
+        guard let storage = tv.textStorage, !tv.hasMarkedText() else { return }
         let full = NSRange(location: 0, length: storage.length)
         storage.beginEditing()
         storage.setAttributes([.font: Theme.mono, .foregroundColor: NSColor.labelColor], range: full)
@@ -851,9 +898,14 @@ struct CodeEditor: NSViewRepresentable {
     }
 }
 
-/// A read-only, selectable text view for response bodies; fast with long text.
+/// A read-only, selectable text view for response bodies. The text is built only when `key` changes,
+/// so redrawing the window (typing in the URL, say) never re-colours a big body.
 struct CodeViewer: NSViewRepresentable {
-    let content: NSAttributedString
+    let key: String
+    let content: () -> NSAttributedString
+
+    final class Coordinator { var key: String? }
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSTextView.scrollableTextView()
@@ -862,17 +914,16 @@ struct CodeViewer: NSViewRepresentable {
         tv.isSelectable = true
         tv.drawsBackground = false
         tv.textContainerInset = NSSize(width: 8, height: 6)
-        tv.textStorage?.setAttributedString(content)
+        tv.layoutManager?.allowsNonContiguousLayout = true
         scroll.drawsBackground = false
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        let tv = scroll.documentView as! NSTextView
-        if tv.textStorage?.isEqual(to: content) == false {
-            tv.textStorage?.setAttributedString(content)
-            tv.scroll(.zero)
-        }
+        guard context.coordinator.key != key, let tv = scroll.documentView as? NSTextView else { return }
+        context.coordinator.key = key
+        tv.textStorage?.setAttributedString(content())
+        tv.scroll(.zero)
     }
 }
 

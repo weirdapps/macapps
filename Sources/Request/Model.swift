@@ -153,8 +153,14 @@ struct BuiltRequest: Equatable {
         var r = URLRequest(url: u, timeoutInterval: 60)
         r.httpMethod = method.rawValue
         for h in headers { r.addValue(h.value, forHTTPHeaderField: h.name) }
-        r.httpBody = body.map { Data($0.utf8) }
+        if let body, !body.isEmpty { r.httpBody = Data(body.utf8) }
         return r
+    }
+
+    /// Why URLSession would refuse this request, before it goes out: it fails a GET or HEAD that carries a body.
+    var sendProblem: String? {
+        guard [.GET, .HEAD].contains(method), let body, !body.isEmpty else { return nil }
+        return "A \(method.rawValue) request cannot carry a body here. Switch the body to None, or the method to POST."
     }
 }
 
@@ -273,29 +279,32 @@ enum JSONFormat {
     }
 
     /// Re-indents valid JSON with two spaces, keeping key order and the original number and string spelling.
+    /// Works on Unicode scalars, so a combining mark after a quote cannot hide the quote.
     static func pretty(_ text: String) -> String? {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, validate(text) == nil else { return nil }
-        var out = ""
+        var out = String.UnicodeScalarView()
         var depth = 0
-        let chars = Array(text)
+        let chars = Array(text.unicodeScalars)
         var i = 0
-        func newline() { out += "\n" + String(repeating: "  ", count: depth) }
-        func nextSignificant(after j: Int) -> Character? {
+        func newline() {
+            out.append("\n")
+            out.append(contentsOf: String(repeating: "  ", count: depth).unicodeScalars)
+        }
+        func nextSignificant(after j: Int) -> Unicode.Scalar? {
             var k = j + 1
-            while k < chars.count, chars[k].isWhitespace { k += 1 }
+            while k < chars.count, isSpace(chars[k]) { k += 1 }
             return k < chars.count ? chars[k] : nil
         }
         while i < chars.count {
             let c = chars[i]
             switch c {
             case "\"":
-                var j = i + 1
-                while j < chars.count, chars[j] != "\"" { j += chars[j] == "\\" ? 2 : 1 }
-                out += String(chars[i...min(j, chars.count - 1)])
+                let j = stringEnd(chars, from: i)
+                out.append(contentsOf: chars[i...j])
                 i = j
             case "{", "[":
                 out.append(c)
-                let close: Character = c == "{" ? "}" : "]"
+                let close: Unicode.Scalar = c == "{" ? "}" : "]"
                 if nextSignificant(after: i) == close {
                     out.append(close)
                     var k = i + 1
@@ -313,43 +322,51 @@ enum JSONFormat {
                 out.append(c)
                 newline()
             case ":":
-                out += ": "
+                out.append(contentsOf: ": ".unicodeScalars)
             default:
-                if !c.isWhitespace { out.append(c) }
+                if !isSpace(c) { out.append(c) }
             }
             i += 1
         }
-        return out
+        return String(out)
+    }
+
+    private static func isSpace(_ c: Unicode.Scalar) -> Bool { c.properties.isWhitespace }
+
+    /// The index of the quote closing the string that opens at `i`, or the last index when it never closes.
+    private static func stringEnd(_ chars: [Unicode.Scalar], from i: Int) -> Int {
+        var j = i + 1
+        while j < chars.count, chars[j] != "\"" { j += chars[j] == "\\" ? 2 : 1 }
+        return min(j, chars.count - 1)
     }
 
     /// Splits JSON text into tokens for colouring; a string followed by a colon is a key.
     static func tokens(_ text: String) -> [JSONToken] {
-        let chars = Array(text)
+        let chars = Array(text.unicodeScalars)
         var out: [JSONToken] = []
+        func piece(_ r: Range<Int>) -> String { String(String.UnicodeScalarView(chars[r])) }
         var i = 0
         while i < chars.count {
             let c = chars[i]
             if c == "\"" {
-                var j = i + 1
-                while j < chars.count, chars[j] != "\"" { j += chars[j] == "\\" ? 2 : 1 }
-                j = min(j, chars.count - 1)
+                let j = stringEnd(chars, from: i)
                 var k = j + 1
-                while k < chars.count, chars[k].isWhitespace { k += 1 }
+                while k < chars.count, isSpace(chars[k]) { k += 1 }
                 let isKey = k < chars.count && chars[k] == ":"
-                out.append(JSONToken(kind: isKey ? .key : .string, text: String(chars[i...j])))
+                out.append(JSONToken(kind: isKey ? .key : .string, text: piece(i..<(j + 1))))
                 i = j + 1
-            } else if c.isWhitespace {
+            } else if isSpace(c) {
                 var j = i
-                while j < chars.count, chars[j].isWhitespace { j += 1 }
-                out.append(JSONToken(kind: .space, text: String(chars[i..<j])))
+                while j < chars.count, isSpace(chars[j]) { j += 1 }
+                out.append(JSONToken(kind: .space, text: piece(i..<j)))
                 i = j
-            } else if "{}[]:,".contains(c) {
+            } else if "{}[]:,".unicodeScalars.contains(c) {
                 out.append(JSONToken(kind: .punctuation, text: String(c)))
                 i += 1
             } else {
                 var j = i
-                while j < chars.count, !chars[j].isWhitespace, !"{}[]:,\"".contains(chars[j]) { j += 1 }
-                let word = String(chars[i..<j])
+                while j < chars.count, !isSpace(chars[j]), !"{}[]:,\"".unicodeScalars.contains(chars[j]) { j += 1 }
+                let word = piece(i..<j)
                 out.append(JSONToken(kind: ["true", "false", "null"].contains(word) ? .literal : .number, text: word))
                 i = j
             }
@@ -366,12 +383,32 @@ struct HTTPResult: Equatable {
     var body: Data
     var duration: TimeInterval
     var url: String
+    /// Identifies one response, so views rebuild its text only when a new one arrives.
+    let id: UUID
+    /// The body as text, worked out once: UTF-8, or Latin-1 for a text type that is not UTF-8. Nil for binary data.
+    let text: String?
+    let isJSON: Bool
+    /// The body re-indented, when it is JSON. Computed once so a big response never re-parses on redraw.
+    let pretty: String?
+
+    init(status: Int, headers: [Header], body: Data, duration: TimeInterval, url: String) {
+        self.status = status
+        self.headers = headers
+        self.body = body
+        self.duration = duration
+        self.url = url
+        id = UUID()
+        let type = headers.first { $0.name.lowercased() == "content-type" }?.value.lowercased() ?? ""
+        let textual = type.hasPrefix("text/") || ["json", "xml", "javascript", "html", "csv"].contains { type.contains($0) }
+        let text = String(data: body, encoding: .utf8) ?? (textual ? String(data: body, encoding: .isoLatin1) : nil)
+        self.text = text
+        let pretty = text.flatMap(JSONFormat.pretty)
+        let looksJSON = text.map { "{[".contains($0.trimmingCharacters(in: .whitespacesAndNewlines).first ?? " ") } ?? false
+        isJSON = pretty != nil && (type.contains("json") || looksJSON)
+        self.pretty = isJSON ? pretty : nil
+    }
 
     var contentType: String { headers.first { $0.name.lowercased() == "content-type" }?.value ?? "" }
-    var text: String? { String(data: body, encoding: .utf8) }
-    var isJSON: Bool {
-        contentType.contains("json") || (text.map { JSONFormat.validate($0) == nil && !$0.isEmpty && "{[".contains($0.trimmingCharacters(in: .whitespacesAndNewlines).first ?? " ") } ?? false)
-    }
 
     /// A sensible file name for Save Response.
     var suggestedFileName: String {

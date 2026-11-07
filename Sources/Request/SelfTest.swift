@@ -123,7 +123,87 @@ enum SelfTest {
         }
         check(ws.environments.first.map { Template.resolve(ws.collections[0].requests[0].url, $0.values) } == "https://httpbin.org/get", "starter resolves")
 
+        regressions()
+
         print(failures == 0 ? "All \(checks) checks passed" : "\(failures) of \(checks) checks failed")
         return failures == 0 ? 0 : 1
+    }
+
+    /// Checks for bugs found in review.
+    private static func regressions() {
+        // A combining mark right after a quote fuses with it into one Character; scanning scalars keeps the quote visible.
+        let fused = "{\"a\":\"\u{301}x\",\"b\":1}"
+        check(JSONFormat.pretty(fused) == "{\n  \"a\": \"\u{301}x\",\n  \"b\": 1\n}", "pretty with a combining mark after a quote")
+        check(JSONFormat.tokens(fused).map(\.text).joined() == fused, "tokens cover text with combining marks")
+        check(JSONFormat.tokens(fused).filter { $0.kind == .key }.count == 2, "keys found past a combining mark")
+        check(JSONFormat.tokens("\"open \\").map(\.text).joined() == "\"open \\", "unterminated string with a trailing backslash")
+        check(JSONFormat.pretty("{\"emoji\":\"\u{1F469}\u{200D}\u{1F4BB}\"}") == "{\n  \"emoji\": \"\u{1F469}\u{200D}\u{1F4BB}\"\n}", "emoji kept whole")
+
+        // URLSession refuses a GET with a body ("resource exceeds maximum size"); say so before sending.
+        let getBody = build(APIRequest(method: .GET, url: "a.test", bodyKind: .json, body: "{}"))
+        check(getBody?.sendProblem?.contains("POST") == true, "GET with a body is caught before sending")
+        check(build(APIRequest(method: .POST, url: "a.test", bodyKind: .json, body: "{}"))?.sendProblem == nil, "POST with a body is fine")
+        let getEmpty = build(APIRequest(method: .GET, url: "a.test", bodyKind: .raw, body: ""))
+        check(getEmpty?.sendProblem == nil && getEmpty?.urlRequest?.httpBody == nil, "an empty body is not sent")
+        check(Curl.command(getBody!).contains("--data-raw"), "curl export still keeps a GET body")
+
+        // Response decoding is done once, with a Latin-1 fallback for text that is not UTF-8.
+        let latin = HTTPResult(status: 200, headers: [Header(name: "Content-Type", value: "text/html; charset=iso-8859-1")],
+                               body: Data([0x63, 0x61, 0x66, 0xE9]), duration: 0, url: "")
+        check(latin.text == "caf\u{E9}" && latin.suggestedFileName == "response.html", "Latin-1 text is readable")
+        check(HTTPResult(status: 200, headers: [], body: Data([0xFF, 0xD8, 0xFF]), duration: 0, url: "").text == nil, "binary stays binary")
+        let broken = HTTPResult(status: 500, headers: [Header(name: "Content-Type", value: "application/json")], body: Data("{oops".utf8), duration: 0, url: "")
+        check(!broken.isJSON && broken.pretty == nil && broken.suggestedFileName == "response.txt", "invalid JSON body shows as text")
+        let good = HTTPResult(status: 200, headers: [], body: Data("{\"a\":1}".utf8), duration: 0, url: "")
+        check(good.pretty == "{\n  \"a\": 1\n}", "pretty body cached on the result")
+        check(HTTPResult(status: 200, headers: [], body: Data("42".utf8), duration: 0, url: "").isJSON == false, "a bare number is not sniffed as JSON")
+
+        // A workspace file that cannot be decoded is set aside, never overwritten by the starter.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("request-selftest-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("workspace.json")
+        try? Data("{\"collections\": 7}".utf8).write(to: file)
+        check(Store.loadOrSetAside(Workspace.self, file) == nil, "unreadable workspace loads as nil")
+        let left = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        check(!left.contains("workspace.json") && left.contains { $0.hasSuffix(".unreadable.json") }, "unreadable workspace is kept aside")
+        let starter = Samples.starter
+        if let data = try? JSONEncoder().encode(starter) { try? data.write(to: file) }
+        check(Store.loadOrSetAside(Workspace.self, file) == starter, "readable workspace loads")
+        check(Store.loadOrSetAside(Workspace.self, dir.appendingPathComponent("missing.json")) == nil, "missing file is nil")
+
+        MainActor.assumeIsolated {
+            let store = Store(workspace: Samples.starter, history: [], persists: false)
+            let undo = UndoManager()
+            undo.groupsByEvent = false
+            store.undoManager = undo
+            let first = store.workspace.collections[0].requests[0].id
+            undo.beginUndoGrouping()
+            store.deleteRequest(first)
+            undo.endUndoGrouping()
+            check(store.workspace.collections[0].requests.count == 3, "delete removes the request")
+            undo.undo()
+            check(store.workspace.collections[0].requests.first?.id == first, "undo brings a deleted request back")
+
+            store.newCollection()
+            if let id = store.renaming, let i = store.workspace.collections.firstIndex(where: { $0.id == id }) {
+                store.workspace.collections[i].name = "   "
+                store.finishRename()
+                check(store.workspace.collections[i].name == "Untitled Collection" && store.renaming == nil, "blank collection name gets a default")
+            } else {
+                check(false, "blank collection name gets a default")
+            }
+
+            // Sending never reaches the network when the request cannot go out.
+            store.selection = .request(first)
+            store.currentBinding.wrappedValue.bodyKind = .raw
+            store.currentBinding.wrappedValue.body = "hello"
+            store.send()
+            if case .failed(let message) = store.currentResponse { check(message.contains("GET"), "send reports a GET body") }
+            else { check(false, "send reports a GET body") }
+            store.currentBinding.wrappedValue.url = "  "
+            store.send()
+            check(store.currentResponse == .failed(BuildError.emptyURL.localizedDescription) && store.history.isEmpty, "send with no URL fails without history")
+        }
     }
 }

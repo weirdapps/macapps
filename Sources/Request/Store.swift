@@ -33,6 +33,10 @@ final class Store: ObservableObject {
     private let persists: Bool
     private var saveTask: Task<Void, Never>?
     private var sendTasks: [SidebarItem: Task<Void, Never>] = [:]
+    /// The latest send per item; a superseded or cancelled send never writes its outcome.
+    private var sendIDs: [SidebarItem: UUID] = [:]
+    /// The window's undo manager, set by the view, for deletes in the sidebar.
+    weak var undoManager: UndoManager?
 
     init(workspace: Workspace, history: [HistoryEntry], persists: Bool) {
         self.workspace = workspace
@@ -48,9 +52,20 @@ final class Store: ObservableObject {
 
     /// The user's saved workspace and history, or the starter examples on first launch.
     static func load() -> Store {
-        let ws = Storage.load(Workspace.self, app: "Request", file: "workspace.json") ?? Samples.starter
-        let history = Storage.load([HistoryEntry].self, app: "Request", file: "history.json") ?? []
+        let ws = loadOrSetAside(Workspace.self, Storage.url(app: "Request", file: "workspace.json")) ?? Samples.starter
+        let history = loadOrSetAside([HistoryEntry].self, Storage.url(app: "Request", file: "history.json")) ?? []
         return Store(workspace: ws, history: history, persists: true)
+    }
+
+    /// Decodes `url`. A file that exists but cannot be read is renamed with an `.unreadable` suffix
+    /// rather than overwritten by the next save, so the user's requests are never silently lost.
+    nonisolated static func loadOrSetAside<T: Decodable>(_ type: T.Type, _ url: URL) -> T? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        if let value = try? JSONDecoder().decode(type, from: data) { return value }
+        let stamp = Int(Date().timeIntervalSince1970)
+        let aside = url.deletingPathExtension().appendingPathExtension("\(stamp).unreadable.json")
+        try? FileManager.default.moveItem(at: url, to: aside)
+        return nil
     }
 
     // MARK: Persistence
@@ -145,6 +160,28 @@ final class Store: ObservableObject {
         renaming = c.id
     }
 
+    /// Ends an inline rename; a blank name becomes "Untitled Collection".
+    func finishRename() {
+        if let id = renaming, let i = workspace.collections.firstIndex(where: { $0.id == id }),
+           workspace.collections[i].name.trimmingCharacters(in: .whitespaces).isEmpty {
+            workspace.collections[i].name = "Untitled Collection"
+        }
+        renaming = nil
+    }
+
+    /// Lets Edit > Undo bring back what a delete removed.
+    private func registerUndo(_ name: String) {
+        let ws = workspace, hist = history, sel = selection
+        undoManager?.registerUndo(withTarget: self) { store in
+            MainActor.assumeIsolated {
+                store.workspace = ws
+                store.history = hist
+                store.selection = sel
+            }
+        }
+        undoManager?.setActionName(name)
+    }
+
     func duplicate() {
         guard var r = current else { return }
         r.id = UUID()
@@ -170,6 +207,7 @@ final class Store: ObservableObject {
     }
 
     func deleteRequest(_ id: UUID) {
+        registerUndo("Delete Request")
         for c in workspace.collections.indices {
             workspace.collections[c].requests.removeAll { $0.id == id }
         }
@@ -178,6 +216,7 @@ final class Store: ObservableObject {
     }
 
     func deleteCollection(_ id: UUID) {
+        registerUndo("Delete Collection")
         let ids = workspace.collections.first { $0.id == id }?.requests.map(\.id) ?? []
         workspace.collections.removeAll { $0.id == id }
         if case .request(let s) = selection, ids.contains(s) { selection = nil }
@@ -194,6 +233,7 @@ final class Store: ObservableObject {
         switch selection {
         case .request(let id): deleteRequest(id)
         case .history(let id):
+            registerUndo("Remove from History")
             history.removeAll { $0.id == id }
             selection = nil
         case nil: break
@@ -201,6 +241,7 @@ final class Store: ObservableObject {
     }
 
     func clearHistory() {
+        registerUndo("Clear History")
         if case .history = selection { selection = nil }
         history = []
     }
@@ -217,10 +258,16 @@ final class Store: ObservableObject {
             responses[item] = .failed(error.localizedDescription)
             return
         }
+        if let problem = built.sendProblem {
+            responses[item] = .failed(problem)
+            return
+        }
         guard let urlRequest = built.urlRequest else {
             responses[item] = .failed(BuildError.invalidURL(built.url).localizedDescription)
             return
         }
+        let sendID = UUID()
+        sendIDs[item] = sendID
         responses[item] = .loading
         sendTasks[item] = Task { [weak self] in
             let start = Date()
@@ -230,22 +277,32 @@ final class Store: ObservableObject {
                 let http = response as? HTTPURLResponse
                 let headers = (http?.allHeaderFields ?? [:]).map { Header(name: "\($0.key)", value: "\($0.value)") }
                     .sorted { $0.name.lowercased() < $1.name.lowercased() }
-                let result = HTTPResult(status: http?.statusCode ?? 0, headers: headers, body: data, duration: elapsed,
-                                        url: response.url?.absoluteString ?? built.url)
-                self?.finish(item, request: request, built: built, state: .done(result))
+                let status = http?.statusCode ?? 0, url = response.url?.absoluteString ?? built.url
+                // Decoding and re-indenting a big body happens off the main thread.
+                let result = await Task.detached(priority: .userInitiated) {
+                    HTTPResult(status: status, headers: headers, body: data, duration: elapsed, url: url)
+                }.value
+                self?.finish(item, sendID: sendID, request: request, built: built, state: .done(result))
             } catch is CancellationError {
-                self?.responses[item] = .idle
+                self?.finish(item, sendID: sendID, request: request, built: built, state: nil)
             } catch let error as URLError where error.code == .cancelled {
-                self?.responses[item] = .idle
+                self?.finish(item, sendID: sendID, request: request, built: built, state: nil)
             } catch {
-                self?.finish(item, request: request, built: built, state: .failed(error.localizedDescription))
+                self?.finish(item, sendID: sendID, request: request, built: built, state: .failed(error.localizedDescription))
             }
         }
     }
 
-    private func finish(_ item: SidebarItem, request: APIRequest, built: BuiltRequest, state: ResponseState) {
-        responses[item] = state
+    /// Records the outcome of send `sendID`, unless a newer send or a cancel replaced it. A nil state means cancelled.
+    private func finish(_ item: SidebarItem, sendID: UUID, request: APIRequest, built: BuiltRequest, state: ResponseState?) {
+        guard sendIDs[item] == sendID else { return }
+        sendIDs[item] = nil
         sendTasks[item] = nil
+        guard let state else {
+            responses[item] = .idle
+            return
+        }
+        responses[item] = state
         var entry = HistoryEntry(date: Date(), request: request, url: built.url, status: nil, duration: 0, size: 0)
         if case .done(let r) = state {
             entry.status = r.status
@@ -254,10 +311,16 @@ final class Store: ObservableObject {
         }
         history = History.adding(entry, to: history)
         responses[.history(entry.id)] = state
+        // Bodies of entries that fell off the end of the history are no longer needed.
+        let kept = Set(history.map(\.id))
+        for key in responses.keys {
+            if case .history(let id) = key, !kept.contains(id) { responses[key] = nil }
+        }
     }
 
     func cancel() {
         guard let item = selection else { return }
+        sendIDs[item] = nil
         sendTasks[item]?.cancel()
         sendTasks[item] = nil
         responses[item] = .idle
@@ -279,7 +342,7 @@ final class Store: ObservableObject {
     func copyBody() {
         guard case .done(let r) = currentResponse, !Desktop.isSnapshot else { return }
         NSPasteboard.general.clearContents()
-        let text = (responseTab == .pretty ? r.text.flatMap(JSONFormat.pretty) : nil) ?? r.text ?? ""
+        let text = (responseTab == .pretty ? r.pretty : nil) ?? r.text ?? ""
         NSPasteboard.general.setString(text, forType: .string)
     }
 
