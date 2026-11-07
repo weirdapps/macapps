@@ -56,6 +56,7 @@ final class GameModel: ObservableObject {
     private var undoStack: [Board] = []
     private var timer: Timer?
     private var hintTask: Task<Void, Never>?
+    private var autoTask: Task<Void, Never>?
     private let persists: Bool
     var isActive = true
 
@@ -66,7 +67,8 @@ final class GameModel: ObservableObject {
         let startDraw = persists ? DrawMode(rawValue: defaults.integer(forKey: "draw")) ?? .one : .one
         felt = startFelt
         drawMode = startDraw
-        if persists, let saved = Storage.load(SavedGame.self, app: "Patience", file: "game.json"), saved.board.allCards.count == 52 {
+        if persists, let saved = Storage.load(SavedGame.self, app: "Patience", file: "game.json"), saved.board.isValid,
+           (1...999_999).contains(saved.number), saved.seconds >= 0 {
             board = saved.board
             number = saved.number
             seconds = saved.seconds
@@ -80,9 +82,12 @@ final class GameModel: ObservableObject {
         if persists { stats = Storage.load(Stats.self, app: "Patience", file: "stats.json") ?? Stats() }
         if won { finalScore = Scoring.total(base: board.score, seconds: seconds, won: true) }
         if persists {
-            timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.tick() }
             }
+            // Common modes, so the clock keeps going while a menu is open or the window is resized.
+            RunLoop.main.add(timer, forMode: .common)
+            self.timer = timer
         }
     }
 
@@ -105,6 +110,13 @@ final class GameModel: ObservableObject {
         return model
     }
 
+    /// Puts an arbitrary table in play, for the self-test.
+    func setUp(_ board: Board, started: Bool = true) {
+        self.board = board
+        self.started = started
+        undoStack = []
+    }
+
     static func randomNumber() -> Int { Int.random(in: 1...999_999) }
 
     var score: Int { won ? finalScore : Scoring.total(base: board.score, seconds: seconds, won: false) }
@@ -121,6 +133,10 @@ final class GameModel: ObservableObject {
             stats.recordLoss()
             saveStats()
         }
+        // A new deal stops an auto-complete that is still moving cards, so it never plays on the fresh table.
+        autoTask?.cancel()
+        autoTask = nil
+        autoCompleting = false
         self.number = number
         board = Board.deal(game: number, draw: drawMode)
         undoStack = []
@@ -183,8 +199,8 @@ final class GameModel: ObservableObject {
         guard canAutoComplete else { return }
         undoStack.append(board)
         autoCompleting = true
-        Task { [weak self] in
-            while let self, let move = self.board.autoStep() {
+        autoTask = Task { [weak self] in
+            while !Task.isCancelled, let self, let move = self.board.autoStep() {
                 var next = self.board
                 next.apply(move)
                 withAnimation(.snappy(duration: 0.18)) {
@@ -193,6 +209,7 @@ final class GameModel: ObservableObject {
                 }
                 try? await Task.sleep(for: .milliseconds(70))
             }
+            guard !Task.isCancelled else { return }
             self?.autoCompleting = false
             self?.finishIfWon()
             self?.save()

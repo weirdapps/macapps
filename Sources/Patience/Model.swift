@@ -297,7 +297,37 @@ struct Board: Codable, Equatable, Sendable {
                 }
             }
         }
-        return stock.isEmpty && waste.isEmpty ? nil : .deal
+        return stockHasPlay() ? .deal : nil
+    }
+
+    /// Whether going round the stock ever turns up a card that can be played, so the hint never deals forever.
+    func stockHasPlay() -> Bool {
+        let total = stock.count + waste.count
+        guard total > 0 else { return false }
+        var probe = self
+        // Each click turns over at least one card, so total + 2 clicks covers the rest of this pass, the recycle and a full pass.
+        for _ in 0..<(total + 2) {
+            guard probe.dealFromStock() else { return false }
+            guard let card = probe.waste.last else { continue }
+            if probe.foundationTarget(for: card) != nil { return true }
+            if (0..<7).contains(where: { Board.canStack(card, on: probe.tableau[$0].last) }) { return true }
+        }
+        return false
+    }
+
+    /// A table that could have come from real play: every card once, the right number of piles, sane face up marks.
+    var isValid: Bool {
+        guard foundations.count == 4, tableau.count == 7, faceUpFrom.count == 7 else { return false }
+        let cards = allCards
+        guard cards.count == 52, Set(cards) == Set(Card.deck) else { return false }
+        for c in 0..<7 {
+            let count = tableau[c].count
+            if count == 0 { if faceUpFrom[c] != 0 { return false } } else if faceUpFrom[c] < 0 || faceUpFrom[c] >= count { return false }
+        }
+        for pile in foundations where pile.enumerated().contains(where: { $0.element.rank != $0.offset + 1 || $0.element.suit != pile[0].suit }) {
+            return false
+        }
+        return score >= 0 && moves >= 0 && recycles >= 0
     }
 
     var allCards: [Card] { stock + waste + foundations.flatMap { $0 } + tableau.flatMap { $0 } }

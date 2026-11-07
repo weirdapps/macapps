@@ -32,6 +32,7 @@ enum SelfTest {
         helpers()
         play()
         statistics()
+        review()
         print(failures == 0 ? "All \(checks) checks passed" : "\(failures) of \(checks) checks failed")
         return failures == 0 ? 0 : 1
     }
@@ -162,7 +163,7 @@ enum SelfTest {
         var stuck = empty()
         stuck.tableau[0] = [c(5, .clubs)]
         check(stuck.hint() == nil, "no hint when nothing can move")
-        stuck.stock = [c(9, .hearts)]
+        stuck.stock = [c(4, .hearts)]
         check(stuck.hint() == .deal, "the hint deals when only the stock is left")
     }
 
@@ -201,6 +202,64 @@ enum SelfTest {
         let saved = SavedGame(board: Board.deal(game: 77, draw: .three), number: 77, seconds: 12, started: true, won: false)
         let round = (try? JSONEncoder().encode(saved)).flatMap { try? JSONDecoder().decode(SavedGame.self, from: $0) }
         check(round == saved, "a saved game survives a JSON round trip")
+    }
+
+    /// Checks added in review, for bugs the first build had.
+    private static func review() {
+        // A corrupt or hand-edited game.json must never be loaded: it would crash on a missing pile.
+        let fresh = Board.deal(game: 12, draw: .one)
+        check(fresh.isValid, "a fresh deal is a valid table")
+        var short = fresh
+        short.foundations.removeLast()
+        check(!short.isValid, "a table with three foundations is rejected")
+        var twice = fresh
+        twice.stock[0] = twice.stock[1]
+        check(!twice.isValid, "a table with a card twice is rejected")
+        var mark = fresh
+        mark.faceUpFrom[2] = 9
+        check(!mark.isValid, "a face up mark past the column is rejected")
+        var mixed = empty()
+        mixed.foundations[0] = [c(1, .hearts), c(2, .spades)]
+        check(!mixed.isValid, "a foundation of mixed suits is rejected")
+        let junk = try? JSONDecoder().decode(SavedGame.self, from: Data("{\"board\":{}}".utf8))
+        check(junk == nil, "a broken saved game does not decode")
+
+        // The hint used to say Deal forever when no stock card could ever be played.
+        var dead = empty()
+        dead.tableau[0] = [c(5, .clubs)]
+        dead.stock = [c(9, .hearts), c(10, .clubs)]
+        dead.waste = [c(8, .clubs)]
+        check(!dead.stockHasPlay() && dead.hint() == nil, "no hint when the stock holds nothing playable")
+        dead.stock.insert(c(4, .hearts), at: 0)
+        check(dead.stockHasPlay() && dead.hint() == .deal, "the hint deals when a stock card will play")
+        var three = empty(.three)
+        three.tableau[0] = [c(5, .clubs)]
+        three.stock = [c(10, .clubs), c(9, .hearts), c(4, .hearts), c(8, .clubs)] // The four is always under the nine.
+        check(three.hint() == nil, "draw three only counts the cards that come to the top")
+        let probeStart = dead
+        _ = dead.stockHasPlay()
+        check(dead == probeStart, "looking at the stock changes nothing")
+
+        // New Game during auto-complete used to keep moving cards on the fresh table.
+        MainActor.assumeIsolated {
+            var ready = empty()
+            for suit in Suit.allCases { ready.tableau[suit.rawValue] = (1...13).reversed().map { c($0, suit) } }
+            let model = GameModel(persists: false)
+            model.setUp(ready)
+            model.autoComplete()
+            check(model.autoCompleting, "auto-complete starts")
+            model.deal(31, countLoss: false)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+            check(!model.autoCompleting && model.board == Board.deal(game: 31, draw: model.drawMode),
+                  "a new deal stops auto-complete and leaves the fresh table alone")
+
+            let done = GameModel(persists: false)
+            done.setUp(ready)
+            done.autoComplete()
+            let deadline = Date().addingTimeInterval(10)
+            while done.autoCompleting, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            check(done.won && done.board.isWon && done.board.moves == 52, "auto-complete plays out to a win")
+        }
     }
 
     private static func statistics() {

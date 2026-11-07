@@ -40,7 +40,7 @@ struct GameCommands: Commands {
             Button("Choose Game…") { model.showChooser = true }.keyboardShortcut("n", modifiers: [.command, .shift])
         }
         CommandGroup(replacing: .undoRedo) {
-            Button("Undo Move") { withAnimation(.snappy) { model.undo() } }.keyboardShortcut("z").disabled(!model.canUndo)
+            Button("Undo Move") { withAnimation(.snappy) { model.undo() } }.keyboardShortcut("z").disabled(!model.canUndo || model.showChooser || model.showStats)
         }
         CommandMenu("Game") {
             Button("Deal from Stock") { withAnimation(.snappy(duration: 0.3)) { model.dealFromStock() } }
