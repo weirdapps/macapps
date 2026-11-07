@@ -29,6 +29,8 @@ enum SelfTest {
         check(Timecode.string(-3) == "0:00.00" && Timecode.string(.nan) == "0:00.00", "timecode bad input")
         check(Timecode.short(90) == "1:30" && Timecode.short(3720) == "1:02:00", "short labels")
         check(Timecode.rulerStep(duration: 62, count: 8) == 10, "ruler step")
+        check(Timecode.string(1e300) == Timecode.string(Timecode.maximum) && Timecode.short(.infinity) == "0:00",
+              "timecode survives huge and infinite values")
 
         var r = TrimRange(duration: 60)
         check(r.start == 0 && r.end == 60 && r.isFull, "range starts full")
@@ -61,6 +63,8 @@ enum SelfTest {
         check(OutputName.url(for: source, pathExtension: "mov", exists: { taken.contains($0.lastPathComponent) }).lastPathComponent
               == "Clip trimmed 3.mov", "output name never overwrites")
         check(OutputName.url(for: source, pathExtension: "m4a", exists: { _ in false }).lastPathComponent == "Clip trimmed.m4a", "audio name")
+        check(OutputName.url(for: URL(fileURLWithPath: "/tmp/Été à Kyōto 🎬.mov"), pathExtension: "mov", exists: { _ in false })
+              .lastPathComponent == "Été à Kyōto 🎬 trimmed.mov", "unicode names")
         check(OutputName.url(for: source, pathExtension: "mov", exists: { _ in false }).deletingLastPathComponent().path == "/tmp",
               "output sits next to the original")
 
@@ -134,6 +138,7 @@ enum SelfTest {
             }
             check(cancelled == true, "cancel leaves no file")
         }
+        if made { MainActor.assumeIsolated { modelFlow(movie: movie, dir: dir) } }
 
         let tone = AVURLAsset(url: audio)
         let out = OutputName.url(for: audio, pathExtension: "m4a")
@@ -206,6 +211,60 @@ enum SelfTest {
         model.undoManager.redo()
         check(model.range.start == 5, "redo sets it again")
         check(model.estimatedBytes == 0 && !model.canExport, "no clip, nothing to export")
+    }
+
+    // MARK: The model with real files
+
+    /// Runs the main run loop until `done` holds or the time runs out, so the model's main actor tasks can finish.
+    @MainActor
+    private static func spin(_ seconds: Double = 10, until done: () -> Bool) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !done() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+    }
+
+    @MainActor
+    private static func modelFlow(movie: URL, dir: URL) {
+        let model = TrimModel()
+        model.recordsRecents = false
+        model.open(movie)
+        spin { !model.isLoading }
+        check(model.hasClip && model.player != nil && model.url == movie, "open a movie")
+
+        // A file Trim can't read leaves the open clip as it was.
+        let empty = dir.appendingPathComponent("Empty.mov")
+        FileManager.default.createFile(atPath: empty.path, contents: Data())
+        model.open(empty)
+        spin { !model.isLoading }
+        check(model.alert != nil, "an empty file shows an alert")
+        check(model.hasClip && model.player != nil && model.url == movie, "a failed open keeps the current clip")
+        model.alert = nil
+
+        // Overlapping opens: the latest one wins, whichever finishes first.
+        let copy = dir.appendingPathComponent("Second take.mov")
+        try? FileManager.default.copyItem(at: movie, to: copy)
+        model.open(empty)
+        model.open(copy)
+        spin { !model.isLoading }
+        spin(0.5) { false }
+        check(model.url == copy && model.alert == nil, "the latest open wins")
+
+        // Cancel, then export again at once: the cancelled export must not reset the new one.
+        model.edit("Set In Point") { $0.setStart(0.5) }
+        model.export()
+        model.cancelExport()
+        check(model.exportState == .idle, "cancel shows idle at once")
+        model.export()
+        spin { !model.isExporting }
+        spin(0.5) { false }
+        if case .done(let url, false) = model.exportState {
+            check(url.lastPathComponent == "Second take trimmed.mov" && FileManager.default.fileExists(atPath: url.path)
+                  && FileManager.default.fileExists(atPath: copy.path), "export after a cancel finishes, original kept")
+        } else {
+            check(false, "export after a cancel finishes, original kept (state \(model.exportState))")
+        }
+        check(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("Second take trimmed 2.mov").path),
+              "the cancelled export left no file")
+        model.pause()
     }
 
     // MARK: Helpers

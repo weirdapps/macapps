@@ -35,6 +35,10 @@ final class TrimModel: ObservableObject {
     private var exportTask: Task<Void, Never>?
     private var seekTarget: Double?
     private var isSeeking = false
+    private var openGeneration = 0
+    private var exportGeneration = 0
+    /// Off in the self test, so its temporary files never land in File > Open Recent.
+    var recordsRecents = !Desktop.isSnapshot
     let undoManager = UndoManager()
 
     static let thumbnailCount = 14
@@ -61,15 +65,20 @@ final class TrimModel: ObservableObject {
 
     // MARK: Opening
 
+    /// Opens a clip. The current clip stays open until the new one has loaded, so a file Trim can't read
+    /// leaves the window as it was, and when opens overlap only the latest one wins.
     func open(_ url: URL) {
         guard !isDemo else { return }
-        cancelExport()
-        tearDown()
+        openGeneration += 1
+        let generation = openGeneration
         isLoading = true
         let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
         Task {
             do {
                 let info = try await MediaInfo.load(asset)
+                guard generation == self.openGeneration else { return }
+                self.cancelExport()
+                self.tearDown()
                 self.asset = asset
                 self.url = url
                 self.info = info
@@ -79,9 +88,10 @@ final class TrimModel: ObservableObject {
                 self.undoManager.removeAllActions()
                 self.attachPlayer(AVPlayer(playerItem: AVPlayerItem(asset: asset)))
                 self.isLoading = false
-                NSDocumentController.shared.noteNewRecentDocumentURL(url)
+                if self.recordsRecents { NSDocumentController.shared.noteNewRecentDocumentURL(url) }
                 self.analyse(asset, info: info)
             } catch {
+                guard generation == self.openGeneration else { return }
                 self.isLoading = false
                 self.alert = (error as? TrimError)?.errorDescription ?? TrimError.unreadable.errorDescription
             }
@@ -264,6 +274,8 @@ final class TrimModel: ObservableObject {
         let audioOnly = exportsAudioOnly
         let timeRange = range.cmTimeRange
         exportState = .exporting(0)
+        exportGeneration += 1
+        let generation = exportGeneration
         exportTask = Task {
             var destination: URL?
             do {
@@ -274,13 +286,16 @@ final class TrimModel: ObservableObject {
                 let url = OutputName.url(for: source, pathExtension: plan.pathExtension, in: writable ? folder : fallback)
                 destination = url
                 try await Exporter.run(plan, range: timeRange, to: url) { progress in
-                    Task { @MainActor in self.showProgress(progress) }
+                    Task { @MainActor in if generation == self.exportGeneration { self.showProgress(progress) } }
                 }
+                guard generation == exportGeneration else { return }
                 exportState = .done(url, reencoded: plan.reencodes)
             } catch is CancellationError {
                 if let destination { try? FileManager.default.removeItem(at: destination) }
-                exportState = .idle
+                // A newer export may already be running; only the current one owns the state.
+                if generation == exportGeneration { exportState = .idle }
             } catch {
+                guard generation == exportGeneration else { return }
                 exportState = .failed((error as? TrimError)?.errorDescription ?? error.localizedDescription)
             }
         }
@@ -293,6 +308,8 @@ final class TrimModel: ObservableObject {
     func cancelExport() {
         exportTask?.cancel()
         exportTask = nil
+        // Show idle at once; the cancelled task cleans up its partial file in the background.
+        if isExporting { exportGeneration += 1; exportState = .idle }
     }
 
     func revealExport() {

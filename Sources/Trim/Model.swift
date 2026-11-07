@@ -40,10 +40,13 @@ struct TrimRange: Equatable {
 }
 
 enum Timecode {
+    /// Longer than any real clip (about 11,500 days), and small enough that the Int maths can never overflow.
+    static let maximum: Double = 1e9
+
     /// "0:12.40", or "1:02:05.50" past an hour: minutes, seconds and hundredths, rounded down so 59.999 never shows 60.
     static func string(_ seconds: Double) -> String {
         guard seconds.isFinite else { return "0:00.00" }
-        let total = Int((max(0, seconds) * 100 + 0.0001).rounded(.down))
+        let total = Int((min(max(0, seconds), Timecode.maximum) * 100 + 0.0001).rounded(.down))
         let cs = total % 100, s = (total / 100) % 60, m = (total / 6000) % 60, h = total / 360_000
         if h > 0 { return String(format: "%d:%02d:%02d.%02d", h, m, s, cs) }
         return String(format: "%d:%02d.%02d", m, s, cs)
@@ -51,7 +54,8 @@ enum Timecode {
 
     /// Short ruler labels: "0:15", "1:30", "1:02:00".
     static func short(_ seconds: Double) -> String {
-        let total = Int(max(0, seconds).rounded())
+        guard seconds.isFinite else { return "0:00" }
+        let total = Int(min(max(0, seconds), Timecode.maximum).rounded())
         let s = total % 60, m = (total / 60) % 60, h = total / 3600
         return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
