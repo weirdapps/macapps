@@ -68,6 +68,14 @@ enum Timing {
     static func clamp(_ value: Double, _ range: ClosedRange<Double>) -> Double {
         min(max(value, range.lowerBound), range.upperBound)
     }
+
+    /// Where playback should jump back to when it reaches the out point while looping the range, or nil to keep going.
+    static func loopTarget(time: Double, inPoint: Double, outPoint: Double) -> Double? {
+        time >= outPoint - 0.005 ? inPoint : nil
+    }
+
+    /// `1 frame`, `48 frames`.
+    static func frames(_ count: Int) -> String { count == 1 ? "1 frame" : "\(count) frames" }
 }
 
 /// How many times the GIF plays. ImageIO takes the total number of plays: it writes a NETSCAPE block repeating
@@ -199,7 +207,8 @@ enum MediaKind { case movie, image, other }
 
 enum Loader {
     static let defaultDelay = 0.25
-    static let maxPixel = 2000
+    /// The widest GIF Loop makes is 1600 px, so nothing is kept larger: 300 photos then fit in memory.
+    static let maxPixel = 1600
 
     static func kind(of url: URL) -> MediaKind {
         let type = (try? url.resourceValues(forKeys: [.contentTypeKey]))?.contentType
@@ -216,15 +225,20 @@ enum Loader {
         let count = CGImageSourceGetCount(source)
         if count > 1, GIF.delay(source, at: 0) != nil {
             return (0..<count).compactMap { i in
-                guard let image = CGImageSourceCreateImageAtIndex(source, i, nil) else { return nil }
+                guard let image = image(source, at: i) else { return nil }
                 return (image, GIF.delay(source, at: i) ?? 0.1)
             }
         }
+        guard let image = image(source, at: 0) else { return [] }
+        return [(image, defaultDelay)]
+    }
+
+    /// One picture, upright and at most `maxPixel` on its longer side; smaller pictures keep their size.
+    private static func image(_ source: CGImageSource, at index: Int) -> CGImage? {
         let options = [kCGImageSourceCreateThumbnailFromImageAlways: true,
                        kCGImageSourceCreateThumbnailWithTransform: true,
                        kCGImageSourceThumbnailMaxPixelSize: maxPixel] as CFDictionary
-        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else { return [] }
-        return [(image, defaultDelay)]
+        return CGImageSourceCreateThumbnailAtIndex(source, index, options)
     }
 }
 
@@ -375,8 +389,12 @@ enum Exporter {
         try Task.checkCancellation()
         guard writer.finish() else { throw Failed() }
         let fm = FileManager.default
-        if fm.fileExists(atPath: url.path) { try fm.removeItem(at: url) }
-        try fm.moveItem(at: temp, to: url)
+        // Replace an existing file in one step, so a failure never leaves the user with neither the old file nor the new.
+        if fm.fileExists(atPath: url.path) {
+            _ = try fm.replaceItemAt(url, withItemAt: temp)
+        } else {
+            try fm.moveItem(at: temp, to: url)
+        }
         return (try? fm.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
     }
 }

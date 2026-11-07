@@ -43,7 +43,7 @@ struct ContentView: View {
                         }
                     }
                     Divider()
-                    Inspector(model: model).frame(width: 300)
+                    Inspector(model: model).frame(width: 320)
                 }
             }
         }
@@ -222,16 +222,18 @@ struct RangeTimeline: View {
                     .frame(width: handle, height: height)
                     .offset(x: xIn - handle)
                     .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("timeline")).onChanged {
+                        model.beginRangeEdit()
                         model.setIn(time($0.location.x + handle / 2))
                         model.seek(to: model.inPoint)
-                    })
+                    }.onEnded { _ in model.endRangeEdit("Move In Point") })
                 TrimHandle(edge: .trailing)
                     .frame(width: handle, height: height)
                     .offset(x: xOut)
                     .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("timeline")).onChanged {
+                        model.beginRangeEdit()
                         model.setOut(time($0.location.x - handle / 2))
                         model.seek(to: model.outPoint)
-                    })
+                    }.onEnded { _ in model.endRangeEdit("Move Out Point") })
             }
             .coordinateSpace(name: "timeline")
         }
@@ -314,6 +316,7 @@ struct ImageEditor: View {
                                 dragging = frame.id
                                 model.selection = frame.id
                                 model.beginReorder()
+                                watchForDragEnd()
                                 return NSItemProvider(object: frame.id.uuidString as NSString)
                             }
                             .onDrop(of: [.text], delegate: FrameDropDelegate(target: frame.id, model: model, dragging: $dragging))
@@ -343,9 +346,39 @@ struct ImageEditor: View {
                 .padding(.vertical, 14)
                 .animation(.snappy(duration: 0.22), value: model.frames.map(\.id))
             }
+            .onDrop(of: [.text], delegate: StripDropDelegate(model: model, dragging: $dragging))
             .frame(height: 140)
             .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
         }
+    }
+}
+
+extension ImageEditor {
+    /// SwiftUI says nothing when a drag ends outside every drop target, so watch the mouse button:
+    /// once it is up, a reorder still open is committed and the dimmed card comes back.
+    private func watchForDragEnd() {
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            while NSEvent.pressedMouseButtons & 1 != 0 { try? await Task.sleep(for: .milliseconds(100)) }
+            try? await Task.sleep(for: .milliseconds(150))
+            if model.isReordering { model.endReorder() }
+            dragging = nil
+        }
+    }
+}
+
+/// Catches a frame dropped between cards or on the Add button, so the move still counts.
+struct StripDropDelegate: DropDelegate {
+    let model: LoopModel
+    @Binding var dragging: UUID?
+
+    func validateDrop(info: DropInfo) -> Bool { dragging != nil }
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+
+    func performDrop(info: DropInfo) -> Bool {
+        dragging = nil
+        model.endReorder()
+        return true
     }
 }
 
@@ -442,7 +475,7 @@ struct Inspector: View {
                             }
                         }
                     HStack {
-                        Text("\(model.frameCount) frames · \(Theme.seconds(model.outputDuration))")
+                        Text("\(Timing.frames(model.frameCount)) · \(Theme.seconds(model.outputDuration))")
                             .font(.system(size: 12, weight: .medium, design: .rounded).monospacedDigit())
                             .foregroundStyle(.secondary)
                             .contentTransition(.numericText())
@@ -472,7 +505,7 @@ struct Inspector: View {
                 }
 
                 if model.mode == .images, let frame = model.selectedFrame, let index = model.selectedIndex {
-                    Section("Frame \(index + 1)") {
+                    Section {
                         LabeledContent("Delay") {
                             Stepper(value: Binding(get: { frame.delay }, set: { model.setDelay($0, for: frame.id) }),
                                     in: 0.02...10, step: 0.05) {
@@ -481,6 +514,14 @@ struct Inspector: View {
                         }
                         Button("Use This Delay for All Frames") { model.applySelectedDelayToAll() }
                             .disabled(model.frames.allSatisfy { $0.delay == frame.delay })
+                    } header: {
+                        Text("Frame \(index + 1)")
+                    } footer: {
+                        if model.hasMixedShapes {
+                            Text("Frames of another shape are fitted inside the first one, with clear bars.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
 
@@ -568,10 +609,10 @@ struct SliderRow: View {
     var body: some View {
         HStack(spacing: 8) {
             Slider(value: Binding(get: { value }, set: { value = ($0 / step).rounded() * step }), in: range)
-                .labelsHidden().frame(width: 104)
+                .labelsHidden().frame(width: 92)
             Text(label)
                 .font(.body.monospacedDigit())
-                .frame(width: 54, alignment: .trailing)
+                .frame(width: 56, alignment: .trailing)
                 .contentTransition(.numericText())
         }
     }
@@ -622,7 +663,7 @@ struct ExportSheet: View {
                     .font(.system(size: 22, weight: .semibold))
                     .foregroundStyle(Theme.gradient)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Exporting \(model.sourceName).gif").font(.headline).lineLimit(1)
+                    Text("Exporting \(model.exportName)").font(.headline).lineLimit(1).truncationMode(.middle)
                     Text("Frame \(min(model.frameCount, Int((progress * Double(model.frameCount)).rounded()))) of \(model.frameCount)")
                         .font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
                 }

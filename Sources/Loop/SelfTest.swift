@@ -27,6 +27,7 @@ enum SelfTest {
         gif(dir)
         images(dir)
         video(dir)
+        MainActor.assumeIsolated { model() }
 
         print(failures == 0 ? "All \(checks) checks passed." : "\(failures) of \(checks) checks failed.")
         return failures == 0 ? 0 : 1
@@ -65,6 +66,19 @@ enum SelfTest {
         let picks = Timing.sample(count: 300, limit: 72)
         check(picks.count == 72 && picks.first == 0 && (picks.last ?? 0) < 300 && picks == picks.sorted(), "long clips sample evenly")
         check(Repeat.forever.loopCount == 0 && Repeat.once.loopCount == 1 && Repeat.three.loopCount == 3, "repeat maps to loop counts")
+        check(Timing.loopTarget(time: 5.0, inPoint: 2, outPoint: 5) == 2, "playback at the out point jumps back to the in point")
+        check(Timing.loopTarget(time: 4.5, inPoint: 2, outPoint: 5) == nil, "playback inside the range keeps going")
+        check(Timing.frames(1) == "1 frame" && Timing.frames(48) == "48 frames", "frame counts read in the singular and plural")
+    }
+
+    /// The colour at the centre of an image, as 0xRRGGBB.
+    private static func centre(_ image: CGImage) -> UInt32 {
+        var px = [UInt8](repeating: 0, count: 4)
+        let ctx = CGContext(data: &px, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.draw(image, in: CGRect(x: -CGFloat(image.width) / 2 + 0.5, y: -CGFloat(image.height) / 2 + 0.5,
+                                   width: CGFloat(image.width), height: CGFloat(image.height)))
+        return UInt32(px[0]) << 16 | UInt32(px[1]) << 8 | UInt32(px[2])
     }
 
     private static func solid(_ color: UInt32, size: CGSize) -> CGImage {
@@ -106,6 +120,18 @@ enum SelfTest {
             check(loaded.count == 3 && abs(loaded[0].delay - 0.05) < 0.001, "an animated GIF opens as its frames and delays")
         } else { check(false, "GIF writer opens a file") }
 
+        // A huge animated GIF is scaled down frame by frame instead of being held at full size.
+        let huge = dir.appendingPathComponent("huge.gif")
+        let big = CGSize(width: 2400, height: 120)
+        try? GIF.encode([solid(0xFF0000, size: big), solid(0x0000FF, size: big)], delays: [0.1, 0.1], loopCount: 0)?.write(to: huge)
+        let hugeFrames = Loader.frames(at: huge)
+        check(hugeFrames.count == 2 && hugeFrames.allSatisfy { $0.image.width <= Loader.maxPixel },
+              "frames of a huge animated GIF are capped at \(Loader.maxPixel) px")
+        if hugeFrames.count == 2 {
+            let c = centre(hugeFrames[1].image)
+            check(c >> 16 < 0x20 && c & 0xFF > 0xD0, "a scaled animated GIF keeps each frame's own picture")
+        }
+
         let wide = solid(0xFFFFFF, size: CGSize(width: 200, height: 100))
         let fitted = Render.fit(wide, size: CGSize(width: 64, height: 64))
         check(fitted?.width == 64 && fitted?.height == 64, "render fits into the exact output size")
@@ -145,6 +171,8 @@ enum SelfTest {
                                 delays: Timing.centiseconds(count: times.count, fps: 8).map { Double($0) / 100 },
                                 loopCount: 0, fps: 8)
             outcome.preview = try? await Preview.build(job, sourceSize: info.size)
+            // Exporting over an existing file replaces it.
+            try? Data("not a gif".utf8).write(to: gif)
             outcome.bytes = (try? await Exporter.run(job, to: gif) { _ in }) ?? 0
             outcome.frames = GIF.read((try? Data(contentsOf: gif)) ?? Data())?.frames.count ?? 0
             // A cancelled export leaves no file behind.
@@ -164,8 +192,79 @@ enum SelfTest {
         check(outcome.preview?.frames.first?.width == 160, "preview frames are at most the preview width")
         check((outcome.preview?.estimatedBytes ?? 0) > 0, "preview estimates a file size")
         check(outcome.bytes > 0, "export writes a GIF")
-        check(outcome.frames == 8, "1 s at 8 fps exports 8 frames")
+        check(outcome.frames == 8, "1 s at 8 fps exports 8 frames, replacing the file that was there")
         check(outcome.cancelled, "cancelling an export leaves no file")
+    }
+
+    /// The window's model: frame edits, the canvas size, trim undo and drag reordering, with a real UndoManager.
+    @MainActor private static func model() {
+        let undo = UndoManager()
+        undo.groupsByEvent = false
+        func step(_ body: () -> Void) {
+            undo.beginUndoGrouping()
+            body()
+            undo.endUndoGrouping()
+        }
+        let m = LoopModel()
+        m.undoManager = undo
+        let frames = [
+            ImageFrame(name: "a", image: solid(0xFF0000, size: CGSize(width: 40, height: 30)), delay: 0.25),
+            ImageFrame(name: "b", image: solid(0x00FF00, size: CGSize(width: 20, height: 20)), delay: 0.25),
+            ImageFrame(name: "c", image: solid(0x0000FF, size: CGSize(width: 40, height: 30)), delay: 0.25),
+        ]
+        m.installFrames(frames)
+        check(m.sourceSize == CGSize(width: 40, height: 30) && m.hasMixedShapes, "the canvas is the first frame's size")
+        step { m.deleteSelectedFrame() }
+        check(m.frames.map(\.name) == ["b", "c"] && m.sourceSize == CGSize(width: 20, height: 20),
+              "deleting the first frame moves the canvas to the new first frame")
+        undo.undo()
+        check(m.frames.map(\.name) == ["a", "b", "c"] && m.sourceSize == CGSize(width: 40, height: 30), "undo brings the frame back")
+
+        // A drag that ends outside the strip: its moves are kept and become one undo step when the next drag starts.
+        m.beginReorder()
+        m.liveMove(frames[0].id, to: frames[2].id)
+        check(m.isReordering, "a drag in progress is a reorder")
+        step { m.beginReorder() }
+        check(m.frames.map(\.name) == ["b", "c", "a"], "a reorder that missed every drop target keeps its order")
+        m.endReorder()
+        check(!m.isReordering, "ending a drag closes the reorder")
+        undo.undo()
+        check(m.frames.map(\.name) == ["a", "b", "c"], "the missed drop undoes as one step")
+
+        step { m.setDelay(0.004, for: frames[1].id) }
+        check(m.frames[1].delay == 0.02, "a frame delay never drops below 0.02 s")
+        m.selection = frames[1].id
+        step { m.applySelectedDelayToAll() }
+        check(m.frames.allSatisfy { $0.delay == 0.02 } && m.frameDelays.reduce(0, +) == 0.06, "one delay for every frame")
+
+        // Trimming a clip.
+        m.installClip(duration: 10, size: CGSize(width: 1280, height: 720))
+        check(m.inPoint == 0 && m.outPoint == 10 && m.frames.isEmpty, "a new clip starts with the whole range and no frames")
+        m.seek(to: 4)
+        step { m.setInAtPlayhead() }
+        check(m.inPoint == 4, "Set In uses the playhead")
+        undo.undo()
+        check(m.inPoint == 0, "undo puts the in point back")
+        undo.redo()
+        check(m.inPoint == 4, "redo sets it again")
+        step {
+            m.beginRangeEdit()
+            m.setOut(8)
+            m.beginRangeEdit()
+            m.setOut(7)
+            m.endRangeEdit("Move Out Point")
+        }
+        check(m.outPoint == 7, "dragging the out handle moves the out point")
+        undo.undo()
+        check(m.outPoint == 10 && m.inPoint == 4, "a whole handle drag undoes in one step")
+        m.setIn(9.95)
+        check(m.inPoint <= m.outPoint - Timing.minimumRange + 1e-9, "the in point stays before the out point")
+        m.setOut(-5)
+        check(m.outPoint >= m.inPoint + Timing.minimumRange - 1e-9, "the out point stays after the in point")
+        check(m.frameCount == Timing.frameTimes(from: m.inPoint, to: m.outPoint, fps: m.fps).count && m.frameCount > 0,
+              "the trimmed range makes frames")
+        m.reset()
+        check(m.mode == .empty && !m.canExport, "Start Over empties the window")
     }
 
     private static func writeMovie(to url: URL, size: CGSize, frames: Int, fps: Int32) -> Bool {

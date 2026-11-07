@@ -126,12 +126,10 @@ func appIcon() -> NSBitmapImageRep {
             if closed { path.closeSubpath() }
             ctx.saveGState()
             if shadowed { shadow(ctx, y: -14, blur: 30, alpha: 0.38) }
-            ctx.addPath(path)
-            ctx.setLineWidth(band)
-            ctx.setLineCap(.butt)
-            ctx.setLineJoin(.round)
-            ctx.setStrokeColor(rgb(0x1C2420).cgColor)
-            ctx.strokePath()
+            // Filled outline rather than a stroke: stroking a dense polyline leaves hairline cracks on tight curves.
+            ctx.addPath(path.copy(strokingWithWidth: band, lineCap: .butt, lineJoin: .round, miterLimit: 10))
+            ctx.setFillColor(rgb(0x1C2420).cgColor)
+            ctx.fillPath()
             ctx.restoreGState()
             if bandOnly { return }
             // Picture frames: a dashed, lighter inner band.

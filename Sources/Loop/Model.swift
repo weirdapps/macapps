@@ -43,10 +43,20 @@ final class LoopModel: ObservableObject {
     private var timeObserver: Any?
 
     // Images
-    @Published private(set) var frames: [ImageFrame] = [] { didSet { if frames != oldValue { schedulePreview() } } }
+    @Published private(set) var frames: [ImageFrame] = [] {
+        didSet {
+            guard frames != oldValue else { return }
+            // The GIF's canvas is the first frame's size, whichever frame is first now.
+            if mode == .images, let first = frames.first { sourceSize = CGSize(width: first.image.width, height: first.image.height) }
+            schedulePreview()
+        }
+    }
     @Published var selection: UUID?
     weak var undoManager: UndoManager?
     private var reorderSnapshot: [ImageFrame]?
+    private var rangeSnapshot: (in: Double, out: Double)?
+    /// Bumped on every new source, so a slow image load that finishes late never lands in a different session.
+    private var loadGeneration = 0
 
     // Output
     @Published var fps: Double = 15 { didSet { if fps != oldValue { schedulePreview() } } }
@@ -65,6 +75,7 @@ final class LoopModel: ObservableObject {
     @Published private(set) var exportProgress: Double?
     @Published private(set) var lastExport: URL?
     @Published private(set) var lastExportBytes = 0
+    @Published private(set) var exportName = ""
     @Published var errorMessage: String?
     private var exportTask: Task<Void, Never>?
 
@@ -102,6 +113,13 @@ final class LoopModel: ObservableObject {
 
     var isExporting: Bool { exportProgress != nil }
     var canExport: Bool { mode != .empty && frameCount > 0 && !isExporting && !isLoading }
+
+    /// True when some frame's aspect ratio differs from the first one's, so it gets transparent bars.
+    var hasMixedShapes: Bool {
+        guard let first = frames.first, first.image.height > 0 else { return false }
+        let ratio = Double(first.image.width) / Double(first.image.height)
+        return frames.contains { $0.image.height > 0 && abs(Double($0.image.width) / Double($0.image.height) - ratio) > 0.01 }
+    }
 
     var selectedIndex: Int? { frames.firstIndex { $0.id == selection } }
     var selectedFrame: ImageFrame? { selectedIndex.map { frames[$0] } }
@@ -171,6 +189,9 @@ final class LoopModel: ObservableObject {
         estimatedBytes = nil
         isLoading = false
         lastExport = nil
+        reorderSnapshot = nil
+        rangeSnapshot = nil
+        loadGeneration += 1
         undoManager?.removeAllActions(withTarget: self)
     }
 
@@ -226,14 +247,15 @@ final class LoopModel: ObservableObject {
         guard !sorted.isEmpty else { return }
         if mode != .images { loadImages(sorted); return }
         isLoading = true
+        let generation = loadGeneration
         Task {
             let loaded = await Task.detached(priority: .userInitiated) { () -> [ImageFrameSeed] in
                 sorted.flatMap { url in
                     Loader.frames(at: url).map { ImageFrameSeed(name: url.deletingPathExtension().lastPathComponent, image: $0.image, delay: $0.delay) }
                 }
             }.value
+            guard generation == loadGeneration, mode == .images else { return }
             isLoading = false
-            guard mode == .images else { return }
             guard !loaded.isEmpty else {
                 errorMessage = "None of those images could be read."
                 if frames.isEmpty { reset() }
@@ -241,8 +263,7 @@ final class LoopModel: ObservableObject {
             }
             let added = loaded.map { ImageFrame(name: $0.name, image: $0.image, delay: $0.delay) }
             if frames.isEmpty, let first = added.first {
-                sourceSize = CGSize(width: first.image.width, height: first.image.height)
-                width = min(480, sourceSize.width)
+                width = min(480, Double(first.image.width))
             }
             if registerUndo { replaceFrames(frames + added, action: "Add Images") } else { frames += added }
             selection = selection ?? added.first?.id
@@ -254,7 +275,10 @@ final class LoopModel: ObservableObject {
     private func tick(_ seconds: Double) {
         guard seconds.isFinite else { return }
         currentTime = seconds
-        if isPlaying, seconds >= outPoint - 0.005 { seek(to: inPoint) }
+        guard isPlaying, let target = Timing.loopTarget(time: seconds, inPoint: inPoint, outPoint: outPoint) else { return }
+        seek(to: target)
+        // When the range runs to the end of the clip the player has already stopped there, so start it again.
+        if let player, player.rate == 0 { player.play() }
     }
 
     func togglePlay() {
@@ -283,12 +307,45 @@ final class LoopModel: ObservableObject {
         outPoint = Timing.clamp(seconds, min(duration, inPoint + Timing.minimumRange)...duration)
     }
 
-    func setInAtPlayhead() { setIn(currentTime) }
-    func setOutAtPlayhead() { setOut(currentTime) }
+    func setInAtPlayhead() { editRange("Set In Point") { setIn(currentTime) } }
+    func setOutAtPlayhead() { editRange("Set Out Point") { setOut(currentTime) } }
 
     func useWholeClip() {
-        inPoint = 0
-        outPoint = duration
+        editRange("Use Whole Clip") {
+            inPoint = 0
+            outPoint = duration
+        }
+    }
+
+    /// Trim edits are undoable. A handle drag calls begin once, then end when the mouse goes up: one undo step per drag.
+    func beginRangeEdit() {
+        if rangeSnapshot == nil { rangeSnapshot = (inPoint, outPoint) }
+    }
+
+    func endRangeEdit(_ action: String) {
+        guard let old = rangeSnapshot else { return }
+        rangeSnapshot = nil
+        guard old.in != inPoint || old.out != outPoint else { return }
+        registerRangeUndo(in: old.in, out: old.out, action: action)
+    }
+
+    private func editRange(_ action: String, _ change: () -> Void) {
+        beginRangeEdit()
+        change()
+        endRangeEdit(action)
+    }
+
+    private func registerRangeUndo(in oldIn: Double, out oldOut: Double, action: String) {
+        undoManager?.registerUndo(withTarget: self) { model in
+            MainActor.assumeIsolated {
+                let (redoIn, redoOut) = (model.inPoint, model.outPoint)
+                model.inPoint = oldIn
+                model.outPoint = oldOut
+                model.seek(to: oldIn)
+                model.registerRangeUndo(in: redoIn, out: redoOut, action: action)
+            }
+        }
+        undoManager?.setActionName(action)
     }
 
     // MARK: Image frames (undoable)
@@ -336,7 +393,13 @@ final class LoopModel: ObservableObject {
     }
 
     /// Drag to reorder: moves happen live while dragging and become one undo step when dropped.
-    func beginReorder() { reorderSnapshot = frames }
+    func beginReorder() {
+        // A drag that ended outside the strip never reached endReorder; keep its moves as their own step first.
+        endReorder()
+        reorderSnapshot = frames
+    }
+
+    var isReordering: Bool { reorderSnapshot != nil }
 
     func liveMove(_ id: UUID, to target: UUID) {
         guard let from = frames.firstIndex(where: { $0.id == id }),
@@ -415,6 +478,7 @@ final class LoopModel: ObservableObject {
     func export(to url: URL) {
         guard let job = renderJob(), job.source.count > 0 else { return }
         if isPlaying { togglePlay() }
+        exportName = url.lastPathComponent
         exportProgress = 0
         lastExport = nil
         let report: @Sendable (Double) -> Void = { [weak self] fraction in
@@ -441,6 +505,27 @@ final class LoopModel: ObservableObject {
 
     func revealLastExport() {
         if let lastExport { revealInFinder([lastExport]) }
+    }
+}
+
+extension LoopModel {
+    /// Shows these frames as an image strip without touching any file: for the self-test.
+    func installFrames(_ new: [ImageFrame]) {
+        reset()
+        mode = .images
+        sourceName = "Animation"
+        frames = new
+        selection = new.first?.id
+    }
+
+    /// The same, for the video side: a range to trim without a real clip.
+    func installClip(duration: Double, size: CGSize) {
+        reset()
+        mode = .video
+        sourceName = "Clip"
+        sourceSize = size
+        self.duration = duration
+        outPoint = duration
     }
 }
 
