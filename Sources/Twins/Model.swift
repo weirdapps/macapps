@@ -123,6 +123,7 @@ enum Fmt {
 enum Scanner {
     static let window = 16 * 1024
     static let chunk = 1 << 20
+    static let trashFolders: Set<String> = [".Trash", ".Trashes"]
 
     static func run(roots: [URL], options: ScanOptions, isCancelled: () -> Bool,
                     progress: (ScanProgress) -> Void) throws -> ScanResult {
@@ -211,6 +212,8 @@ enum Scanner {
                                                               errorHandler: { _, _ in true }) else { continue }
             while let url = walker.nextObject() as? URL {
                 try check()
+                // Never offer what is already in a Trash: keeping that copy would send the real one after it.
+                if trashFolders.contains(url.lastPathComponent) { walker.skipDescendants(); continue }
                 guard let v = try? url.resourceValues(forKeys: Set(keys)),
                       v.isSymbolicLink != true, v.isRegularFile == true,
                       let size = v.fileSize.map(Int64.init), size >= minimum else { continue }
@@ -315,6 +318,29 @@ enum Scanner {
             g.files.removeAll { paths.contains($0.id) }
             return g.files.count > 1 ? g : nil
         }
+    }
+
+    /// What a trash request may really move: marked copies that still match the scan, and only in groups where
+    /// at least one kept copy still matches too. Everything else is skipped, so a file is never left without a copy.
+    static func trashPlan(_ groups: [DuplicateGroup], marked: Set<String>,
+                          unchanged: (FileItem) -> Bool) -> (move: [FileItem], skipped: [FileItem]) {
+        var move: [FileItem] = [], skipped: [FileItem] = []
+        for group in groups {
+            let doomed = group.files.filter { marked.contains($0.id) }
+            guard !doomed.isEmpty else { continue }
+            guard group.files.contains(where: { !marked.contains($0.id) && unchanged($0) }) else { skipped += doomed; continue }
+            for file in doomed { if unchanged(file) { move.append(file) } else { skipped.append(file) } }
+        }
+        return (move, skipped)
+    }
+
+    /// True when the file on disk is still a regular file with the size and date the scan saw.
+    static func unchanged(_ file: FileItem) -> Bool {
+        guard let a = try? FileManager.default.attributesOfItem(atPath: file.url.path),
+              a[.type] as? FileAttributeType == .typeRegular,
+              (a[.size] as? NSNumber)?.int64Value == file.size,
+              let date = a[.modificationDate] as? Date else { return false }
+        return abs(date.timeIntervalSince(file.modified)) < 1
     }
 
     /// True when marking `file` would leave its group with no copy at all.
@@ -502,7 +528,8 @@ final class TwinsModel: ObservableObject {
         var moved: [(URL, URL)] = []
         var failed: [String] = []
         var bytes: Int64 = 0
-        for file in markedFiles {
+        let plan = Scanner.trashPlan(groups, marked: marked, unchanged: Scanner.unchanged)
+        for file in plan.move {
             var out: NSURL?
             do {
                 try FileManager.default.trashItem(at: file.url, resultingItemURL: &out)
@@ -527,9 +554,14 @@ final class TwinsModel: ObservableObject {
             }
             undoManager?.setActionName("Move to Trash")
         }
+        var notes: [String] = []
         if !failed.isEmpty {
-            problem = "\(Fmt.files(failed.count)) could not be moved to the Trash: \(failed.prefix(5).joined(separator: ", "))\(failed.count > 5 ? "…" : "")."
+            notes.append("\(Fmt.files(failed.count)) could not be moved to the Trash: \(failed.prefix(5).joined(separator: ", "))\(failed.count > 5 ? "…" : "").")
         }
+        if !plan.skipped.isEmpty {
+            notes.append("\(Fmt.files(plan.skipped.count)) stayed where they are because they, or the copy you keep, changed since the scan. Scan again to check them.")
+        }
+        if !notes.isEmpty { problem = notes.joined(separator: "\n\n") }
     }
 
     /// Undo: moves trashed files back and restores the groups as they were, minus anything that could not come back.

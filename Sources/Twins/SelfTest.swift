@@ -22,6 +22,7 @@ enum SelfTest {
         write("sub/c.txt", hello)
         write("d.txt", Data("other twins".utf8)) // Same size, different content.
         write(".hidden.txt", hello)
+        write(".Trash/trashed.txt", hello)
         write("Thing.app/Contents/inner.txt", hello)
         write("empty1", Data())
         write("empty2", Data())
@@ -68,6 +69,28 @@ enum SelfTest {
         all.skipPackages = false
         let helloAll = scan(all)?.groups.first { $0.size == Int64(hello.count) }
         check(helloAll.map(names) == ["a.txt", "b.txt", "c.txt", ".hidden.txt", "inner.txt"], "hidden and package files when asked")
+
+        check(helloAll?.files.contains { $0.url.path.contains("/.Trash/") } == false, "files already in a Trash are never offered")
+
+        // Trash safety: re-check the disk before moving anything.
+        let safety = dir.appendingPathComponent("safety", isDirectory: true)
+        for n in ["one", "two", "three"] { write("safety/\(n).txt", hello) }
+        if let g = scan(options, roots: [safety])?.groups.first, g.files.count == 3 {
+            let keep = g.files[0], doomed = Set(g.files.dropFirst().map(\.id))
+            check(g.files.allSatisfy(Scanner.unchanged), "freshly scanned files are unchanged")
+            let ok = Scanner.trashPlan([g], marked: doomed, unchanged: Scanner.unchanged)
+            check(ok.move.count == 2 && ok.skipped.isEmpty, "trash plan moves every marked copy when nothing changed")
+            try? Data("hello twins, edited".utf8).write(to: g.files[1].url)
+            check(!Scanner.unchanged(g.files[1]), "an edited file counts as changed")
+            let edited = Scanner.trashPlan([g], marked: doomed, unchanged: Scanner.unchanged)
+            check(edited.move.map(\.id) == [g.files[2].id] && edited.skipped.map(\.id) == [g.files[1].id],
+                  "an edited copy is skipped, the others still move")
+            try? fm.removeItem(at: keep.url)
+            let orphan = Scanner.trashPlan([g], marked: doomed, unchanged: Scanner.unchanged)
+            check(orphan.move.isEmpty && orphan.skipped.count == 2, "nothing moves when the kept copy is gone")
+        } else { check(false, "trash safety fixture") }
+        try? fm.removeItem(at: safety)
+        check(Scanner.trashPlan([], marked: ["/nope"], unchanged: { _ in true }).move.isEmpty, "trash plan on no groups is empty")
 
         var big100k = options
         big100k.minimumSize = 100_000
