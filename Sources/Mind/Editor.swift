@@ -347,11 +347,15 @@ final class Editor: ObservableObject {
         }
     }
 
+    static let maxExportPixels: CGFloat = 16_000
+
     /// The whole map, expanded branches only, drawn at 2x on a light background.
     static func png(of map: MindMap) -> Data? {
         let layout = MapLayout.make(map) { Style.measure($0.text, depth: $1) }
         let renderer = ImageRenderer(content: MapArtwork(map: map, layout: layout).environment(\.colorScheme, .light))
-        renderer.scale = 2
+        // 2x, unless a very large map would pass what an image can hold; then as sharp as fits.
+        let side = max(layout.bounds.width, layout.bounds.height) + MapArtwork.margin * 2 + 48
+        renderer.scale = min(2, Self.maxExportPixels / max(side, 1))
         guard let image = renderer.cgImage else { return nil }
         return NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
     }
@@ -371,7 +375,8 @@ final class Editor: ObservableObject {
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            let text = try String(contentsOf: url, encoding: .utf8)
+            // Most outlines are UTF-8; an older Latin-1 text file still opens rather than failing.
+            let text = try (try? String(contentsOf: url, encoding: .utf8)) ?? String(contentsOf: url, encoding: .isoLatin1)
             let map = Outline.map(fromMarkdown: text, title: url.deletingPathExtension().lastPathComponent)
             newDocument { MindDocument(map: map) }
         } catch {

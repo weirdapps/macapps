@@ -165,6 +165,35 @@ enum SelfTest {
             check(false, "PNG export renders")
         }
 
+        // Odd input found in review.
+        let noVersion = #"{"root":{"text":"Solo"}}"#
+        check((try? MindMap.decode(Data(noVersion.utf8)))?.root.text == "Solo", "a file without a version opens")
+        check((try? MindMap.decode(Data()))?.root.text == MindMap.blank.root.text, "an empty file opens as a blank map")
+        check((try? MindMap.decode(Data("  \n".utf8)))?.count == 1, "a whitespace file opens as a blank map")
+        let dupID = UUID().uuidString
+        let dups = #"{"root":{"text":"R","children":[{"id":"\#(dupID)","text":"A"},{"id":"\#(dupID)","text":"B"}]}}"#
+        if let dm = try? MindMap.decode(Data(dups.utf8)) {
+            check(Set([dm.root.id] + dm.root.children.map(\.id)).count == 3, "duplicate ids in a file are made unique")
+        } else {
+            check(false, "duplicate ids in a file are made unique")
+        }
+        let big = (0..<20_000).map { "- Item \($0)" }.joined(separator: "\n")
+        let t0 = Date()
+        let bigForest = Outline.forest("# Big\n" + big)
+        let importTime = Date().timeIntervalSince(t0)
+        check(bigForest.first?.children.count == 20_000 && importTime < 1.5, "a 20,000 line outline imports fast (\(Int(importTime * 1000)) ms)")
+        var wide = MindMap.blank
+        for i in 0..<3_000 { wide.root.children.append(Node("Topic number \(i)")) }
+        let t1 = Date()
+        let wideLayout = MapLayout.make(wide) { Style.measure($0.text, depth: $1) }
+        let layoutTime = Date().timeIntervalSince(t1)
+        check(wideLayout.order.count == 3_001 && layoutTime < 0.5, "a 3,000 topic map lays out fast (\(Int(layoutTime * 1000)) ms)")
+        check(Editor.png(of: wide) != nil, "a very tall map still exports a PNG")
+        check(Outline.forest("- 🎉 Party\n  - Ελληνικά").first?.children.first?.text == "Ελληνικά", "unicode outline")
+        var vp2 = Viewport(size: CGSize(width: 1040, height: 660))
+        vp2.fit(CGRect(x: -400, y: -250, width: 800, height: 500))
+        check(vp2.scale == 1, "fit snaps to 100% when the map nearly fits")
+
         print("\(passed) passed, \(failed) failed")
         return failed == 0 ? 0 : 1
     }

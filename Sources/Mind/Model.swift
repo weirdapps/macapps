@@ -156,8 +156,31 @@ struct MindMap: Codable, Equatable {
 
     // MARK: Files
 
+    init(version: Int = 1, root: Node) {
+        self.version = version
+        self.root = root
+    }
+
+    private enum CodingKeys: String, CodingKey { case version, root }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        root = try c.decode(Node.self, forKey: .root)
+    }
+
+    /// Reads a .mind file. An empty file is a blank map; repeated ids (a hand-edited file) are made unique,
+    /// because selection, layout and dragging all rely on every topic having its own id.
     static func decode(_ data: Data) throws -> MindMap {
-        try JSONDecoder().decode(MindMap.self, from: data)
+        if data.allSatisfy({ $0 == 0x20 || $0 == 0x0A || $0 == 0x0D || $0 == 0x09 }) { return .blank }
+        var map = try JSONDecoder().decode(MindMap.self, from: data)
+        var seen: Set<UUID> = []
+        func unique(_ n: inout Node) {
+            if !seen.insert(n.id).inserted { n.id = UUID(); seen.insert(n.id) }
+            for i in n.children.indices { unique(&n.children[i]) }
+        }
+        unique(&map.root)
+        return map
     }
 
     func encoded() throws -> Data {
@@ -199,21 +222,21 @@ enum Outline {
     /// Parses headings, bullets, numbered items and indented plain lines into a forest of topics.
     /// Headings nest by level; bullets nest by indentation and sit under the heading above them.
     static func forest(_ text: String) -> [Node] {
-        var roots: [Node] = []
-        var stack: [(key: Int, path: [Int])] = [] // Path into `roots`: first index is the root, then child indexes.
+        // Built as reference nodes first, so appending to a deep or wide outline never copies the tree.
+        final class Item {
+            let text: String
+            var children: [Item] = []
+            init(_ text: String) { self.text = text }
+            var node: Node { Node(text, children: children.map(\.node)) }
+        }
+        var roots: [Item] = []
+        var stack: [(key: Int, item: Item)] = []
 
-        func insert(_ node: Node, key: Int) {
+        func insert(_ text: String, key: Int) {
             while let top = stack.last, top.key >= key { stack.removeLast() }
-            if let top = stack.last {
-                var parent = roots[top.path[0]]
-                let sub = Array(top.path.dropFirst())
-                parent[sub].children.append(node)
-                roots[top.path[0]] = parent
-                stack.append((key, top.path + [parent[sub].children.count - 1]))
-            } else {
-                roots.append(node)
-                stack.append((key, [roots.count - 1]))
-            }
+            let item = Item(text)
+            if let top = stack.last { top.item.children.append(item) } else { roots.append(item) }
+            stack.append((key, item))
         }
 
         for raw in text.components(separatedBy: .newlines) {
@@ -226,13 +249,13 @@ enum Outline {
                 var title = String(trimmed.dropFirst(level)).trimmingCharacters(in: .whitespaces)
                 while title.hasSuffix("#") { title.removeLast() }
                 title = title.trimmingCharacters(in: .whitespaces)
-                if level <= 6, !title.isEmpty { insert(Node(title), key: level) }
+                if level <= 6, !title.isEmpty { insert(title, key: level) }
                 continue
             }
             let title = stripMarker(trimmed)
-            if !title.isEmpty { insert(Node(title), key: 100 + indent) }
+            if !title.isEmpty { insert(title, key: 100 + indent) }
         }
-        return roots
+        return roots.map(\.node)
     }
 
     /// A map from a Markdown outline: a single top item is the central topic, otherwise `title` is.

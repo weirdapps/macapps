@@ -9,9 +9,11 @@ struct MindEditorView: View {
     @StateObject private var editor: Editor
     @Environment(\.undoManager) private var undoManager
     @State private var panStart: CGSize?
+    private let fileURL: URL?
 
     init(document: MindDocument, fileURL: URL? = nil, selection: UUID? = nil) {
         self.document = document
+        self.fileURL = fileURL
         let editor = Editor(document: document, selection: selection)
         editor.fileURL = fileURL
         _editor = StateObject(wrappedValue: editor)
@@ -29,6 +31,8 @@ struct MindEditorView: View {
         .focusedSceneObject(editor)
         .onAppear { editor.undoManager = undoManager }
         .onChange(of: undoManager) { _, manager in editor.undoManager = manager }
+        // Saving an untitled map (or renaming it) gives it a URL; exports are named after it.
+        .onChange(of: fileURL) { _, url in editor.fileURL = url }
     }
 
     private var canvas: some View {

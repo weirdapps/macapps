@@ -246,7 +246,8 @@ struct Viewport: Equatable {
     /// Fits `bounds` in the canvas with a margin, never enlarging past 140%.
     mutating func fit(_ bounds: CGRect, margin: CGFloat = 56) {
         guard bounds.width > 0, bounds.height > 0, size.width > 0, size.height > 0 else { return }
-        let s = min((size.width - margin * 2) / bounds.width, (size.height - margin * 2) / bounds.height, 1.4)
+        var s = min((size.width - margin * 2) / bounds.width, (size.height - margin * 2) / bounds.height, 1.4)
+        if s > 1, s < 1.1 { s = 1 } // 100% reads better than 104% and still fits.
         scale = min(max(s, Self.scales.lowerBound), Self.scales.upperBound)
         offset = CGSize(width: -bounds.midX * scale, height: -bounds.midY * scale)
     }
