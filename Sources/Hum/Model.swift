@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import Kit
 import SwiftUI
 
@@ -52,6 +52,20 @@ struct SavedState: Codable, Equatable {
     var master: Double
     var mixes: [Mix]
     var sleepMinutes: Int?
+
+    /// A state file edited by hand or from an older build: volumes in range, the right count, no silent or duplicate mixes.
+    func sanitized() -> SavedState {
+        func clamp(_ v: Double) -> Double { v.isFinite ? min(1, max(0, v)) : 0 }
+        var seen = Set(Mix.presets.map(\.id))
+        let clean = mixes.compactMap { mix -> Mix? in
+            guard seen.insert(mix.id).inserted else { return nil }
+            let fixed = Mix(id: mix.id, name: mix.name, vector: mix.vector.map(clamp))
+            return fixed.sounds.isEmpty ? nil : fixed
+        }
+        let count = Sound.allCases.count
+        let vols = volumes.count == count ? volumes.map(clamp) : Array(repeating: 0, count: count)
+        return SavedState(volumes: vols, master: clamp(master), mixes: clean, sleepMinutes: nil)
+    }
 }
 
 enum Sleep {
@@ -117,8 +131,12 @@ final class HumModel: ObservableObject {
 
     init(demo: Bool = false) {
         isDemo = demo
-        guard !demo, let saved = Storage.load(SavedState.self, app: "Hum", file: "state.json") else { return }
-        if saved.volumes.count == Sound.allCases.count { volumes = saved.volumes }
+        guard !demo, !Desktop.isSnapshot else { return }
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.flushSave() }
+        }
+        guard let saved = Storage.load(SavedState.self, app: "Hum", file: "state.json")?.sanitized() else { return }
+        volumes = saved.volumes
         master = saved.master
         mixes = saved.mixes
         selection = matchingMix?.id
@@ -145,7 +163,13 @@ final class HumModel: ObservableObject {
 
     var activeCount: Int { volumes.filter { $0 > 0 }.count }
 
-    var title: String { matchingMix?.name ?? (activeCount == 0 ? "Silence" : "Your Mix") }
+    /// The selected mix when it is what is playing (a saved mix may share its volumes with a preset), else the first match.
+    var currentMix: Mix? {
+        if let id = selection, let mix = allSounds.first(where: { $0.id == id }), mix.matches(volumes) { return mix }
+        return matchingMix
+    }
+
+    var title: String { currentMix?.name ?? (activeCount == 0 ? "Silence" : "Your Mix") }
 
     var subtitle: String {
         if activeCount == 0 { return "Turn on a sound below to begin" }
@@ -258,10 +282,26 @@ final class HumModel: ObservableObject {
     }
 
     /// Replaces a saved mix's volumes with the current ones.
-    func update(_ mix: Mix) {
-        guard let i = mixes.firstIndex(where: { $0.id == mix.id }) else { return }
-        mixes[i] = Mix(id: mix.id, name: mix.name, vector: volumes)
+    func update(_ mix: Mix, undo: UndoManager?) {
+        guard let i = mixes.firstIndex(where: { $0.id == mix.id }), activeCount > 0 else { return }
+        let old = mixes[i]
+        mixes[i] = Mix(id: mix.id, name: old.name, vector: volumes)
         selection = mix.id
+        undo?.registerUndo(withTarget: self) { model in
+            MainActor.assumeIsolated { model.restore(old, undo: undo) }
+        }
+        undo?.setActionName("Update Mix")
+    }
+
+    private func restore(_ mix: Mix, undo: UndoManager?) {
+        guard let i = mixes.firstIndex(where: { $0.id == mix.id }) else { return }
+        let current = mixes[i]
+        mixes[i] = mix
+        if selection == mix.id && !mix.matches(volumes) { selection = matchingMix?.id }
+        undo?.registerUndo(withTarget: self) { model in
+            MainActor.assumeIsolated { model.restore(current, undo: undo) }
+        }
+        undo?.setActionName("Update Mix")
     }
 
     // MARK: Playback
@@ -283,7 +323,8 @@ final class HumModel: ObservableObject {
         engine.core.fade(to: 1, over: Self.fadeIn)
         isPlaying = true
         sleepFading = false
-        if let minutes = sleepMinutes, sleepEnd == nil { sleepEnd = Date().addingTimeInterval(TimeInterval(minutes * 60)) }
+        now = Date()
+        if let minutes = sleepMinutes, sleepEnd == nil { sleepEnd = now.addingTimeInterval(TimeInterval(minutes * 60)) }
         startTimers()
     }
 
@@ -307,6 +348,7 @@ final class HumModel: ObservableObject {
     func setSleep(minutes: Int?) {
         sleepMinutes = minutes
         sleepEnd = nil
+        now = Date()
         if sleepFading {
             sleepFading = false
             if isPlaying { engine?.core.fade(to: 1, over: 2) }
@@ -341,12 +383,19 @@ final class HumModel: ObservableObject {
         meter.decibels = -60
     }
 
+    /// The sleep timer ran out: stop, and set the timer back to Off so the next Play is not cut short.
+    func finishSleep() {
+        pause()
+        sleepMinutes = nil
+    }
+
     private func tick() {
-        now = Date()
+        // Only a running sleep timer needs the clock; publishing it otherwise redraws the window for nothing.
         guard isPlaying, let end = sleepEnd, let minutes = sleepMinutes else { return }
+        now = Date()
         let remaining = end.timeIntervalSince(now)
         if remaining <= 0 {
-            pause()
+            finishSleep()
             return
         }
         if !sleepFading && remaining <= Sleep.fadeWindow(total: TimeInterval(minutes * 60)) {
@@ -377,5 +426,13 @@ final class HumModel: ObservableObject {
         let work = DispatchWorkItem { Storage.save(state, app: "Hum", file: "state.json") }
         saveWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    /// Quitting within half a second of a change still saves it.
+    private func flushSave() {
+        guard let work = saveWork, !work.isCancelled else { return }
+        work.cancel()
+        saveWork = nil
+        Storage.save(SavedState(volumes: volumes, master: master, mixes: mixes, sleepMinutes: nil), app: "Hum", file: "state.json")
     }
 }

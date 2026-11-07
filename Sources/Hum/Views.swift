@@ -85,7 +85,7 @@ struct Sidebar: View {
                     MixRow(mix: mix).tag(mix.id)
                         .contextMenu {
                             Button("Rename…") { model.renaming = mix }
-                            Button("Update with Current Sounds") { model.update(mix) }
+                            Button("Update with Current Sounds") { model.update(mix, undo: undoManager) }
                                 .disabled(model.activeCount == 0)
                             Divider()
                             Button("Delete", role: .destructive) { model.delete(mix, undo: undoManager) }
@@ -179,7 +179,7 @@ struct HeroCard: View {
             }
             .padding(24)
         }
-        .frame(height: 206)
+        .frame(minHeight: 206, maxHeight: 320)
         .animation(.snappy, value: model.sleepEnd)
     }
 }

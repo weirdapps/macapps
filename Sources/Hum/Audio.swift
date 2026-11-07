@@ -43,7 +43,7 @@ enum Sound: String, CaseIterable, Codable, Identifiable {
 
     var symbol: String {
         switch self {
-        case .white: "circle.hexagongrid.fill"
+        case .white: "waveform.path"
         case .pink: "aqi.medium"
         case .brown: "aqi.low"
         case .rain: "cloud.rain.fill"

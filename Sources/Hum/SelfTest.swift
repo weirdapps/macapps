@@ -219,6 +219,55 @@ enum SelfTest {
             check(model.master == 1, "master volume clamps at full")
             model.adjustMaster(by: -5)
             check(model.master == 0, "master volume clamps at silence")
+
+            // A saved mix with the same volumes as a preset is titled by its own name once selected.
+            let twin = HumModel(demo: true)
+            twin.apply(Mix.presets[1])
+            twin.saveCurrent(as: "  Storm  ", undo: nil)
+            check(twin.title == "Storm", "a saved twin of a preset shows its own name", twin.title)
+            check(twin.mixes.first?.name == "Storm", "mix names are trimmed")
+            twin.saveCurrent(as: "   ", undo: nil)
+            check(twin.mixes.last?.name == "Mix 2", "a blank name falls back to the next free name", twin.mixes.last?.name ?? "")
+
+            // Update with Current Sounds can be undone and redone.
+            let undo = UndoManager()
+            undo.groupsByEvent = false
+            let editing = HumModel(demo: true)
+            editing.apply(Mix(name: "A", volumes: [.fan: 0.5]))
+            editing.saveCurrent(as: "Fan Only", undo: nil)
+            let saved = editing.mixes[0]
+            editing.setVolume(0.9, for: .rain)
+            undo.beginUndoGrouping()
+            editing.update(saved, undo: undo)
+            undo.endUndoGrouping()
+            check(editing.mixes[0].volume(.rain) == 0.9 && editing.mixes[0].name == "Fan Only", "update keeps the name and takes the new volumes")
+            undo.undo()
+            check(editing.mixes[0].volume(.rain) == 0 && editing.mixes[0].volume(.fan) == 0.5, "undo restores the old volumes")
+            undo.redo()
+            check(editing.mixes[0].volume(.rain) == 0.9, "redo applies the update again")
+            editing.clearMix()
+            editing.update(editing.mixes[0], undo: nil)
+            check(editing.mixes[0].volume(.fan) == 0.5, "updating with every sound off is refused, so a mix never turns silent")
+
+            // The sleep timer is one shot: when it runs out it stops and goes back to Off.
+            let sleeper = HumModel.demo
+            check(sleeper.sleepMinutes == 30 && sleeper.isPlaying, "demo starts with a running sleep timer")
+            sleeper.finishSleep()
+            check(!sleeper.isPlaying && sleeper.sleepMinutes == nil && sleeper.sleepRemaining == nil, "a finished sleep timer stops and resets to Off")
         }
+
+        // A damaged or hand edited state file loads safely.
+        let bad = SavedState(volumes: [2, -1, .nan, 0.5, 0, 0], master: 7,
+                             mixes: [Mix(id: Mix.presets[0].id, name: "Clash", volumes: [.pink: 0.3]), Mix(name: "Empty", volumes: [:]),
+                                     Mix(name: "Loud", volumes: [.rain: 4]), Mix(name: "Unicode \u{1F327}\u{FE0F} Ünïcødé", volumes: [.waves: 0.4])],
+                             sleepMinutes: 45)
+        let clean = bad.sanitized()
+        check(clean.volumes == [1, 0, 0, 0.5, 0, 0] && clean.master == 1, "loaded volumes are clamped to 0...1", "\(clean.volumes) \(clean.master)")
+        check(clean.mixes.map(\.name) == ["Loud", "Unicode \u{1F327}\u{FE0F} Ünïcødé"], "silent mixes and ids that clash with presets are dropped",
+              clean.mixes.map(\.name).joined(separator: ","))
+        check(clean.mixes.first?.volume(.rain) == 1, "a saved mix louder than full is clamped")
+        check(clean.sleepMinutes == nil, "the sleep timer never comes back after a relaunch")
+        check(SavedState(volumes: [0.5], master: 0.5, mixes: [], sleepMinutes: nil).sanitized().volumes.count == Sound.allCases.count,
+              "a state from a build with a different sound count still loads")
     }
 }
