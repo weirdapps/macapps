@@ -1,4 +1,6 @@
 import AppKit
+import ImageIO
+import UniformTypeIdentifiers
 
 /// `Arrow --selftest`: exercises geometry, hit testing, the pointer state machine, undo, crop and export.
 @MainActor
@@ -229,11 +231,116 @@ enum SelfTest {
             b.crop = CGRect(x: 0, y: 0, width: 10, height: 10)
             b.load(image(300, 200), name: "Next")
             check(b.annotations.isEmpty && b.crop == nil && b.fullRect.width == 300, "loading an image resets marks and crop")
-            check(b.effects.pixelated?.width == 300 && b.effects.blurred?.height == 200, "redaction sources match the image")
+            check(b.effects.blurred?.width == 300 && b.effects.blurred?.height == 200, "blur source matches the image")
             let png = Renderer.png(image(40, 30), pixelScale: 1)
             check(png.map { b.load(data: $0, name: "Data") } == true && b.fullRect.width == 40, "loads PNG data")
             let demo = Demo.board()
             check(demo.rendered()?.width == Int(Demo.size.width) && demo.annotations.count == 12, "demo renders")
+        }
+
+        // Loading odd input.
+        do {
+            let (b, um) = board(200, 100)
+            check(!b.load(data: Data(), name: "Empty") && b.fullRect.width == 200, "empty data is refused and keeps the image")
+            check(!b.load(data: Data("not an image".utf8), name: "Junk") && b.fullRect.width == 200, "junk data is refused")
+            check(!b.load(url: URL(string: "https://example.com/a.png")!), "a web address is never fetched")
+            let missing = FileManager.default.temporaryDirectory.appendingPathComponent("arrow-missing-\(UUID().uuidString).png")
+            check(!b.load(url: missing), "a missing file is refused")
+            // A photo taken in portrait: 40 x 20 pixels stored, EXIF orientation 6 (rotate 90 degrees).
+            let data = NSMutableData()
+            if let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) {
+                CGImageDestinationAddImage(dest, image(40, 20), [kCGImagePropertyOrientation: 6] as CFDictionary)
+                _ = CGImageDestinationFinalize(dest)
+            }
+            check(b.load(data: data as Data, name: "Portrait") && b.fullRect.size == CGSize(width: 20, height: 40), "EXIF orientation is applied")
+            check(Board.pixelScale(dpi: 72) == 1 && Board.pixelScale(dpi: 144) == 2 && Board.pixelScale(dpi: 216) == 3, "screenshot densities")
+            check(Board.pixelScale(dpi: 300) == 1 && Board.pixelScale(dpi: 0) == 1 && Board.pixelScale(dpi: .nan) == 1 && Board.pixelScale(dpi: 720) == 1,
+                  "a print density does not shrink the canvas")
+            _ = um
+        }
+
+        // Replacing the image never loses work silently.
+        do {
+            let (b, um) = board(800, 600)
+            b.tool = .rectangle
+            drag(b, CGPoint(x: 100, y: 100), CGPoint(x: 300, y: 250), um)
+            undo(um) { b.load(image(300, 200), name: "Pasted") }
+            check(b.annotations.isEmpty && b.fullRect.width == 300, "a new image replaces the marks")
+            check(um.canUndo && um.undoActionName == "Open Image", "replacing marked up work is undoable")
+            um.undo()
+            check(b.annotations.count == 1 && b.fullRect.width == 800 && b.imageName == "Test", "undo brings back the image and its marks")
+            um.redo()
+            check(b.fullRect.width == 300 && b.annotations.isEmpty, "redo opens the new image again")
+            b.load(image(100, 100), name: "Third") // Registers nothing, so no group: an empty group would count as an undo step.
+            check(!um.canUndo, "opening over an unmarked image leaves no stale undo steps")
+        }
+
+        // Pixelation averages blocks aligned to the box, so thin text turns into solid tiles.
+        do {
+            let w = 400, h = 200
+            let cg = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                               space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            cg.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+            cg.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            cg.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 1))
+            for y in stride(from: 0, to: h, by: 6) { cg.fill(CGRect(x: 0, y: y, width: w, height: 1)) }
+            let lines = cg.makeImage()!
+            let (b, _) = board()
+            b.load(lines, name: "Lines")
+            b.annotations = [Annotation(kind: .redact, start: CGPoint(x: 13, y: 7), end: CGPoint(x: 377, y: 151), color: red, width: 4)]
+            if let img = b.rendered() {
+                let samples = [(15, 9), (100, 60), (200, 100), (375, 149), (376, 10), (14, 150)].map { pixel(img, $0.0, $0.1).r }
+                check(samples.allSatisfy { $0 > 90 && $0 < 245 }, "pixelate averages every block, edges included")
+                let outside = pixel(img, 390, 3).r
+                check(outside == 0 || outside == 255, "pixelate leaves the outside sharp")
+            } else { check(false, "pixelate renders") }
+            let block = Renderer.blockSize(box: CGRect(x: 0, y: 0, width: 288, height: 56), imageSize: CGSize(width: 1600, height: 1000))
+            check(block >= 12 && block <= 20, "a text row gets a few tall blocks")
+            check(Renderer.blockSize(box: CGRect(x: 0, y: 0, width: 1, height: 1), imageSize: CGSize(width: 50, height: 50)) >= 6, "tiny boxes still pixelate")
+        }
+
+        // The colour wheel reports every step of a drag; they make one undo step.
+        do {
+            let (b, um) = board()
+            b.tool = .line
+            drag(b, CGPoint(x: 10, y: 10), CGPoint(x: 200, y: 200), um)
+            let start = Date()
+            undo(um) { b.setColor(RGBA(hex: 0x112233), continuous: true, now: start) }
+            // The later steps must register nothing (outside a group that would raise).
+            b.setColor(RGBA(hex: 0x445566), continuous: true, now: start.addingTimeInterval(0.1))
+            b.setColor(RGBA(hex: 0x778899), continuous: true, now: start.addingTimeInterval(0.2))
+            check(b.annotations[0].color == RGBA(hex: 0x778899), "colour wheel recolours live")
+            um.undo()
+            check(b.annotations[0].color == RGBA(hex: 0xFF3B30) && b.annotations.count == 1, "one undo reverts a whole colour wheel drag")
+        }
+
+        // Plain keys belong to the canvas only.
+        do {
+            let (b, _) = board()
+            check(b.acceptsPlainKeys, "plain keys work on the canvas")
+            b.windowIsKey = false
+            check(!b.acceptsPlainKeys, "plain keys pass through to a Save or Colors panel")
+            b.windowIsKey = true
+            b.tool = .text
+            b.pointerDown(CGPoint(x: 100, y: 100), tolerance: 4)
+            b.pointerUp(moved: false)
+            check(!b.acceptsPlainKeys, "plain keys pass through while typing a label")
+            check(!Board().acceptsPlainKeys, "no plain keys without an image")
+        }
+
+        // Big images make their blur off the main thread, and a late result never lands on a newer image.
+        do {
+            let (b, _) = board()
+            b.load(image(3000, 2400), name: "Big")
+            check(b.effects.blurred == nil, "a big image does not block on its blur")
+            let deadline = Date().addingTimeInterval(10)
+            while b.effects.blurred == nil && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            check(b.effects.blurred?.width == 3000, "the blur arrives for the big image")
+            b.load(image(3000, 2400), name: "Big again")
+            b.load(image(120, 80), name: "Small")
+            let settle = Date().addingTimeInterval(3)
+            while Date() < settle { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            check(b.effects.blurred?.width == 120, "a stale blur is dropped")
         }
 
         print(failures == 0 ? "All \(checks) checks passed." : "\(failures) of \(checks) checks failed.")

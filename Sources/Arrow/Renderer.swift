@@ -8,9 +8,8 @@ import UniformTypeIdentifiers
 /// Draws the image and its marks. The same code paints the canvas and the exported PNG, so what you see is what you get.
 /// Every function expects a context whose user space is image pixels with the origin at the top left (y down).
 enum Renderer {
-    /// Pre-computed redaction sources for the whole image; a redaction draws the matching one clipped to its box.
-    struct Effects {
-        var pixelated: CGImage?
+    /// A pre-computed blur of the whole image; a blur redaction draws it clipped to its box.
+    struct Effects: @unchecked Sendable {
         var blurred: CGImage?
     }
 
@@ -20,14 +19,35 @@ enum Renderer {
         let input = CIImage(cgImage: image)
         let extent = input.extent
         let longest = max(extent.width, extent.height)
-        let pixellate = CIFilter.pixellate()
-        pixellate.inputImage = input.clampedToExtent()
-        pixellate.scale = Float(max(8, longest / 110))
-        pixellate.center = .zero
         let blurred = input.clampedToExtent().applyingGaussianBlur(sigma: Double(max(8, longest / 120)))
-        return Effects(
-            pixelated: pixellate.outputImage.flatMap { ciContext.createCGImage($0.cropped(to: extent), from: extent) },
-            blurred: ciContext.createCGImage(blurred.cropped(to: extent), from: extent))
+        return Effects(blurred: ciContext.createCGImage(blurred.cropped(to: extent), from: extent))
+    }
+
+    /// The side of one pixelation block for a redaction box: about a third of the box, so text rows vanish into a few solid tiles.
+    static func blockSize(box: CGRect, imageSize: CGSize) -> CGFloat {
+        let longest = max(imageSize.width, imageSize.height)
+        let low = max(6, longest / 240), high = max(low, longest / 45)
+        return min(high, max(low, min(box.width, box.height) / 3.2)).rounded()
+    }
+
+    /// Averages the image under `box` into near square blocks that start at the box corner, then draws them back hard edged.
+    static func drawPixelated(_ image: CGImage, box: CGRect, _ cg: CGContext) {
+        let full = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        let area = box.integral.intersection(full)
+        guard area.width >= 1, area.height >= 1, let piece = image.cropping(to: area) else { return }
+        let block = blockSize(box: box, imageSize: full.size)
+        let cols = max(1, Int((area.width / block).rounded(.up))), rows = max(1, Int((area.height / block).rounded(.up)))
+        guard let small = CGContext(data: nil, width: cols, height: rows, bitsPerComponent: 8, bytesPerRow: 0,
+                                    space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return }
+        // Each small pixel is the average of one block; the piece fills the grid exactly, so no edge strip shows through.
+        small.interpolationQuality = .high
+        small.draw(piece, in: CGRect(x: 0, y: 0, width: cols, height: rows))
+        guard let tiles = small.makeImage() else { return }
+        cg.saveGState()
+        cg.interpolationQuality = .none
+        drawImage(tiles, in: area, cg)
+        cg.restoreGState()
     }
 
     static func drawImage(_ image: CGImage, in rect: CGRect, _ cg: CGContext) {
@@ -64,7 +84,9 @@ enum Renderer {
             let box = a.box
             guard box.width > 0, box.height > 0 else { return }
             cg.clip(to: box)
-            if let source = a.style == .pixelate ? effects.pixelated : effects.blurred {
+            if a.style == .pixelate {
+                drawPixelated(image, box: box, cg)
+            } else if let source = effects.blurred {
                 drawImage(source, in: full, cg)
             } else {
                 cg.setFillColor(NSColor.gray.cgColor)

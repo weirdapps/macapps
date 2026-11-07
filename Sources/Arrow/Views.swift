@@ -45,7 +45,21 @@ struct ContentView: View {
         .toolbar { ArrowToolbar(board: board) }
         .navigationSubtitle(board.image == nil ? "" : board.imageName)
         .onAppear { board.undoManager = undoManager }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in trackKeyWindow() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in trackKeyWindow() }
         .onChange(of: undoManager) { _, manager in board.undoManager = manager }
+    }
+}
+
+extension ContentView {
+    /// Read after the switch settles: during didResignKey the old window is still key.
+    func trackKeyWindow() {
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                let key = NSApp.keyWindow
+                board.windowIsKey = key != nil && !(key is NSPanel)
+            }
+        }
     }
 }
 
@@ -331,7 +345,7 @@ struct StyleBar: View {
                 ForEach(RGBA.palette, id: \.self) { c in
                     Swatch(color: c, selected: board.color == c) { board.setColor(c) }
                 }
-                ColorPicker("Custom color", selection: Binding(get: { board.color.color }, set: { board.setColor(RGBA(NSColor($0))) }),
+                ColorPicker("Custom color", selection: Binding(get: { board.color.color }, set: { board.setColor(RGBA(NSColor($0)), continuous: true) }),
                             supportsOpacity: false)
                     .labelsHidden()
                     .help("Pick any color")

@@ -329,6 +329,8 @@ final class Board: ObservableObject {
     @Published var crop: CGRect?
     @Published var pendingCrop: CGRect?
     @Published private(set) var editingID: UUID?
+    /// False while a panel (Save, Open, Colors) is the key window, so its text fields get plain keys like Delete and letters.
+    @Published var windowIsKey = true
     @Published var toast: Toast?
     @Published var tool: Tool = .arrow {
         didSet {
@@ -375,6 +377,9 @@ final class Board: ObservableObject {
     var region: CGRect { tool == .crop ? fullRect : (crop ?? fullRect) }
     /// Image pixels per unit of stroke width, so marks look the same on a small and a 5K image.
     var unit: CGFloat { image.map { max(1, CGFloat(max($0.width, $0.height)) / 1400) } ?? 1 }
+
+    /// The plain-key shortcuts (tool letters, Delete, Return, Esc) work only while the canvas has the keyboard.
+    var acceptsPlainKeys: Bool { image != nil && editingID == nil && windowIsKey }
 
     func annotation(_ id: UUID?) -> Annotation? { annotations.first { $0.id == id } }
     var selected: Annotation? { annotation(selection) }
@@ -448,42 +453,130 @@ final class Board: ObservableObject {
 
     // MARK: Loading
 
+    /// Everything that belongs to one open image, so replacing the image can be undone.
+    private struct Document {
+        var image: CGImage?
+        var name: String
+        var url: URL?
+        var pixelScale: CGFloat
+        var effects: Renderer.Effects
+        var annotations: [Annotation]
+        var crop: CGRect?
+    }
+
+    private var document: Document {
+        get { Document(image: image, name: imageName, url: sourceURL, pixelScale: pixelScale, effects: effects, annotations: annotations, crop: crop) }
+        set {
+            endEditing()
+            image = newValue.image
+            imageName = newValue.name
+            sourceURL = newValue.url
+            pixelScale = newValue.pixelScale
+            effects = newValue.effects
+            annotations = newValue.annotations
+            crop = newValue.crop
+            selection = nil
+            pending = nil
+            effectsGeneration += 1
+            if tool == .crop { tool = .arrow }
+        }
+    }
+
+    private func restore(_ old: Document, _ name: String) {
+        let current = document
+        document = old
+        undoManager?.registerUndo(withTarget: self) { board in
+            MainActor.assumeIsolated { board.restore(current, name) }
+        }
+        undoManager?.setActionName(name)
+    }
+
+    /// Images above this many pixels are refused: flattening one would need gigabytes.
+    static let maxPixels = 120_000_000
+    /// Redaction sources for images up to this size are made at once; bigger ones off the main thread.
+    static let syncEffectsPixels = 6_000_000
+    private var effectsGeneration = 0
+
     func load(_ image: CGImage, name: String, pixelScale: CGFloat = 1, url: URL? = nil) {
         endEditing()
-        self.image = image
-        imageName = name
-        sourceURL = url
-        self.pixelScale = max(1, pixelScale)
-        annotations = []
-        selection = nil
-        crop = nil
-        pending = nil
-        if tool == .crop { tool = .arrow }
-        effects = Renderer.effects(for: image)
-        undoManager?.removeAllActions(withTarget: self)
+        let old = document
+        let replacing = old.image != nil && (!old.annotations.isEmpty || old.crop != nil)
+        let small = image.width * image.height <= Self.syncEffectsPixels
+        document = Document(image: image, name: name, url: url, pixelScale: max(1, pixelScale),
+                            effects: small ? Renderer.effects(for: image) : Renderer.Effects(), annotations: [], crop: nil)
+        if !small {
+            let generation = effectsGeneration
+            Task.detached(priority: .userInitiated) {
+                let effects = Renderer.effects(for: image)
+                await MainActor.run {
+                    if self.effectsGeneration == generation { self.effects = effects }
+                }
+            }
+        }
+        // Opening another image over marked up work stays undoable, so a stray paste or drop loses nothing.
+        if replacing, let undoManager {
+            undoManager.registerUndo(withTarget: self) { board in
+                MainActor.assumeIsolated { board.restore(old, "Open Image") }
+            }
+            undoManager.setActionName("Open Image")
+        } else {
+            // Nothing to lose: earlier steps belong to the old image and must not replay onto this one.
+            undoManager?.removeAllActions(withTarget: self)
+        }
+    }
+
+    /// Decodes the first image in `source`, upright: a photo's EXIF orientation is applied.
+    static func decode(_ source: CGImageSource) -> CGImage? {
+        let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let orientation = (props?[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+        guard orientation != 1 else { return CGImageSourceCreateImageAtIndex(source, 0, nil) }
+        let w = (props?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+        let h = (props?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+        let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                        kCGImageSourceCreateThumbnailWithTransform: true,
+                                        kCGImageSourceShouldCacheImmediately: true,
+                                        kCGImageSourceThumbnailMaxPixelSize: max(w, h, 1)]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) ?? CGImageSourceCreateImageAtIndex(source, 0, nil)
+    }
+
+    /// Loads `source`, or says why not. Returns false with a message when the image cannot be used.
+    private func load(source: CGImageSource?, name: String, url: URL? = nil) -> Bool {
+        guard let source, let cg = Self.decode(source), cg.width > 0, cg.height > 0 else {
+            flash("Not an image Arrow can open")
+            return false
+        }
+        guard cg.width * cg.height <= Self.maxPixels else {
+            flash("That image is too large to mark up (\(cg.width) × \(cg.height) px)")
+            return false
+        }
+        load(cg, name: name, pixelScale: Self.pixelScale(of: source), url: url)
+        return true
     }
 
     @discardableResult
     func load(url: URL) -> Bool {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil), let cg = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            flash("Not an image Arrow can open")
-            return false
-        }
-        load(cg, name: url.deletingPathExtension().lastPathComponent, pixelScale: Self.pixelScale(of: source), url: url)
-        return true
+        guard url.isFileURL else { flash("Not an image Arrow can open"); return false }
+        return load(source: CGImageSourceCreateWithURL(url as CFURL, nil), name: url.deletingPathExtension().lastPathComponent, url: url)
     }
 
     @discardableResult
     func load(data: Data, name: String) -> Bool {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil), let cg = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return false }
-        load(cg, name: name, pixelScale: Self.pixelScale(of: source))
-        return true
+        guard !data.isEmpty else { flash("Not an image Arrow can open"); return false }
+        return load(source: CGImageSourceCreateWithData(data as CFData, nil), name: name)
     }
 
+    /// Screenshots are saved at 72 dpi per point (144 dpi on Retina). Any other density, such as a 300 dpi scan, counts as 1.
     static func pixelScale(of source: CGImageSource) -> CGFloat {
         let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
         let dpi = (props?[kCGImagePropertyDPIWidth] as? NSNumber)?.doubleValue ?? 72
-        return max(1, (dpi / 72).rounded())
+        return pixelScale(dpi: dpi)
+    }
+
+    static func pixelScale(dpi: Double) -> CGFloat {
+        guard dpi.isFinite, dpi > 0 else { return 1 }
+        let ratio = dpi / 72
+        let whole = ratio.rounded()
+        return abs(ratio - whole) < 0.05 && (1...3).contains(whole) ? whole : 1
     }
 
     func openPanel() {
@@ -504,7 +597,7 @@ final class Board: ObservableObject {
             return load(url: url)
         }
         for type in [NSPasteboard.PasteboardType.png, .tiff] {
-            if let data = pasteboard.data(forType: type), load(data: data, name: "Pasted image") { return true }
+            if let data = pasteboard.data(forType: type), !data.isEmpty { return load(data: data, name: "Pasted image") }
         }
         flash("The clipboard has no image")
         return false
@@ -512,9 +605,10 @@ final class Board: ObservableObject {
 
     func handleDrop(_ providers: [NSItemProvider]) -> Bool {
         guard let provider = providers.first else { return false }
-        if provider.canLoadObject(ofClass: URL.self) {
+        // A file from Finder keeps its name and folder; an image dragged out of a browser arrives as data.
+        if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                guard let url else { return }
+                guard let url, url.isFileURL else { return }
                 DispatchQueue.main.async { MainActor.assumeIsolated { _ = self.load(url: url) } }
             }
             return true
@@ -531,10 +625,19 @@ final class Board: ObservableObject {
 
     // MARK: Style
 
-    func setColor(_ c: RGBA) {
+    private var lastColorEdit: (id: UUID, time: Date)?
+
+    /// `continuous` is set by the colour wheel, which reports every step of a drag: those merge into one undo step.
+    func setColor(_ c: RGBA, continuous: Bool = false, now: Date = Date()) {
         color = c
         save("color", Int(c.hex))
-        if let id = selection { change("Change Color") { replace(id) { var a = $0; a.color = c; return a } } }
+        guard let id = selection else { return }
+        if continuous, let last = lastColorEdit, last.id == id, now.timeIntervalSince(last.time) < 1.5 {
+            replace(id) { var a = $0; a.color = c; return a }
+        } else {
+            change("Change Color") { replace(id) { var a = $0; a.color = c; return a } }
+        }
+        lastColorEdit = continuous ? (id, now) : nil
     }
 
     /// Live while a slider moves; the caller brackets it with `beginChange` and `commitChange`.

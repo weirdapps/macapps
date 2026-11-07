@@ -38,6 +38,7 @@ struct ArrowCommands: Commands {
 
     private var hasImage: Bool { board.image != nil }
     private var editing: Bool { board.editingID != nil }
+    private var plainKeys: Bool { board.acceptsPlainKeys }
 
     var body: some Commands {
         AppHelpCommands(name: "Arrow")
@@ -49,6 +50,9 @@ struct ArrowCommands: Commands {
             Button("Export PNG…") { board.exportPanel() }.keyboardShortcut("e", modifiers: [.command, .shift]).disabled(!hasImage)
         }
         CommandGroup(replacing: .pasteboard) {
+            Button("Cut") { NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: nil) }
+                .keyboardShortcut("x")
+                .disabled(!editing)
             Button("Copy") {
                 if editing { NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil) } else { board.copyImage() }
             }
@@ -60,31 +64,31 @@ struct ArrowCommands: Commands {
             .keyboardShortcut("v")
             Button("Delete") { board.deleteSelection() }
                 .keyboardShortcut(.delete, modifiers: [])
-                .disabled(board.selection == nil || editing)
+                .disabled(board.selection == nil || !plainKeys)
             Button("Select All Text") { NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil) }
                 .keyboardShortcut("a")
                 .disabled(!editing)
             Divider()
             Button("Remove All Marks") { board.removeAll() }
                 .keyboardShortcut(.delete, modifiers: [.command, .shift])
-                .disabled(board.annotations.isEmpty || editing)
+                .disabled(board.annotations.isEmpty || editing || !board.windowIsKey)
         }
         CommandMenu("Tools") {
             ForEach(Tool.allCases) { tool in
                 Toggle(tool.title, isOn: Binding(get: { board.tool == tool }, set: { if $0 { board.tool = tool } }))
                     .keyboardShortcut(KeyEquivalent(tool.key), modifiers: [])
-                    .disabled(!hasImage || editing)
+                    .disabled(!plainKeys)
             }
             Divider()
             Button("Apply Crop") { board.applyCrop() }
                 .keyboardShortcut(.return, modifiers: [])
-                .disabled(board.tool != .crop)
+                .disabled(board.tool != .crop || !plainKeys)
             Button("Reset Crop") { board.resetCrop() }
                 .keyboardShortcut("r", modifiers: [.command, .option])
                 .disabled(board.crop == nil)
             Button(board.tool == .crop ? "Cancel Crop" : "Deselect") { board.escape() }
                 .keyboardShortcut(.escape, modifiers: [])
-                .disabled(editing || (board.tool != .crop && board.selection == nil))
+                .disabled(!plainKeys || (board.tool != .crop && board.selection == nil))
         }
     }
 }
