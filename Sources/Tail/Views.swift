@@ -374,6 +374,13 @@ struct LogTextView: NSViewRepresentable {
                     lengths.removeFirst(drop)
                     changed = true
                 }
+                // Drop lines at the end the source replaced (a finished line that was shown unfinished).
+                while let lastID = ids.last, !Self.contains(lines, lastID) {
+                    let length = lengths.removeLast()
+                    ids.removeLast()
+                    storage.deleteCharacters(in: NSRange(location: storage.length - length, length: length))
+                    changed = true
+                }
                 // Append the lines newer than the last one shown.
                 let last = ids.last ?? Int.min
                 var start = lines.count
@@ -399,6 +406,17 @@ struct LogTextView: NSViewRepresentable {
             } else if changed && follow {
                 scrollToBottom()
             }
+        }
+
+        /// Binary search: the lines are ordered by id.
+        static func contains(_ lines: [LogLine], _ id: Int) -> Bool {
+            var low = 0, high = lines.count
+            while low < high {
+                let mid = (low + high) / 2
+                if lines[mid].id == id { return true }
+                if lines[mid].id < id { low = mid + 1 } else { high = mid }
+            }
+            return false
         }
 
         private func scrollToBottom() {

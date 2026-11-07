@@ -33,6 +33,9 @@ struct LineSplitter {
 
     mutating func reset() { partial = Data() }
 
+    /// Starts from an unfinished line read elsewhere, so its rest joins it when the newline arrives.
+    mutating func prime(_ data: Data) { partial = data }
+
     /// UTF-8 (invalid bytes become U+FFFD), without a trailing carriage return or terminal colour codes.
     static func decode(_ bytes: Data) -> String {
         var bytes = bytes
@@ -52,6 +55,12 @@ struct LineSplitter {
             if next == "[" {
                 // CSI: parameters, then one final byte in @...~.
                 while let c = iterator.next(), !(0x40...0x7E).contains(c.value) {}
+            } else if next == "]" {
+                // OSC (window titles, hyperlinks): up to BEL or ESC backslash.
+                while let c = iterator.next() {
+                    if c.value == 0x07 { break }
+                    if c == "\u{1B}" { _ = iterator.next(); break }
+                }
             }
         }
         return out
@@ -67,6 +76,8 @@ enum TailReader {
         /// True when the whole file was read, so the first line is complete.
         var reachedStart: Bool
         var size: UInt64
+        /// The bytes of a last line that has no newline yet (it is also the last of `lines`).
+        var partial = Data()
     }
 
     static let chunkSize = 64 << 10
@@ -101,10 +112,15 @@ enum TailReader {
         for piece in chunks.reversed() { data.append(piece) }
         var splitter = LineSplitter()
         var lines = splitter.feed(data)
+        var partial = splitter.partial
         if let last = splitter.flush() { lines.append(last) }
-        if position > 0, !lines.isEmpty { lines.removeFirst() }
+        if position > 0, !lines.isEmpty {
+            lines.removeFirst()
+            // With no newline at all in the bytes read, the unfinished line is not its whole self.
+            if lines.isEmpty { partial = Data() }
+        }
         if lines.count > count { lines.removeFirst(lines.count - count) }
-        return Result(lines: lines, reachedStart: position == 0, size: size)
+        return Result(lines: lines, reachedStart: position == 0, size: size, partial: partial)
     }
 
     static func pread(_ fd: Int32, offset: UInt64, count: Int) -> Data {
@@ -125,6 +141,8 @@ final class Follower: @unchecked Sendable {
     enum Event: Equatable, Sendable {
         case loaded(lines: [String], reachedStart: Bool, size: UInt64)
         case appended([String], size: UInt64)
+        /// The first line finishes the unfinished line shown last; the rest are new.
+        case completed([String], size: UInt64)
         case truncated
         case rotated
         case missing
@@ -141,6 +159,8 @@ final class Follower: @unchecked Sendable {
     private var offset: UInt64 = 0
     private var splitter = LineSplitter()
     private var partialSince: Date?
+    /// The unfinished line in the splitter is already on screen, so its next version replaces it.
+    private var shownPartial = false
     private var source: DispatchSourceFileSystemObject?
     private var timer: DispatchSourceTimer?
     private var hasLoaded = false
@@ -192,6 +212,7 @@ final class Follower: @unchecked Sendable {
         isMissing = false
         splitter.reset()
         partialSince = nil
+        shownPartial = false
         let size = UInt64(info.st_size)
         if hasLoaded {
             // A new file at the path: rotation, or the file came back. Its lines are all new.
@@ -202,6 +223,10 @@ final class Follower: @unchecked Sendable {
             hasLoaded = true
             let tail = TailReader.read(fd: fd, size: size, lines: initialLines)
             offset = size
+            if !tail.partial.isEmpty, tail.partial.count <= Self.readChunk {
+                splitter.prime(tail.partial)
+                shownPartial = true
+            }
             handler(.loaded(lines: tail.lines, reachedStart: tail.reachedStart, size: size))
         }
         watch(fd)
@@ -238,6 +263,7 @@ final class Follower: @unchecked Sendable {
         if size < offset {
             splitter.reset()
             partialSince = nil
+            shownPartial = false
             offset = 0
             handler(.truncated)
         }
@@ -246,6 +272,7 @@ final class Follower: @unchecked Sendable {
             let tail = TailReader.read(fd: fd, size: size, lines: initialLines)
             splitter.reset()
             partialSince = nil
+            shownPartial = false
             offset = size
             handler(.appended(tail.lines, size: size))
             return
@@ -258,7 +285,9 @@ final class Follower: @unchecked Sendable {
             lines += splitter.feed(data)
         }
         partialSince = splitter.partial.isEmpty ? nil : Date()
-        if !lines.isEmpty { handler(.appended(lines, size: size)) }
+        guard !lines.isEmpty else { return }
+        handler(shownPartial ? .completed(lines, size: size) : .appended(lines, size: size))
+        shownPartial = false
     }
 
     /// Checks the path itself: gone, replaced by a new file, or just grown without an event.
@@ -278,9 +307,12 @@ final class Follower: @unchecked Sendable {
         }
         readNew()
         // A line without its newline yet: show it once the writer has paused for a moment.
-        if let since = partialSince, Date().timeIntervalSince(since) >= staleAfter, let line = splitter.flush() {
+        // It stays in the splitter: when the writer finishes it, the whole line replaces this one.
+        if let since = partialSince, Date().timeIntervalSince(since) >= staleAfter, !splitter.partial.isEmpty {
             partialSince = nil
-            handler(.appended([line], size: offset))
+            let line = LineSplitter.decode(splitter.partial)
+            handler(shownPartial ? .completed([line], size: offset) : .appended([line], size: offset))
+            shownPartial = true
         }
     }
 }
@@ -489,6 +521,12 @@ final class LogSource: ObservableObject, Identifiable {
             self.size = size
             state = .following
             ingest(lines)
+        case .completed(let lines, let size):
+            self.size = size
+            state = .following
+            guard let first = lines.first else { return }
+            complete(first)
+            ingest(Array(lines.dropFirst()))
         case .truncated:
             size = 0
             ingest(["The file was truncated. Following it from the start."], notice: true)
@@ -504,13 +542,18 @@ final class LogSource: ObservableObject, Identifiable {
 
     private var hasContent: Bool { !lines.isEmpty || !pending.isEmpty }
 
-    func ingest(_ texts: [String], notice: Bool = false) {
-        guard !texts.isEmpty else { return }
-        let new = texts.map { raw -> LogLine in
-            let text = raw.utf8.count > Self.maxLineLength ? String(raw.prefix(Self.maxLineLength)) + " [line cut]" : raw
+    private func makeLines(_ texts: [String], notice: Bool) -> [LogLine] {
+        texts.map { raw -> LogLine in
+            let cut = raw.utf8.count > Self.maxLineLength && raw.count > Self.maxLineLength
+            let text = cut ? String(raw.prefix(Self.maxLineLength)) + " [line cut]" : raw
             defer { nextID += 1 }
             return LogLine(id: nextID, text: text, isNotice: notice, tone: notice ? nil : highlighter.tone(of: text))
         }
+    }
+
+    func ingest(_ texts: [String], notice: Bool = false) {
+        guard !texts.isEmpty else { return }
+        let new = makeLines(texts, notice: notice)
         if isPaused {
             pending += new
             if pending.count > maxLines { pending.removeFirst(pending.count - maxLines) }
@@ -518,6 +561,22 @@ final class LogSource: ObservableObject, Identifiable {
         } else {
             append(new)
         }
+    }
+
+    /// The writer finished the line that was shown unfinished: the whole line takes its place.
+    func complete(_ text: String) {
+        if isPaused, !pending.isEmpty {
+            if pending.last?.isNotice == false { pending.removeLast() }
+            ingest([text])
+            return
+        }
+        if let last = lines.last, !last.isNotice {
+            lines.removeLast()
+            if last.tone == .red { errorCount -= 1 }
+            if visible.last?.id == last.id { visible.removeLast() }
+            if !follow, unseen > 0 { unseen -= 1 }
+        }
+        append(makeLines([text], notice: false))
     }
 
     private func append(_ new: [LogLine]) {

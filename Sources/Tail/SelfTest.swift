@@ -20,6 +20,7 @@ enum SelfTest {
         tailReading(dir)
         bigFile(dir)
         following(dir)
+        openedMidLine(dir)
         filtering()
         highlighting()
         buffer()
@@ -41,6 +42,8 @@ enum SelfTest {
         _ = s.feed(Data("tail".utf8))
         check(s.flush() == "tail" && s.flush() == nil, "flush returns the unfinished line once")
         check(s.feed(Data("\n\n".utf8)) == ["", ""], "empty lines are kept")
+        check(LineSplitter.stripEscapes("\u{1B}]0;build\u{07}ok \u{1B}]8;;https://x\u{1B}\\link") == "ok link",
+              "terminal title and hyperlink codes are stripped")
     }
 
     // MARK: Tail reading
@@ -102,7 +105,7 @@ enum SelfTest {
         var lines: [String] {
             all.flatMap { event -> [String] in
                 switch event {
-                case .loaded(let lines, _, _), .appended(let lines, _): lines
+                case .loaded(let lines, _, _), .appended(let lines, _), .completed(let lines, _): lines
                 default: []
                 }
             }
@@ -145,6 +148,9 @@ enum SelfTest {
 
         append("no newline", to: url)
         check(wait { recorder.lines.last == "no newline" }, "an unfinished line shows once the writer pauses")
+        append(" finished\n", to: url)
+        check(wait { recorder.all.last == .completed(["no newline finished"], size: 60) },
+              "a finished line replaces its unfinished start")
 
         // copytruncate style rotation: the same file emptied in place.
         try? FileHandle(forWritingTo: url).truncate(atOffset: 0)
@@ -167,6 +173,19 @@ enum SelfTest {
         write("back again\n", to: url)
         check(wait { recorder.all.count(where: { $0 == .rotated }) > rotations && recorder.lines.last == "back again" },
               "a file that comes back is followed again")
+    }
+
+    /// A file whose last line is unfinished when it is opened.
+    private static func openedMidLine(_ dir: URL) {
+        let url = dir.appendingPathComponent("midline.log")
+        write("one\ntw", to: url)
+        let recorder = Recorder()
+        let follower = Follower(path: url.path, initialLines: 5, pollInterval: 0.15, staleAfter: 0.3) { recorder.add($0) }
+        follower.start()
+        defer { follower.stop() }
+        check(wait { recorder.all.first == .loaded(lines: ["one", "tw"], reachedStart: true, size: 6) }, "an unfinished last line is loaded")
+        append("o\nthree\n", to: url)
+        check(wait { recorder.all.last == .completed(["two", "three"], size: 14) }, "its rest joins it instead of starting a new line")
     }
 
     // MARK: Filtering and highlighting
@@ -229,5 +248,32 @@ enum SelfTest {
         check(source.state == .waiting && source.visible.first?.isNotice == true, "a missing file shows a notice")
         source.ingest([String(repeating: "x", count: 20_000)])
         check(source.lines.last.map { $0.text.count < 9_000 } == true, "very long lines are cut")
+        let wide = String(repeating: "日", count: 4_000)
+        source.ingest([wide])
+        check(source.lines.last?.text == wide, "a long line of wide characters under the limit is not cut")
+
+        // A line shown unfinished, then finished by the writer.
+        let partial = LogSource(url: URL(fileURLWithPath: "/tmp/p.log"), maxLines: 10, highlighter: Highlighter(rules: HighlightRule.defaults))
+        partial.ingest(["start", "ERROR half"])
+        partial.handle(.completed(["ERROR half done", "next"], size: 40))
+        check(partial.lines.map(\.text) == ["start", "ERROR half done", "next"] && partial.visible.map(\.text) == partial.lines.map(\.text),
+              "a completed line replaces the unfinished one")
+        check(partial.errorCount == 1, "a completed error line is counted once")
+        check(LogTextView.Coordinator.contains(partial.visible, partial.visible[1].id)
+              && !LogTextView.Coordinator.contains(partial.visible, 1), "the view finds which lines are still shown")
+        partial.togglePause()
+        partial.ingest(["held"])
+        partial.handle(.completed(["held more"], size: 50))
+        check(partial.pendingCount == 1 && partial.lines.last?.text == "next", "completing a held line keeps it held")
+        partial.togglePause()
+        check(partial.lines.last?.text == "held more", "the completed held line appears on resume")
+
+        // Opening a big log must not stall the window.
+        let big = LogSource(url: URL(fileURLWithPath: "/tmp/big.log"), maxLines: 100_000, highlighter: Highlighter(rules: HighlightRule.defaults))
+        let lines = (0..<100_000).map { "2026-11-07 09:41:\($0 % 60) INFO  [http] GET /api/products/\($0) 200 14ms" }
+        let start = Date()
+        big.handle(.loaded(lines: lines, reachedStart: true, size: 8_000_000))
+        let elapsed = Date().timeIntervalSince(start)
+        check(big.lines.count == 100_000 && elapsed < 1.5, "100,000 lines are taken in \(String(format: "%.2f", elapsed)) s")
     }
 }
