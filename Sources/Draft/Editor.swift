@@ -21,7 +21,7 @@ struct WritingEditor: NSViewRepresentable {
         scroll.borderType = .noBorder
         scroll.scrollerStyle = .overlay
 
-        let tv = NSTextView(usingTextLayoutManager: false)
+        let tv = PageTextView(usingTextLayoutManager: false)
         tv.isRichText = false
         tv.importsGraphics = false
         tv.allowsUndo = true
@@ -78,7 +78,7 @@ struct WritingEditor: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate {
         var parent: WritingEditor
-        weak var textView: NSTextView?
+        weak var textView: PageTextView?
         weak var scrollView: NSScrollView?
         private(set) var style: EditorStyle?
         private var lastCaretLine: CGFloat = -1
@@ -95,6 +95,9 @@ struct WritingEditor: NSViewRepresentable {
             tv.insertionPointColor = rgb(theme.caret)
             tv.selectedTextAttributes = [.backgroundColor: rgb(theme.selection)]
             tv.typingAttributes = baseAttributes(new)
+            var hint = baseAttributes(new)
+            hint[.foregroundColor] = theme.dimmed
+            tv.placeholder = NSAttributedString(string: "Start writing.", attributes: hint)
             tv.appearance = NSAppearance(named: theme.isDark ? .darkAqua : .aqua)
             scrollView?.appearance = tv.appearance
             if let storage = tv.textStorage, storage.length > 0,
@@ -112,7 +115,7 @@ struct WritingEditor: NSViewRepresentable {
         private func baseAttributes(_ s: EditorStyle) -> [NSAttributedString.Key: Any] {
             let p = NSMutableParagraphStyle()
             p.lineHeightMultiple = s.lineHeight
-                        return [.font: s.font, .foregroundColor: rgb(s.theme.ink), .paragraphStyle: p]
+        return [.font: s.font, .foregroundColor: rgb(s.theme.ink), .paragraphStyle: p]
         }
 
         private func restyle(_ storage: NSTextStorage, range: NSRange, style s: EditorStyle) {
@@ -160,6 +163,8 @@ struct WritingEditor: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             refreshFocus()
+            // While a selection is being made, leave the scroll position alone so dragging does not fight it.
+            guard let tv = textView, tv.selectedRange().length == 0 else { return }
             DispatchQueue.main.async { [weak self] in self?.centerCaret(animated: true) }
         }
 
@@ -225,3 +230,23 @@ struct WritingEditor: NSViewRepresentable {
     }
 }
 
+
+/// The text view, with a quiet "Start writing." on an empty page.
+final class PageTextView: NSTextView {
+    var placeholder: NSAttributedString? { didSet { if string.isEmpty { needsDisplay = true } } }
+    private var wasEmpty = true
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, let placeholder else { return }
+        placeholder.draw(at: textContainerOrigin)
+    }
+
+    override func didChangeText() {
+        super.didChangeText()
+        if string.isEmpty != wasEmpty {
+            wasEmpty = string.isEmpty
+            needsDisplay = true
+        }
+    }
+}

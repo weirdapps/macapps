@@ -61,26 +61,48 @@ struct TextStats: Equatable {
 
     var readingLabel: String { words == 0 ? "No reading time" : "\(readingMinutes) min read" }
 
+    /// Texts this long have their counts worked out off the main thread, a moment after typing pauses.
+    static func isLarge(_ text: String) -> Bool { text.utf8.count > 200_000 }
+
     /// A word is a run of letters, digits or marks, which may contain an apostrophe or hyphen between letters
-    /// ("don't", "well-known" count once). Markdown symbols and punctuation never count.
+    /// ("don't", "well-known" count once) and a point or comma between digits ("3.14", "1,000" count once).
+    /// Chinese and Japanese characters, written without spaces, count one word each. Markdown symbols and
+    /// punctuation never count.
     static func countWords(_ text: String) -> Int {
+        enum Joiner { case none, letters, digits }
         var count = 0
         var inWord = false
-        var pendingJoiner = false
+        var lastDigit = false
+        var joiner = Joiner.none
         for scalar in text.unicodeScalars {
             let p = scalar.properties
-            if p.isAlphabetic || p.numericType != nil || p.generalCategory == .nonspacingMark {
-                if !inWord { count += 1 }
+            if isUnspaced(scalar) {
+                count += 1
+                inWord = false
+                joiner = .none
+                continue
+            }
+            let digit = p.numericType != nil
+            if p.isAlphabetic || digit || p.generalCategory == .nonspacingMark {
+                if !(inWord && (joiner != .digits || digit)) { count += 1 }
                 inWord = true
-                pendingJoiner = false
-            } else if inWord, !pendingJoiner, "'’-‐".unicodeScalars.contains(scalar) {
-                pendingJoiner = true
+                lastDigit = digit
+                joiner = .none
+            } else if inWord, joiner == .none, "'\u{2019}-\u{2010}".unicodeScalars.contains(scalar) {
+                joiner = .letters
+            } else if inWord, joiner == .none, lastDigit, ".,".unicodeScalars.contains(scalar) {
+                joiner = .digits
             } else {
                 inWord = false
-                pendingJoiner = false
+                joiner = .none
             }
         }
         return count
+    }
+
+    /// Han ideographs, hiragana and katakana.
+    private static func isUnspaced(_ s: Unicode.Scalar) -> Bool {
+        s.properties.isIdeographic || (0x3041...0x3096).contains(s.value) || (0x30A1...0x30FA).contains(s.value)
     }
 }
 
@@ -328,14 +350,17 @@ final class Prefs: ObservableObject {
     init(store: UserDefaults?) {
         self.store = store
         typeface = store?.string(forKey: "typeface").flatMap(Typeface.init) ?? .serif
-        size = store?.object(forKey: "size") as? Double ?? 18
-        lineHeight = store?.object(forKey: "lineHeight") as? Double ?? 1.5
-        measure = store?.object(forKey: "measure") as? Double ?? 66
+        // Stored values are clamped, so a hand-edited or stale default never gives a zero size or goal.
+        size = Self.clamp(store?.object(forKey: "size") as? Double ?? 18, Self.sizes)
+        lineHeight = Self.clamp(store?.object(forKey: "lineHeight") as? Double ?? 1.5, Self.lineHeights)
+        measure = Self.clamp(store?.object(forKey: "measure") as? Double ?? 66, Self.measures)
         theme = store?.string(forKey: "theme").flatMap(Theme.init) ?? .paper
         focus = store?.string(forKey: "focus").flatMap(FocusMode.init) ?? .off
         typewriter = store?.object(forKey: "typewriter") as? Bool ?? true
-        goal = store?.object(forKey: "goal") as? Int ?? 500
+        goal = Self.clamp(store?.object(forKey: "goal") as? Int ?? 500, Self.goals)
     }
+
+    static func clamp<T: Comparable>(_ value: T, _ range: ClosedRange<T>) -> T { min(range.upperBound, max(range.lowerBound, value)) }
 
     func style(markdown: Bool) -> EditorStyle {
         EditorStyle(typeface: typeface, size: CGFloat(size), lineHeight: CGFloat(lineHeight), measure: Int(measure),

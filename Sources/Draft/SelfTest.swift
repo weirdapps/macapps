@@ -22,6 +22,16 @@ enum SelfTest {
         check(TextStats.countWords("1984 was 3 words") == 4, "numbers are words")
         check(TextStats.countWords("end -- start") == 2, "a lone dash is not a word")
         check(TextStats("héllo 👋").characters == 7, "characters count graphemes")
+        check(TextStats.countWords("漢字を書く") == 5, "Chinese and Japanese characters count one each")
+        check(TextStats.countWords("Draft 漢字 test") == 4, "mixed scripts")
+        check(TextStats.countWords("pi is 3.14 and 1,000 more") == 6, "decimal and grouped numbers count once")
+        check(TextStats.countWords("in 1984. Then") == 3, "a full stop after a number still ends the word")
+        check(TextStats.countWords("rock'n'roll") == 1, "repeated apostrophes stay in one word")
+        check(TextStats.countWords("'quoted' word-") == 2, "quotes and a trailing hyphen are not words")
+        check(TextStats.countWords("\n\n\t  ") == 0, "whitespace only has no words")
+        let big = String(repeating: "alpha beta gamma delta. ", count: 50_000)
+        check(TextStats.isLarge(big) && !TextStats.isLarge(Demo.text), "long texts are counted off the main thread")
+        check(TextStats.countWords(big) == 200_000, "a 1 MB text counts exactly")
 
         // Reading time.
         check(TextStats("").readingMinutes == 0, "no words, no reading time")
@@ -93,6 +103,33 @@ enum SelfTest {
         prefs.bigger()
         check(prefs.size == 32, "Bigger stops at the largest size")
         check(Typeface.serif.font(size: 18).pointSize == 18, "serif font resolves")
+
+        // Preferences: stored values round trip and out of range values are clamped.
+        let suite = "draft-selftest-\(UUID().uuidString)"
+        if let defaults = UserDefaults(suiteName: suite) {
+            let saved = Prefs(store: defaults)
+            saved.theme = .night
+            saved.goal = 750
+            let loaded = Prefs(store: defaults)
+            check(loaded.theme == .night && loaded.goal == 750, "preferences persist")
+            defaults.set(0, forKey: "goal")
+            defaults.set(0.0, forKey: "size")
+            defaults.set(500.0, forKey: "measure")
+            let clamped = Prefs(store: defaults)
+            check(clamped.goal == Prefs.goals.lowerBound, "a zero goal is clamped")
+            check(clamped.size == Prefs.sizes.lowerBound && clamped.measure == Prefs.measures.upperBound, "sizes are clamped")
+            defaults.removePersistentDomain(forName: suite)
+        } else {
+            check(false, "temporary defaults suite")
+        }
+        check(Prefs.shared !== Prefs.demo, "the screenshot never shares the user's preferences")
+
+        // Documents: empty and odd files.
+        check(DraftDocument.decode(Data()) == "", "an empty file opens as an empty page")
+        check(DraftDocument.encode("") == Data(), "an empty page saves as an empty file")
+        check(FocusRange.range(in: "\n\n\n" as NSString, caret: 1, mode: .sentence).length == 0, "blank lines focus nothing")
+        check(FocusRange.range(in: "abc" as NSString, caret: 99, mode: .paragraph) == NSRange(location: 0, length: 3),
+              "a caret past the end is clamped")
 
         print(failures == 0 ? "All \(checks) checks passed." : "\(failures) of \(checks) checks failed.")
         return failures == 0 ? 0 : 1

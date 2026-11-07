@@ -11,9 +11,11 @@ struct ContentView: View {
     var initialCaret = 0
     @State private var typing = false
     @State private var typeTick = 0
+    /// The latest counts, worked out off the main thread; nil until the first count arrives.
+    @State private var counted: TextStats?
 
     var body: some View {
-        let stats = TextStats(text)
+        let stats = counted ?? TextStats(text)
         let theme = prefs.theme
         VStack(spacing: 0) {
             WritingEditor(text: $text, style: prefs.style(markdown: isMarkdown), initialCaret: initialCaret) { typeTick &+= 1 }
@@ -34,6 +36,16 @@ struct ContentView: View {
         .frame(minWidth: 520, minHeight: 360)
         .onAppear { session.update(words: stats.words) }
         .onChange(of: stats.words) { _, words in session.update(words: words) }
+        // Counting is off the main thread, so a very long file never makes typing stutter.
+        .task(id: text) {
+            let current = text
+            if TextStats.isLarge(current) {
+                try? await Task.sleep(for: .milliseconds(300))
+                if Task.isCancelled { return }
+            }
+            let counted = await Task.detached(priority: .userInitiated) { TextStats(current) }.value
+            if !Task.isCancelled { self.counted = counted }
+        }
         .task(id: typeTick) {
             guard typeTick > 0 else { return }
             typing = true
