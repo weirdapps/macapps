@@ -71,7 +71,7 @@ struct BoardCommands: Commands {
             Divider()
             Button("Rename Board…") { store.renamingBoard = board?.id }
                 .disabled(board == nil)
-            Button("Delete Board") { if let board { store.deleteBoard(board.id) } }
+            Button("Delete Board…") { store.confirmingDeleteBoard = board?.id }
                 .keyboardShortcut(.delete, modifiers: [.command, .shift])
                 .disabled(board == nil)
         }

@@ -149,6 +149,67 @@ enum SelfTest {
         step { store.addCard(" Ship it ", to: doneColumn, in: id) }
         check(store.boards[0].columns[2].cards.last?.title == "Ship it", "quick add trims the title")
 
+        // Deselecting in the sidebar keeps a board shown.
+        let shown = store.selection
+        store.selection = nil
+        check(store.selection == shown && store.current != nil, "a nil selection keeps the current board")
+
+        // New boards get unique names.
+        let named = BoardStore(boards: [Board.new("Untitled Board"), Board.new("Untitled Board 2"), Board.new("X")], persists: false)
+        named.addBoard()
+        check(named.boards.last?.name == "Untitled Board 3", "a new board gets a name no other board has")
+        check(named.boards.map(\.name) != [] && Set(named.boards.map(\.name)).count == named.boards.count, "board names stay unique")
+
+        // Drags only count when the dropped text is ours.
+        let dragStore = BoardStore(boards: Demo.boards, persists: false)
+        let dragCard = dragStore.boards[0].columns[0].cards[0]
+        _ = dragStore.beginDrag(.card(dragCard.id), text: dragCard.title)
+        check(dragStore.claimDrag(text: "Text from another app") == nil, "foreign dropped text moves nothing")
+        check(dragStore.draggingCard == nil, "a foreign drop ends the stale drag")
+        _ = dragStore.beginDrag(.card(dragCard.id), text: dragCard.title)
+        check(dragStore.claimDrag(text: dragCard.title) == .card(dragCard.id), "our own drop claims the drag")
+        check(dragStore.claimDrag(text: dragCard.title) == nil, "a drag is claimed only once")
+        _ = dragStore.beginDrag(.column(dragStore.boards[0].columns[1].id), text: "Doing")
+        check(dragStore.draggingColumn != nil && dragStore.draggingCard == nil, "a column drag replaces a card drag")
+
+        // Lenient loading.
+        let legacy = """
+        {"boards":[{"name":"Old","columns":[{"name":"To do","cards":[{"title":"Kept","label":"magenta"},{"title":"Émoji 🧪 ünïcode"}]}]}]}
+        """
+        if let old = BoardFile.decode(Data(legacy.utf8)) {
+            let cards = old.boards.first?.columns.first?.cards ?? []
+            check(cards.map(\.title) == ["Kept", "Émoji 🧪 ünïcode"], "a file with missing fields still loads its cards")
+            check(cards.first?.label == CardLabel.none && cards.first?.notes == "" && old.boards[0].archived.isEmpty, "missing or unknown fields fall back to defaults")
+            check(old.selection == nil, "a file without a selection loads")
+        } else {
+            check(false, "a file with missing fields still loads its cards")
+            check(false, "missing or unknown fields fall back to defaults")
+            check(false, "a file without a selection loads")
+        }
+        check(BoardFile.decode(Data()) == nil, "an empty file is unreadable")
+        check(BoardFile.decode(Data("{\"boards\": 12}".utf8)) == nil, "a file of the wrong shape is unreadable")
+        check(BoardFile.decode(Data("{\"boards\": []}".utf8))?.boards.isEmpty == true, "a file with no boards loads empty")
+
+        // An unreadable file is set aside, never overwritten.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("BoardSelfTest-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let broken = dir.appendingPathComponent("boards.json")
+        try? Data("not json".utf8).write(to: broken)
+        let moved = BoardFile.setAside(broken, now: now, timeZone: cal.timeZone)
+        check(moved?.lastPathComponent == "boards (unreadable 2026-11-07 220000).json", "the unreadable file is renamed with the time")
+        check(!FileManager.default.fileExists(atPath: broken.path) && moved.map { (try? Data(contentsOf: $0)) == Data("not json".utf8) } == true,
+              "the unreadable file keeps its contents")
+        try? FileManager.default.removeItem(at: dir)
+
+        // Moving a card whose column vanished, or into a missing column, does nothing.
+        var odd = Board.new("Odd")
+        let lone = Card(title: "Lone")
+        odd.addCard(lone, to: odd.columns[0].id)
+        check(!odd.moveCard(lone.id, to: UUID(), near: nil) && odd.cardCount == 1, "a move to a missing column keeps the card")
+        odd.columns = []
+        odd.restore(lone.id)
+        check(odd.archiveDone() == 0 && odd.columns.isEmpty, "a board without columns survives archive and restore")
+
         print("\(checks - failures)/\(checks) checks passed")
         return failures == 0 ? 0 : 1
     }

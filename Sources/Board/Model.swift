@@ -151,6 +151,58 @@ struct Board: Codable, Identifiable, Hashable, Sendable {
 struct BoardFile: Codable {
     var boards: [Board]
     var selection: UUID?
+
+    /// Decodes a saved file. Missing fields fall back to their defaults, so an older or hand-edited file still opens.
+    static func decode(_ data: Data) -> BoardFile? {
+        try? JSONDecoder().decode(BoardFile.self, from: data)
+    }
+
+    /// Moves an unreadable file aside, next to where it was, so the next save cannot overwrite it. Returns the new location.
+    @discardableResult
+    static func setAside(_ url: URL, now: Date = Date(), timeZone: TimeZone = .current) -> URL? {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = timeZone
+        f.dateFormat = "yyyy-MM-dd HHmmss"
+        let name = url.deletingPathExtension().lastPathComponent
+        let target = url.deletingLastPathComponent().appendingPathComponent("\(name) (unreadable \(f.string(from: now))).json")
+        return (try? FileManager.default.moveItem(at: url, to: target)) == nil ? nil : target
+    }
+}
+
+// Lenient decoding: every field but the structure itself may be missing on disk.
+
+extension Card {
+    private enum Keys: String, CodingKey { case id, title, notes, label, due }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        id = (try? c.decodeIfPresent(UUID.self, forKey: .id)) ?? UUID()
+        title = (try? c.decodeIfPresent(String.self, forKey: .title)) ?? ""
+        notes = (try? c.decodeIfPresent(String.self, forKey: .notes)) ?? ""
+        label = (try? c.decodeIfPresent(CardLabel.self, forKey: .label)) ?? CardLabel.none
+        due = (try? c.decodeIfPresent(Date.self, forKey: .due)) ?? nil
+    }
+}
+
+extension Column {
+    private enum Keys: String, CodingKey { case id, name, cards }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        id = (try? c.decodeIfPresent(UUID.self, forKey: .id)) ?? UUID()
+        name = (try? c.decodeIfPresent(String.self, forKey: .name)) ?? "Untitled"
+        cards = try c.decodeIfPresent([Card].self, forKey: .cards) ?? []
+    }
+}
+
+extension Board {
+    private enum Keys: String, CodingKey { case id, name, columns, archived }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        id = (try? c.decodeIfPresent(UUID.self, forKey: .id)) ?? UUID()
+        name = (try? c.decodeIfPresent(String.self, forKey: .name)) ?? "Untitled Board"
+        columns = try c.decodeIfPresent([Column].self, forKey: .columns) ?? []
+        archived = try c.decodeIfPresent([Card].self, forKey: .archived) ?? []
+    }
 }
 
 // MARK: - Search and dates
@@ -206,18 +258,27 @@ enum DueStatus: Equatable {
 @MainActor
 final class BoardStore: ObservableObject {
     @Published private(set) var boards: [Board]
-    @Published var selection: UUID? { didSet { if selection != oldValue { save() } } }
+    @Published var selection: UUID? {
+        didSet {
+            // A click on empty sidebar space would leave no board shown while boards exist; keep the old one.
+            if selection == nil, let old = oldValue, boards.contains(where: { $0.id == old }) { selection = old; return }
+            if selection != oldValue { save() }
+        }
+    }
     @Published var search = ""
     /// The column whose quick add field is open.
     @Published var quickAdd: UUID?
     /// The column whose name is being edited in place.
     @Published var renamingColumn: UUID?
     @Published var renamingBoard: UUID?
+    @Published var confirmingDeleteBoard: UUID?
     @Published var showArchive = false
     @Published var searchRequest = 0
-    /// What is being dragged, so drop targets can act on it without decoding pasteboard data.
-    var draggingCard: UUID?
-    var draggingColumn: UUID?
+    /// What is being dragged inside the window, and the text it put on the pasteboard.
+    private(set) var dragging: Drag?
+    private var dragText = ""
+    var draggingCard: UUID? { if case .card(let id) = dragging { id } else { nil } }
+    var draggingColumn: UUID? { if case .column(let id) = dragging { id } else { nil } }
 
     weak var undoManager: UndoManager?
     private let persists: Bool
@@ -227,7 +288,7 @@ final class BoardStore: ObservableObject {
         if let boards {
             self.boards = boards
             self.selection = selection ?? boards.first?.id
-        } else if persists, let file = Storage.load(BoardFile.self, app: "Board", file: "boards.json") {
+        } else if persists, let file = BoardStore.loadFile() {
             self.boards = file.boards
             self.selection = file.selection.flatMap { id in file.boards.contains { $0.id == id } ? id : nil } ?? file.boards.first?.id
         } else {
@@ -235,6 +296,15 @@ final class BoardStore: ObservableObject {
             self.boards = [first]
             self.selection = first.id
         }
+    }
+
+    /// Reads the saved boards. A file that exists but cannot be read is set aside rather than overwritten.
+    private static func loadFile() -> BoardFile? {
+        let url = Storage.url(app: "Board", file: "boards.json")
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        if let file = BoardFile.decode(data) { return file }
+        BoardFile.setAside(url)
+        return nil
     }
 
     static var demo: BoardStore {
@@ -276,7 +346,8 @@ final class BoardStore: ObservableObject {
 
     func addBoard() {
         var board = Board.new("Untitled Board")
-        if boards.contains(where: { $0.name == board.name }) { board.name = "Untitled Board \(boards.count + 1)" }
+        var n = 2
+        while boards.contains(where: { $0.name == board.name }) { board.name = "Untitled Board \(n)"; n += 1 }
         apply(boards + [board], selection: board.id, action: "New Board")
         renamingBoard = board.id
     }
@@ -317,8 +388,34 @@ final class BoardStore: ObservableObject {
         renamingColumn = new
     }
 
-    func beginDrag(card: UUID) { draggingCard = card; draggingColumn = nil }
-    func beginDrag(column: UUID) { draggingColumn = column; draggingCard = nil }
+    // MARK: Dragging
+
+    enum Drag: Equatable { case card(UUID), column(UUID) }
+
+    /// Starts an in-window drag and returns the item for the pasteboard (the card title or column name as text).
+    func beginDrag(_ drag: Drag, text: String) -> NSItemProvider {
+        dragging = drag
+        dragText = text
+        return NSItemProvider(object: text as NSString)
+    }
+
+    /// The drag a drop belongs to, only when the dropped text is what this window put on the pasteboard,
+    /// so a cancelled drag followed by text dropped from another app moves nothing. Always ends the drag.
+    func claimDrag(text: String?) -> Drag? {
+        defer { dragging = nil; dragText = "" }
+        guard let dragging, text == dragText else { return nil }
+        return dragging
+    }
+
+    /// Reads a drop's text, then hands the matching in-window drag to `body`.
+    func acceptDrop(_ providers: [NSItemProvider], _ body: @escaping @MainActor (Drag) -> Void) -> Bool {
+        guard dragging != nil, let provider = providers.first else { return false }
+        _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+            let text = (object as? NSString).map { String($0) }
+            Task { @MainActor in if let drag = self.claimDrag(text: text) { body(drag) } }
+        }
+        return true
+    }
 
     // MARK: Undo and saving
 

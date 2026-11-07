@@ -93,7 +93,7 @@ struct BoardToolbar: ToolbarContent {
 struct Sidebar: View {
     @ObservedObject var store: BoardStore
     @State private var renameText = ""
-    @State private var confirmDelete: Board?
+    private var confirmDelete: Board? { store.boards.first { $0.id == store.confirmingDeleteBoard } }
 
     var body: some View {
         List(selection: $store.selection) {
@@ -104,7 +104,7 @@ struct Sidebar: View {
                         .tag(board.id)
                         .contextMenu {
                             Button("Rename…") { store.renamingBoard = board.id }
-                            Button("Delete Board…", role: .destructive) { confirmDelete = board }
+                            Button("Delete Board…", role: .destructive) { store.confirmingDeleteBoard = board.id }
                         }
                 }
                 .onMove { store.moveBoards(from: $0, to: $1) }
@@ -135,10 +135,10 @@ struct Sidebar: View {
         .onChange(of: store.renamingBoard) { _, id in
             renameText = store.boards.first { $0.id == id }?.name ?? ""
         }
-        .confirmationDialog("Delete “\(confirmDelete?.name ?? "")”?", isPresented: Binding(get: { confirmDelete != nil }, set: { if !$0 { confirmDelete = nil } })) {
+        .confirmationDialog("Delete “\(confirmDelete?.name ?? "")”?", isPresented: Binding(get: { confirmDelete != nil }, set: { if !$0 { store.confirmingDeleteBoard = nil } })) {
             Button("Delete Board", role: .destructive) {
                 if let board = confirmDelete { store.deleteBoard(board.id) }
-                confirmDelete = nil
+                store.confirmingDeleteBoard = nil
             }
         } message: {
             Text("Its columns and cards go with it. You can undo this.")
@@ -324,10 +324,7 @@ struct ColumnView: View {
         .padding(.top, 12)
         .padding(.bottom, 9)
         .contentShape(Rectangle())
-        .onDrag {
-            store.beginDrag(column: column.id)
-            return NSItemProvider(object: column.name as NSString)
-        }
+        .onDrag { store.beginDrag(.column(column.id), text: column.name) }
     }
 
     private func commitName() {
@@ -365,7 +362,7 @@ struct ColumnView: View {
                 .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.cardBackground))
                 .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.blue.opacity(0.8), lineWidth: 1.5))
                 .onSubmit(submitDraft)
-                .onExitCommand { closeQuickAdd() }
+                .onExitCommand { draft = ""; closeQuickAdd() }
                 .onAppear { DispatchQueue.main.async { draftFocused = true } }
                 .onChange(of: draftFocused) { _, focused in if !focused { closeQuickAdd() } }
         } else {
@@ -472,10 +469,7 @@ struct CardView: View {
         }
         .contextMenu { menu }
         .background(GeometryReader { geo in Color.clear.onAppear { height = geo.size.height }.onChange(of: geo.size.height) { _, h in height = h } })
-        .onDrag {
-            store.beginDrag(card: card.id)
-            return NSItemProvider(object: card.title as NSString)
-        }
+        .onDrag { store.beginDrag(.card(card.id), text: card.title) }
         .onDrop(of: [.text], delegate: CardDropDelegate(store: store, board: board.id, column: column.id,
                                                         card: card.id, columnIndex: board.columnIndex(column.id) ?? 0,
                                                         height: height, edge: $dropEdge))
@@ -739,17 +733,13 @@ struct CardDropDelegate: DropDelegate {
     func performDrop(info: DropInfo) -> Bool {
         let after = edge == .bottom
         edge = nil
-        if let dragged = store.draggingCard {
-            store.draggingCard = nil
-            store.moveCard(dragged, in: board, to: column, near: card, after: after)
-            return true
+        let (store, board, column, card, columnIndex) = (store, board, column, card, columnIndex)
+        return store.acceptDrop(info.itemProviders(for: [.text])) { drag in
+            switch drag {
+            case .card(let dragged): store.moveCard(dragged, in: board, to: column, near: card, after: after)
+            case .column(let dragged): store.change("Move Column", board: board) { $0.moveColumn(dragged, to: columnIndex) }
+            }
         }
-        if let dragged = store.draggingColumn {
-            store.draggingColumn = nil
-            store.change("Move Column", board: board) { $0.moveColumn(dragged, to: columnIndex) }
-            return true
-        }
-        return false
     }
 }
 
@@ -769,16 +759,12 @@ struct ColumnDropDelegate: DropDelegate {
 
     func performDrop(info: DropInfo) -> Bool {
         targeted = false
-        if let dragged = store.draggingCard {
-            store.draggingCard = nil
-            store.moveCard(dragged, in: board, to: column, near: nil)
-            return true
+        let (store, board, column, index) = (store, board, column, index)
+        return store.acceptDrop(info.itemProviders(for: [.text])) { drag in
+            switch drag {
+            case .card(let dragged): store.moveCard(dragged, in: board, to: column, near: nil)
+            case .column(let dragged): store.change("Move Column", board: board) { $0.moveColumn(dragged, to: index) }
+            }
         }
-        if let dragged = store.draggingColumn {
-            store.draggingColumn = nil
-            store.change("Move Column", board: board) { $0.moveColumn(dragged, to: index) }
-            return true
-        }
-        return false
     }
 }
