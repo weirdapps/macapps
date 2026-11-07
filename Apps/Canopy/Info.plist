@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key><string>Canopy</string>
+	<key>CFBundleDisplayName</key><string>Canopy</string>
+	<key>CFBundleExecutable</key><string>Canopy</string>
+	<key>CFBundleIdentifier</key><string>com.weirdapps.canopy</string>
+	<key>CFBundlePackageType</key><string>APPL</string>
+	<key>CFBundleShortVersionString</key><string>1.0.0</string>
+	<key>CFBundleVersion</key><string>1</string>
+	<key>CFBundleIconFile</key><string>AppIcon</string>
+	<key>CFBundleGetInfoString</key><string>Explore big JSON files as a tree</string>
+	<key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+	<key>LSMinimumSystemVersion</key><string>14.0</string>
+	<key>NSHighResolutionCapable</key><true/>
+	<key>NSHumanReadableCopyright</key><string>Explore big JSON files as a tree. © 2026 Dimitrios Plessas</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key><string>JSON Document</string>
+			<key>CFBundleTypeRole</key><string>Viewer</string>
+			<key>LSHandlerRank</key><string>Alternate</string>
+			<key>LSItemContentTypes</key><array><string>public.json</string></array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key><string>JSON Lines Document</string>
+			<key>CFBundleTypeRole</key><string>Viewer</string>
+			<key>LSHandlerRank</key><string>Alternate</string>
+			<key>LSItemContentTypes</key><array><string>org.jsonlines.jsonl</string></array>
+		</dict>
+	</array>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key><string>org.jsonlines.jsonl</string>
+			<key>UTTypeDescription</key><string>JSON Lines Document</string>
+			<key>UTTypeConformsTo</key><array><string>public.text</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key><array><string>jsonl</string><string>ndjson</string></array>
+			</dict>
+		</dict>
+	</array>
+</dict>
+</plist>
