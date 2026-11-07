@@ -86,6 +86,30 @@ enum SelfTest {
         check(Instrument.allCases.allSatisfy { $0 == .chromatic || $0.strings.count == $0.tuningName.split(separator: " ").count - 1 },
               "every preset names its strings")
 
+        // Odd input never crashes and never invents a pitch.
+        check(Pitch.detect([], sampleRate: 48000) == nil, "empty buffer has no pitch")
+        check(Pitch.detect(Pitch.sine(440, sampleRate: 48000, count: 64), sampleRate: 48000) == nil, "too short a buffer has no pitch")
+        var broken = Pitch.sine(440, sampleRate: 48000, count: 4096)
+        broken[100] = .nan
+        check(Pitch.detect(broken, sampleRate: 48000).map { $0.frequency.isFinite } ?? true, "a NaN sample never gives a NaN pitch")
+        check(Pitch.detect(Pitch.sine(440, sampleRate: 0, count: 4096), sampleRate: 0) == nil, "zero sample rate has no pitch")
+        check(Tuning.target(for: .infinity, instrument: .chromatic, a4: 440).midi == 69 &&
+              Tuning.target(for: 0, instrument: .chromatic, a4: 440).midi >= 0 &&
+              Tuning.target(for: -5, instrument: .guitar, a4: 440).string != nil, "impossible frequencies do not crash")
+
+        // High sample rate interfaces still reach the bass low E.
+        for rate in [96000.0, 192000.0] {
+            let size = Listener.windowSize(for: rate)
+            let found = Pitch.detect(Pitch.sine(41.2, sampleRate: rate, count: size), sampleRate: rate)?.frequency ?? 0
+            check(found > 0 && abs(Music.cents(found, from: 41.2)) < 1, "41.2 Hz at \(Int(rate)) Hz read as \(found)")
+        }
+        check(Listener.windowSize(for: 44100) == 4096 && Listener.windowSize(for: 48000) == 4096, "4096 samples at 48 kHz")
+
+        // A device change while paused must not switch the microphone back on.
+        let idle = Listener { _ in }
+        idle.configurationChanged()
+        check(!idle.isRunning, "a paused tuner stays off when the input changes")
+
         print("\(passed + failed) checks, \(passed) passed, \(failed) failed")
         return failed == 0 ? 0 : 1
     }

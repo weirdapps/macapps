@@ -502,7 +502,7 @@ struct SettingsView: View {
                             Text("Loud").font(.system(size: 11))
                         }
                         .labelsHidden()
-                        Text("\(Int(model.gate)) dB").monospacedDigit().foregroundStyle(.secondary).frame(width: 52, alignment: .trailing)
+                        Text("\(Int(model.gate)) dB".replacingOccurrences(of: "-", with: "\u{2212}")).monospacedDigit().foregroundStyle(.secondary).frame(width: 52, alignment: .trailing)
                     }
                 }
             } footer: {

@@ -58,7 +58,9 @@ enum Pitch {
         let denominator = a - 2 * b + c
         let shift = denominator > 0 ? 0.5 * (a - c) / denominator : 0
         let period = Double(t) + min(1, max(-1, shift))
-        return (sampleRate / period, clarity)
+        let frequency = sampleRate / period
+        guard frequency.isFinite, frequency > 0, clarity.isFinite else { return nil }
+        return (frequency, clarity)
     }
 
     /// The loudness of `samples` in dB relative to full scale; silence is -120.
@@ -152,7 +154,8 @@ enum Tuning {
     /// is clearly past it), otherwise the locked string or the nearest open string.
     static func target(for frequency: Double, instrument: Instrument, a4: Double, locked: Int? = nil,
                        previous: Target? = nil) -> Target {
-        let value = Music.midiValue(frequency, a4: a4)
+        let raw = Music.midiValue(frequency, a4: a4)
+        let value = raw.isFinite ? min(127, max(0, raw)) : 69
         let strings = instrument.strings
         if strings.isEmpty {
             if let previous, previous.string == nil, abs(value - Double(previous.midi)) < 0.6 { return previous }
@@ -180,6 +183,10 @@ final class Listener: @unchecked Sendable {
     private var gate = -55.0
     private let deliver: @Sendable (Reading) -> Void
     private var observer: NSObjectProtocol?
+    /// True between `start()` and `stop()`: what the user asked for, not what the engine happens to be doing.
+    private(set) var isRunning = false
+    /// Called on the main queue after the input device changed; false when listening could not resume.
+    var onRestart: ((Bool) -> Void)?
 
     enum Failure: Error { case noInput }
 
@@ -201,28 +208,43 @@ final class Listener: @unchecked Sendable {
             self.queue.async { self.consume(samples, sampleRate: rate) }
         }
         engine.prepare()
-        try engine.start()
+        do { try engine.start() } catch { input.removeTap(onBus: 0); throw error }
+        isRunning = true
         if observer == nil {
             // A new default input (headset plugged in, interface switched) changes the format: start over.
             observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine,
                                                               queue: .main) { [weak self] _ in
-                guard let self else { return }
-                self.stop()
-                try? self.start()
+                self?.configurationChanged()
             }
         }
     }
 
+    /// Restarts on the new input, but only when the user is listening: a paused tuner keeps the microphone off.
+    func configurationChanged() {
+        guard isRunning else { return }
+        stop()
+        let resumed = (try? start()) != nil
+        onRestart?(resumed)
+    }
+
     func stop() {
+        isRunning = false
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         queue.async { self.window.removeAll(); self.pending = 0 }
     }
 
+    /// Samples per analysis window: long enough to hold two periods of a low bass E (41 Hz) at any sample rate.
+    static func windowSize(for sampleRate: Double) -> Int {
+        var size = 4096
+        while Double(size) < sampleRate * 2 / 30 { size *= 2 }
+        return size
+    }
+
     var sampleRate: Double { engine.inputNode.outputFormat(forBus: 0).sampleRate }
 
     private func consume(_ samples: [Float], sampleRate: Double) {
-        let size = sampleRate > 60000 ? 8192 : 4096
+        let size = Self.windowSize(for: sampleRate)
         window.append(contentsOf: samples)
         if window.count > size { window.removeFirst(window.count - size) }
         pending += samples.count
@@ -347,6 +369,9 @@ final class TuneModel: ObservableObject {
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.receive(reading) } }
         }
         self.listener = listener
+        listener.onRestart = { [weak self] resumed in
+            MainActor.assumeIsolated { self?.inputChanged(resumed) }
+        }
         listener.setGate(gate)
         do {
             try listener.start()
@@ -357,6 +382,20 @@ final class TuneModel: ObservableObject {
         } catch {
             access = .noDevice
             isListening = false
+        }
+    }
+
+    /// The default input changed while listening: show the new device, or the empty state if it is gone.
+    private func inputChanged(_ resumed: Bool) {
+        guard isListening else { return }
+        if resumed, AVCaptureDevice.default(for: .audio) != nil {
+            deviceName = AVCaptureDevice.default(for: .audio)?.localizedName ?? "Microphone"
+            sampleRate = listener?.sampleRate ?? sampleRate
+        } else {
+            listener?.stop()
+            isListening = false
+            level = 0
+            access = .noDevice
         }
     }
 
@@ -388,7 +427,7 @@ final class TuneModel: ObservableObject {
         guard isListening else { return }
         let meter = min(1, max(0, (reading.decibels + 70) / 60))
         level = max(meter, level * 0.8)
-        guard let frequency = reading.frequency else {
+        guard let frequency = reading.frequency, frequency.isFinite, frequency > 0 else {
             let quiet = Date().timeIntervalSince(lastVoiced)
             if quiet > 0.35 { isHolding = display != nil; recent.removeAll() }
             if quiet > 8 { display = nil }
