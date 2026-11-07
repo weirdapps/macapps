@@ -160,7 +160,7 @@ struct CanvasArea: View {
                 editor.fitZoom = EditorState.fit(document.image, in: geo.size)
             }
         }
-        .background(Color(nsColor: .underPageBackgroundColor))
+        .background(Color(nsColor: .underPageBackgroundColor), ignoresSafeAreaEdges: [])
         .overlay {
             if targeted {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)

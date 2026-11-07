@@ -22,6 +22,8 @@ enum SelfTest {
         check(RGBA(hex: "#FFA300") == RGBA(0xFFA300), "hex parses with a hash")
         check(RGBA(hex: "ff004d80") == RGBA(r: 255, g: 0, b: 77, a: 128), "eight-digit hex carries alpha")
         check(RGBA(hex: "12345") == nil && RGBA(hex: "GGGGGG") == nil, "bad hex is rejected")
+        check(RGBA(hex: "+FFFFF") == nil && RGBA(hex: "+FFFFFFF") == nil, "a signed number is not a colour")
+        check(RGBA(hex: "ＦＦＦＦＦＦ") == nil && RGBA(hex: "") == nil, "full width digits and empty text are rejected")
         check(RGBA(hex: red.hex8) == red, "hex round trip")
         check(RGBA(r: 1, g: 2, b: 3, a: 128).display == "#010203 50%", "display shows alpha percent")
         check(Set(Palette.presets).count == 16, "palette has 16 distinct colours")
@@ -112,6 +114,23 @@ enum SelfTest {
         if let png = oversize() {
             check((try? PixelImage.importing(png)) == nil, "a 100 px photo is refused")
         }
+        if let png = flat(side: 4000) {
+            let start = Date()
+            do {
+                _ = try PixelImage.importing(png)
+                check(false, "a 4000 px image is refused")
+            } catch {
+                check(error as? PixelError == .tooLarge(4000, 4000) && Date().timeIntervalSince(start) < 0.5,
+                      "a 4000 px image is refused from its header, without decoding")
+            }
+        }
+        check((try? PixelImage.importing(Data())) == nil, "an empty file is not an image")
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("pixel-selftest-\(UUID().uuidString).png")
+        if let png = try? sprite.pngData(scale: 4), (try? png.write(to: tmp)) != nil {
+            check((try? PixelImage.importing(contentsOf: tmp)) == sprite, "importing a PNG file from disk")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+        check((try? PixelImage.importing(contentsOf: tmp)) == nil, "a missing file fails cleanly")
 
         // Editor strokes and undo.
         let doc = PixelDocument(image: PixelImage(width: 8, height: 8))
@@ -176,6 +195,15 @@ enum SelfTest {
 
         print("\(checks - failures)/\(checks) checks passed")
         return failures == 0 ? 0 : 1
+    }
+
+    /// A flat PNG `side` px square, for the size limit.
+    private static func flat(side: Int) -> Data? {
+        guard let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let image = ctx.makeImage() else { return nil }
+        return NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
     }
 
     /// A 100 px PNG with detail, too big to import.

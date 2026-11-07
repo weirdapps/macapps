@@ -23,7 +23,8 @@ struct RGBA: Hashable, Codable {
     init?(hex: String) {
         var s = hex.trimmingCharacters(in: .whitespaces)
         if s.hasPrefix("#") { s.removeFirst() }
-        guard s.count == 6 || s.count == 8, let v = UInt32(s, radix: 16) else { return nil }
+        guard s.count == 6 || s.count == 8, s.allSatisfy(\.isHexDigit), s.allSatisfy(\.isASCII),
+              let v = UInt32(s, radix: 16) else { return nil }
         if s.count == 6 {
             self.init(v)
         } else {
@@ -265,10 +266,30 @@ struct PixelImage: Equatable, Codable {
     /// Reads a PNG (or any image ImageIO knows). A picture exported at a scale is reduced back to its own pixels;
     /// anything still larger than 64 px on a side is refused rather than resampled.
     static func importing(_ data: Data) throws -> PixelImage {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { throw PixelError.unreadable }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { throw PixelError.unreadable }
+        return try importing(source)
+    }
+
+    /// Reads the image file at `url` lazily, so dropping a huge file never loads it whole.
+    static func importing(contentsOf url: URL) throws -> PixelImage {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { throw PixelError.unreadable }
+        return try importing(source)
+    }
+
+    /// The largest picture an import can reduce: a 64 px picture exported at 32x.
+    static let importLimit = 64 * 32
+
+    private static func importing(_ source: CGImageSource) throws -> PixelImage {
+        // Refuse a big photo from its header, before decoding a single pixel.
+        if let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+           let pw = props[kCGImagePropertyPixelWidth] as? Int, let ph = props[kCGImagePropertyPixelHeight] as? Int,
+           max(pw, ph) > importLimit {
+            throw PixelError.tooLarge(pw, ph)
+        }
+        guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { throw PixelError.unreadable }
         let w = image.width, h = image.height
-        guard w > 0, h > 0, w * h <= 4096 * 4096 else { throw PixelError.tooLarge(w, h) }
+        guard w > 0, h > 0 else { throw PixelError.unreadable }
+        guard max(w, h) <= importLimit else { throw PixelError.tooLarge(w, h) }
         var bytes = [UInt8](repeating: 0, count: w * h * 4)
         let drawn = bytes.withUnsafeMutableBytes { buffer -> Bool in
             guard let ctx = CGContext(data: buffer.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,

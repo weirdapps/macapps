@@ -95,6 +95,7 @@ final class EditorState: ObservableObject {
         self.persists = persists
         if persists {
             recents = (UserDefaults.standard.stringArray(forKey: "recentColors") ?? []).compactMap { RGBA(hex: $0) }
+                .reduce(into: []) { list, c in if !c.isClear && !list.contains(c) && list.count < Palette.recentLimit { list.append(c) } }
             let scale = UserDefaults.standard.integer(forKey: "exportScale")
             if Self.exportScales.contains(scale) { exportScale = scale }
         }
@@ -220,8 +221,15 @@ final class EditorState: ObservableObject {
     }
 
     func importImage(at url: URL) {
+        // A dropped Pixel document opens in its own window, as Finder would open it.
+        if url.pathExtension.lowercased() == "pixel" {
+            NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, error in
+                if let error { Task { @MainActor in self.notice = Notice(text: error.localizedDescription, isError: true) } }
+            }
+            return
+        }
         do {
-            let imported = try PixelImage.importing(Data(contentsOf: url))
+            let imported = try PixelImage.importing(contentsOf: url)
             document.replace(with: imported, action: "Import Image", undoManager: undoManager)
             zoom = nil
             notice = Notice(text: "Imported \(url.lastPathComponent) at \(imported.width) × \(imported.height).")
