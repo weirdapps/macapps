@@ -36,7 +36,7 @@ struct Party: Codable, Hashable {
     var vatID = ""
 }
 
-struct Business: Codable, Equatable {
+struct Business: Codable, Hashable {
     var name = ""
     var address = ""
     var email = ""
@@ -51,6 +51,11 @@ struct Business: Codable, Equatable {
     var vatRate: Decimal = 24
 
     var isEmpty: Bool { name.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    /// Whether the details printed on an invoice match (paper size and defaults for new invoices do not count).
+    func sameIdentity(as other: Business) -> Bool {
+        (name, address, email, phone, vatID) == (other.name, other.address, other.email, other.phone, other.vatID)
+    }
 }
 
 struct LineItem: Codable, Identifiable, Hashable {
@@ -80,6 +85,12 @@ struct Invoice: Codable, Identifiable, Hashable {
     var bic = ""
     var paidDate: Date?
     var created = Date()
+    /// Your business details as they were when the invoice was issued (exported, printed or paid), so editing
+    /// Settings later never rewrites an invoice the client already has. Nil while it is a draft: it follows Settings.
+    var seller: Business?
+
+    /// The business details printed on this invoice.
+    func issuer(_ current: Business) -> Business { seller ?? current }
 
     var isPaid: Bool { paidDate != nil }
     var dueDate: Date { Calendar.current.date(byAdding: .day, value: dueDays, to: issueDate) ?? issueDate }
@@ -135,9 +146,12 @@ struct Totals: Equatable {
     var net: Decimal { subtotal - discount }
     var vatTotal: Decimal { vat.reduce(0) { $0 + $1.amount } }
     var total: Decimal { net + vatTotal }
+    /// The discount percent actually applied, clamped to 0...100.
+    var percent: Decimal = 0
 
     init(items: [LineItem], discount percent: Decimal) {
         let pct = Swift.min(Swift.max(percent, 0), 100)
+        self.percent = pct
         var byRate: [Decimal: Decimal] = [:]
         for item in items { byRate[item.vatRate, default: 0] += item.net }
         subtotal = byRate.values.reduce(0, +)
@@ -189,17 +203,30 @@ enum IBAN {
 }
 
 enum Pages {
-    static let single = 9, first = 16, middle = 22
+    /// Capacity in one-line rows: a page with header and totals, a first page, a continuation page.
+    static let single = 9.0, first = 16.0, middle = 22.0
+    /// Characters of a description that fit on one printed line; a longer one wraps to a second, taller row.
+    static let lineChars = 42
 
-    /// Splits `count` line items over pages: the first page carries the header, the last the totals and payment block.
-    static func split(_ count: Int) -> [Range<Int>] {
-        if count <= single { return [0..<count] }
+    /// How much page space an item takes, in one-line rows.
+    static func weight(_ item: LineItem) -> Double { item.description.count > lineChars ? 1.5 : 1 }
+
+    static func split(_ items: [LineItem]) -> [Range<Int>] { split(weights: items.map(weight)) }
+    static func split(_ count: Int) -> [Range<Int>] { split(weights: Array(repeating: 1, count: count)) }
+
+    /// Splits line items over pages: the first page carries the header, the last the totals and payment block.
+    static func split(weights: [Double]) -> [Range<Int>] {
+        let count = weights.count
+        func rest(_ from: Int) -> Double { weights[from...].reduce(0, +) }
+        if rest(0) <= single { return [0..<count] }
         var pages: [Range<Int>] = []
         var start = 0
-        while count - start > single {
-            let take = min(pages.isEmpty ? first : middle, count - start)
-            pages.append(start..<(start + take))
-            start += take
+        while start < count, rest(start) > single {
+            let cap = pages.isEmpty ? first : middle
+            var end = start + 1, used = weights[start]
+            while end < count, used + weights[end] <= cap { used += weights[end]; end += 1 }
+            pages.append(start..<end)
+            start = end
         }
         pages.append(start..<count)
         return pages
@@ -291,22 +318,58 @@ final class InvoiceModel: ObservableObject {
         copy.issueDate = Date()
         copy.created = Date()
         copy.paidDate = nil
+        copy.seller = nil
         invoices.append(copy)
         selection = copy.id
     }
 
     func togglePaid() {
         guard let i = selectedIndex else { return }
-        invoices[i].paidDate = invoices[i].isPaid ? nil : Date()
+        if invoices[i].isPaid {
+            invoices[i].paidDate = nil
+        } else {
+            issue(i)
+            invoices[i].paidDate = Date()
+        }
+    }
+
+    /// Freezes the business details on an invoice that is leaving the app.
+    func issue(_ i: Int) {
+        guard invoices.indices.contains(i), invoices[i].seller == nil, !business.isEmpty else { return }
+        invoices[i].seller = business
+    }
+
+    /// True when the selected invoice was issued with business details that differ from Settings.
+    var sellerIsOutdated: Bool {
+        guard let seller = selected?.seller else { return false }
+        return !seller.sameIdentity(as: business)
+    }
+
+    func useCurrentBusinessDetails() {
+        guard let i = selectedIndex else { return }
+        invoices[i].seller = business.isEmpty ? nil : business
     }
 
     func delete(undoManager: UndoManager?) {
         guard let i = selectedIndex else { return }
+        remove(at: i, undoManager: undoManager)
+    }
+
+    private func remove(at i: Int, undoManager: UndoManager?) {
         let removed = invoices.remove(at: i)
         selection = invoices.sorted { $0.created > $1.created }.first?.id
-        undoManager?.registerUndo(withTarget: self) { model in
-            model.invoices.insert(removed, at: min(i, model.invoices.count))
-            model.selection = removed.id
+        undoManager?.registerUndo(withTarget: self) { [weak undoManager] model in
+            MainActor.assumeIsolated { model.restore(removed, at: i, undoManager: undoManager) }
+        }
+        undoManager?.setActionName("Delete Invoice")
+    }
+
+    private func restore(_ invoice: Invoice, at i: Int, undoManager: UndoManager?) {
+        let index = min(i, invoices.count)
+        invoices.insert(invoice, at: index)
+        selection = invoice.id
+        undoManager?.registerUndo(withTarget: self) { [weak undoManager] model in
+            MainActor.assumeIsolated { model.remove(at: index, undoManager: undoManager) }
         }
         undoManager?.setActionName("Delete Invoice")
     }
@@ -324,14 +387,16 @@ final class InvoiceModel: ObservableObject {
     // MARK: Export
 
     func exportPDF() {
-        guard let invoice = selected else { return }
+        guard let i = selectedIndex else { return }
+        let invoice = invoices[i]
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.nameFieldStringValue = PDF.fileName(for: invoice)
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try PDF.data(invoice: invoice, business: business).write(to: url, options: .atomic)
+            issue(i)
+            try PDF.data(invoice: invoices[i], business: business).write(to: url, options: .atomic)
             withAnimation(.snappy) { exported = url }
         } catch {
             NSAlert(error: error).runModal()
@@ -339,8 +404,9 @@ final class InvoiceModel: ObservableObject {
     }
 
     func print() {
-        guard let invoice = selected else { return }
-        PDF.print(invoice: invoice, business: business)
+        guard let i = selectedIndex else { return }
+        issue(i)
+        PDF.print(invoice: invoices[i], business: business)
     }
 }
 

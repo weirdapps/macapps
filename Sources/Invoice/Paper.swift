@@ -6,11 +6,25 @@ import SwiftUI
 
 struct InvoicePage: View {
     let invoice: Invoice
-    let business: Business
     let paper: Paper
     var page = 0
+    /// Grey hints such as "Client name" for empty fields. On in the preview, off in the PDF and print.
+    var placeholders = true
+    /// The business details printed on this invoice: frozen at issue, otherwise the current Settings.
+    private let business: Business
 
-    private var pages: [Range<Int>] { Pages.split(invoice.items.count) }
+    init(invoice: Invoice, business: Business, paper: Paper, page: Int = 0, placeholders: Bool = true) {
+        self.invoice = invoice
+        self.business = invoice.issuer(business)
+        self.paper = paper
+        self.page = page
+        self.placeholders = placeholders
+    }
+
+    private var pages: [Range<Int>] { Pages.split(invoice.items) }
+    private func hint(_ value: String, _ placeholder: String) -> String {
+        value.isEmpty && placeholders ? placeholder : value
+    }
     private var isFirst: Bool { page == 0 }
     private var isLast: Bool { page == pages.count - 1 }
     private var ink: Color { Color(white: 0.13) }
@@ -45,11 +59,11 @@ struct InvoicePage: View {
     private var header: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(business.isEmpty ? "Your Business" : business.name)
+                Text(business.isEmpty ? hint("", "Your Business") : business.name)
                     .font(.system(size: 17, weight: .bold))
                     .foregroundStyle(business.isEmpty ? muted : ink)
                 Group {
-                    if !business.address.isEmpty { Text(business.address) }
+                    if !business.address.isEmpty { Text(business.address).lineLimit(5) }
                     if !business.email.isEmpty { Text(business.email) }
                     if !business.phone.isEmpty { Text(business.phone) }
                 }
@@ -72,11 +86,11 @@ struct InvoicePage: View {
         HStack(alignment: .top, spacing: 24) {
             VStack(alignment: .leading, spacing: 3) {
                 caption("Bill to")
-                Text(invoice.client.name.isEmpty ? "Client name" : invoice.client.name)
+                Text(hint(invoice.client.name, "Client name"))
                     .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(invoice.client.name.isEmpty ? muted : ink)
                 Group {
-                    if !invoice.client.address.isEmpty { Text(invoice.client.address) }
+                    if !invoice.client.address.isEmpty { Text(invoice.client.address).lineLimit(6) }
                     if !invoice.client.email.isEmpty { Text(invoice.client.email) }
                     if !invoice.client.vatID.isEmpty { Text("VAT ID \(invoice.client.vatID)") }
                 }
@@ -95,7 +109,7 @@ struct InvoicePage: View {
 
     private var continuation: some View {
         HStack {
-            Text(business.isEmpty ? "Invoice" : business.name).font(.system(size: 11, weight: .bold))
+            Text(business.isEmpty ? "Invoice" : business.name).font(.system(size: 11, weight: .bold)).lineLimit(1)
             Spacer()
             Text("Invoice \(invoice.number), continued").font(.system(size: 9)).foregroundStyle(muted)
         }
@@ -106,24 +120,12 @@ struct InvoicePage: View {
     private var itemsTable: some View {
         let range = pages.indices.contains(page) ? pages[page] : 0..<0
         return VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Text("Description").frame(maxWidth: .infinity, alignment: .leading)
-                Text("Qty").frame(width: 38, alignment: .trailing)
-                Text("Unit price").frame(width: 72, alignment: .trailing)
-                Text("VAT").frame(width: 34, alignment: .trailing)
-                Text("Amount").frame(width: 80, alignment: .trailing)
-            }
-            .font(.system(size: 7.5, weight: .semibold))
-            .textCase(.uppercase)
-            .kerning(0.5)
-            .foregroundStyle(Theme.green)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Theme.top.opacity(0.12)))
+            // A last page that only carries the totals gets no empty table header.
+            if !range.isEmpty || isFirst { tableHeader }
 
             ForEach(Array(invoice.items[range].enumerated()), id: \.element.id) { offset, item in
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text(item.description.isEmpty ? "Item" : item.description)
+                    Text(hint(item.description, "Item"))
                         .foregroundStyle(item.description.isEmpty ? muted : ink)
                         .lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -143,6 +145,23 @@ struct InvoicePage: View {
         }
     }
 
+    private var tableHeader: some View {
+        HStack(spacing: 10) {
+            Text("Description").frame(maxWidth: .infinity, alignment: .leading)
+            Text("Qty").frame(width: 38, alignment: .trailing)
+            Text("Unit price").frame(width: 72, alignment: .trailing)
+            Text("VAT").frame(width: 34, alignment: .trailing)
+            Text("Amount").frame(width: 80, alignment: .trailing)
+        }
+        .font(.system(size: 7.5, weight: .semibold))
+        .textCase(.uppercase)
+        .kerning(0.5)
+        .foregroundStyle(Theme.green)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Theme.top.opacity(0.12)))
+    }
+
     private var totals: some View {
         let t = invoice.totals
         return HStack(alignment: .center) {
@@ -150,7 +169,7 @@ struct InvoicePage: View {
             Spacer()
             VStack(spacing: 5) {
                 sum("Subtotal", t.subtotal)
-                if t.discount > 0 { sum("Discount \(Format.percent(invoice.discount))", -t.discount) }
+                if t.discount > 0 { sum("Discount \(Format.percent(t.percent))", -t.discount) }
                 ForEach(t.vat, id: \.rate) { line in
                     sum("VAT \(Format.percent(line.rate)) on \(Format.money(line.base, invoice.currency))", line.amount)
                 }
@@ -187,7 +206,8 @@ struct InvoicePage: View {
             if !invoice.notes.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     caption("Notes")
-                    Text(invoice.notes).font(.system(size: 8.5)).foregroundStyle(muted).fixedSize(horizontal: false, vertical: true)
+                    Text(invoice.notes).font(.system(size: 8.5)).foregroundStyle(muted).lineLimit(8)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -262,17 +282,19 @@ enum PDF {
     @MainActor
     static func data(invoice: Invoice, business: Business) -> Data {
         let paper = business.paper
+        let seller = invoice.issuer(business)
         let data = NSMutableData()
         var box = CGRect(origin: .zero, size: paper.size)
         guard let consumer = CGDataConsumer(data: data as CFMutableData),
               let pdf = CGContext(consumer: consumer, mediaBox: &box, [
                   kCGPDFContextTitle as String: "Invoice \(invoice.number)",
                   kCGPDFContextCreator as String: "Invoice",
-                  kCGPDFContextAuthor as String: business.name,
+                  kCGPDFContextAuthor as String: seller.name,
               ] as CFDictionary)
         else { return Data() }
-        for page in Pages.split(invoice.items.count).indices {
-            let renderer = ImageRenderer(content: InvoicePage(invoice: invoice, business: business, paper: paper, page: page))
+        for page in Pages.split(invoice.items).indices {
+            let renderer = ImageRenderer(content: InvoicePage(invoice: invoice, business: business, paper: paper, page: page,
+                                                              placeholders: false))
             renderer.proposedSize = ProposedViewSize(paper.size)
             pdf.beginPDFPage(nil)
             renderer.render { _, draw in draw(pdf) }

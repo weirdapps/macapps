@@ -66,7 +66,7 @@ enum SelfTest {
         check(Pages.split(0) == [0..<0] && Pages.split(9) == [0..<9], "short invoices fit one page")
         check(Pages.split(12) == [0..<12, 12..<12], "totals move to a second page")
         let long = Pages.split(60)
-        check(long.first == 0..<16 && long.last?.upperBound == 60 && long.last!.count <= Pages.single, "long invoice pages")
+        check(long.first == 0..<16 && long.last?.upperBound == 60 && Double(long.last!.count) <= Pages.single, "long invoice pages")
         check(long.reduce(0) { $0 + $1.count } == 60 && zip(long, long.dropFirst()).allSatisfy { $0.upperBound == $1.lowerBound },
               "pages cover every item once")
 
@@ -133,6 +133,57 @@ enum SelfTest {
         check(multi?.pageCount == Pages.split(30).count && multi?.page(at: 0)?.bounds(for: .mediaBox).size == Paper.letter.size,
               "multi page Letter PDF")
         check(PDF.fileName(for: invoice) == "Invoice 2026-014 Lumen Coffee Roasters.pdf", "PDF file name")
+
+        // Review fixes: placeholders never print, issued invoices keep their business details, redo, pages.
+        let blank = Invoice(number: "B-1", items: [LineItem()])
+        let blankText = PDFDocument(data: PDF.data(invoice: blank, business: Business()))?.string ?? ""
+        check(!blankText.contains("Your Business") && !blankText.contains("Client name") && !blankText.contains("Item"),
+              "PDF prints no placeholder text")
+        let totalsOnly = PDFDocument(data: PDF.data(invoice: { var i = invoice; i.items = (1...12).map {
+            LineItem(description: "Row \($0)", quantity: 1, unitPrice: 1) }; return i }(), business: demo.business))
+        check(totalsOnly?.pageCount == 2 && !(totalsOnly?.page(at: 1)?.string ?? "").localizedCaseInsensitiveContains("description"),
+              "totals-only page has no empty table header")
+
+        let issued = InvoiceModel(invoices: [], business: Business(name: "Old Name", address: "Old Street"), selection: nil)
+        issued.newInvoice()
+        check(issued.selected?.seller == nil, "draft follows Settings")
+        issued.togglePaid()
+        issued.business.address = "New Street"
+        check(issued.selected?.issuer(issued.business).address == "Old Street", "paid invoice keeps issued address")
+        check(issued.sellerIsOutdated, "outdated details noticed")
+        issued.togglePaid()
+        issued.togglePaid()
+        check(issued.selected?.issuer(issued.business).address == "Old Street", "re-paying keeps the first issue")
+        let issuedText = PDFDocument(data: PDF.data(invoice: issued.selected!, business: issued.business))?.string ?? ""
+        check(issuedText.contains("Old Street") && !issuedText.contains("New Street"), "PDF of issued invoice uses frozen details")
+        issued.duplicate()
+        check(issued.selected?.seller == nil && issued.selected?.issuer(issued.business).address == "New Street",
+              "duplicate follows current Settings")
+        issued.selection = issued.invoices.first?.id
+        issued.useCurrentBusinessDetails()
+        check(!issued.sellerIsOutdated && issued.selected?.seller?.address == "New Street", "use current business details")
+        let unnamed = InvoiceModel(invoices: [], business: Business(), selection: nil)
+        unnamed.newInvoice()
+        unnamed.togglePaid()
+        check(unnamed.selected?.seller == nil, "empty business details are not frozen")
+
+        let legacy = #"[{"id":"4F7C3D1E-2B5A-4C8D-9E0F-1A2B3C4D5E6F","number":"1","issueDate":0,"dueDays":30,"client":{"name":"A","address":"","email":"","vatID":""},"items":[],"discount":0,"currency":"EUR","notes":"","bank":"","iban":"","bic":"","created":0}]"#
+        check((try? JSONDecoder().decode([Invoice].self, from: Data(legacy.utf8)))?.first?.seller == nil,
+              "invoices saved before seller details still load")
+
+        undo.redo()
+        check(model.invoices.count == 1, "redo delete")
+        undo.undo()
+        check(model.invoices.count == 2, "undo again after redo")
+
+        check(Totals(items: items, discount: 150).percent == 100 && Totals(items: items, discount: -5).percent == 0,
+              "printed discount percent is clamped")
+        let longText = String(repeating: "Long description that wraps ", count: 3)
+        let wide = (1...16).map { _ in LineItem(description: longText, quantity: 1, unitPrice: 1) }
+        check(Pages.split(wide).first!.count < 16, "two-line rows fill a page sooner")
+        let mixed = Pages.split((1...40).map { LineItem(description: $0.isMultiple(of: 3) ? longText : "Short", quantity: 1) })
+        check(mixed.reduce(0) { $0 + $1.count } == 40 && zip(mixed, mixed.dropFirst()).allSatisfy { $0.upperBound == $1.lowerBound }
+              && mixed.allSatisfy { r in r.isEmpty || r.count >= 1 }, "weighted pages cover every item once")
 
         print(failures == 0 ? "All \(checks) checks passed" : "\(failures) of \(checks) checks failed")
         return failures == 0 ? 0 : 1

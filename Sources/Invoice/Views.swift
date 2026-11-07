@@ -176,6 +176,16 @@ struct Editor: View {
                     }
                 }
             }
+            if model.sellerIsOutdated {
+                Section {
+                    HStack(spacing: 10) {
+                        Image(systemName: "clock.arrow.circlepath").font(.title3).foregroundStyle(.secondary)
+                        Text("Issued with your earlier business details.").foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Use Current") { model.useCurrentBusinessDetails() }
+                    }
+                }
+            }
             Section {
                 TextField("Number", text: $invoice.number)
                 DatePicker("Issued", selection: $invoice.issueDate, displayedComponents: .date)
@@ -332,7 +342,7 @@ struct PreviewPane: View {
         GeometryReader { geo in
             let paper = model.business.paper
             let scale = min((geo.size.width - 48) / paper.size.width, (geo.size.height - 40) / paper.size.height, 1.4)
-            let pages = Pages.split(invoice.items.count).count
+            let pages = Pages.split(invoice.items).count
             ScrollView(.vertical) {
                 VStack(spacing: 20) {
                     ForEach(0..<pages, id: \.self) { page in

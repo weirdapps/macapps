@@ -38,6 +38,9 @@ struct InvoiceApp: App {
                 Button(model.selected?.isPaid == true ? "Mark as Unpaid" : "Mark as Paid") { model.togglePaid() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
                     .disabled(model.selected == nil)
+                Button("Use Current Business Details") { model.useCurrentBusinessDetails() }
+                    .keyboardShortcut("u", modifiers: [.command, .option])
+                    .disabled(!model.sellerIsOutdated)
                 Divider()
                 Button("Delete Invoice…") { confirmDelete() }
                     .keyboardShortcut(.delete, modifiers: .command)
