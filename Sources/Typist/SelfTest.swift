@@ -30,6 +30,14 @@ enum SelfTest {
         check(KeyMap.key(for: "A") == "a" && KeyMap.key(for: "!") == "1" && KeyMap.key(for: "?") == "/", "shifted characters map to their key")
         check(KeyMap.key(for: " ") == "space" && KeyMap.key(for: "\"") == "'", "space and quote keys")
 
+        // Heatmap scale: a single slip on a rare key must not wash out the rest of the map.
+        let heat: [String: (hits: Int, errors: Int)] = ["q": (1, 1), "e": (100, 10), "r": (50, 10), "t": (40, 0), "x": (5, 9)]
+        check(Heat.rate(heat["q"]) == 1 && Heat.rate(heat["x"]) == 1 && Heat.rate(nil) == nil, "miss rate is clamped and nil when untyped")
+        check(near(Heat.worst(["q": (1, 1), "e": (100, 10)]), 0.1), "rarely typed keys do not set the heat scale")
+        check(Heat.worst([:]) == 0.02, "an empty map still has a scale")
+        check(Heat.trouble(heat).map(\.0) == ["x", "r", "e"], "most missed keys, worst first, rare keys left out")
+        check(Heat.trouble(["a": (10, 1), "b": (10, 1)]).map(\.0) == ["a", "b"], "ties sort by key so the list does not flicker")
+
         // Wrapping.
         let text = Array("the quick brown fox jumps over the lazy dog")
         let lines = Wrap.lines(text, columns: 12)
@@ -92,13 +100,23 @@ enum SelfTest {
             for ch in model.session.target { model.type(ch) }
             check(model.phase == .finished && model.history.count == 1, "finishing a test records a result")
             check(model.lastResult?.errors == 0 && model.lastResult?.accuracy == 100, "a clean run scores 100%")
+            check(model.samples.last.map { near($0.wpm, model.lastResult?.netWPM ?? -1) } ?? false, "the last chart point matches the result")
             let text = model.session.target
             model.restart()
             check(model.session.target == text && model.phase == .ready && model.session.typed.isEmpty, "restart keeps the text")
             model.config.mode = .quote
             check(model.author != nil && Words.quotes.contains { Array($0.text) == model.session.target }, "quote mode shows a quote and its author")
-            model.clearHistory(undoManager: nil)
+            let undo = UndoManager()
+            undo.groupsByEvent = false
+            undo.beginUndoGrouping()
+            model.clearHistory(undoManager: undo)
+            undo.endUndoGrouping()
             check(model.history.isEmpty, "history clears")
+            undo.undo()
+            check(model.history.count == 1, "undo brings the history back")
+            check(undo.canRedo, "clearing can be redone")
+            undo.redo()
+            check(model.history.isEmpty, "redo clears it again")
         }
 
         print(failures == 0 ? "PASS: \(checks) checks" : "\(failures) of \(checks) checks failed")

@@ -48,12 +48,12 @@ enum Words {
         Quote(text: "No one would have believed in the last years of the nineteenth century that this world was being watched keenly and closely by intelligences greater than man's.", author: "H. G. Wells"),
         Quote(text: "I celebrate myself, and sing myself, and what I assume you shall assume.", author: "Walt Whitman"),
         Quote(text: "So we beat on, boats against the current, borne back ceaselessly into the past.", author: "F. Scott Fitzgerald"),
-        Quote(text: "As Gregor Samsa awoke one morning from uneasy dreams he found himself transformed in his bed into a gigantic insect.", author: "Franz Kafka"),
+        Quote(text: "The fault, dear Brutus, is not in our stars, but in ourselves, that we are underlings.", author: "William Shakespeare"),
         Quote(text: "Fifteen men on the dead man's chest, yo ho ho, and a bottle of rum!", author: "Robert Louis Stevenson"),
         Quote(text: "Genius is one per cent inspiration and ninety-nine per cent perspiration.", author: "Thomas Edison"),
         Quote(text: "A journey of a thousand miles begins with a single step.", author: "Lao Tzu"),
-        Quote(text: "The man who moves a mountain begins by carrying away small stones.", author: "Confucius"),
-        Quote(text: "It does not matter how slowly you go as long as you do not stop.", author: "Confucius"),
+        Quote(text: "Nothing great was ever achieved without enthusiasm.", author: "Ralph Waldo Emerson"),
+        Quote(text: "Well done is better than well said.", author: "Benjamin Franklin"),
         Quote(text: "Whenever you find yourself on the side of the majority, it is time to pause and reflect.", author: "Mark Twain"),
     ]
 }

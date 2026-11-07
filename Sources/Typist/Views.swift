@@ -62,7 +62,7 @@ struct ContentView: View {
         } message: {
             Text("Your chart and key heatmap start over. You can undo this with Edit > Undo.")
         }
-        .fileExporter(isPresented: $model.exporting, document: CSVDocument(text: CSV.history(model.history)),
+        .fileExporter(isPresented: $model.exporting, document: model.exporting ? CSVDocument(text: CSV.history(model.history)) : nil,
                       contentType: .commaSeparatedText, defaultFilename: "Typist History") { result in
             if case .success(let url) = result { revealInFinder([url]) }
         }
@@ -169,7 +169,7 @@ struct TypingView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             GeometryReader { geo in
-                let columns = max(12, Int(geo.size.width / Theme.charWidth))
+                let columns = max(12, Int(geo.size.width / Theme.charWidth) - 1) // One spare column for a line's trailing space.
                 PassageView(session: model.session, columns: columns, blinking: model.phase == .ready && !Desktop.isSnapshot)
             }
             .frame(height: Theme.lineHeight * CGFloat(Theme.visibleLines))
@@ -369,18 +369,9 @@ struct HeatmapView: View {
     ]
     private static let modifiers: Set<String> = ["delete", "tab", "caps", "return", "shift"]
 
-    private func rate(_ key: String) -> Double? {
-        guard let s = stats[key], s.hits > 0 else { return nil }
-        return Double(s.errors) / Double(s.hits)
-    }
-
-    /// Error rates are scaled to the worst key, so the map always shows where the trouble is.
-    private var worst: Double { max(0.02, stats.keys.compactMap { rate($0) }.max() ?? 0) }
-
-    private var trouble: [(String, Double)] {
-        stats.keys.compactMap { k in rate(k).map { (k, $0) } }.filter { $0.1 > 0 && (stats[$0.0]?.hits ?? 0) >= 5 }
-            .sorted { $0.1 > $1.1 }.prefix(3).map { $0 }
-    }
+    private func rate(_ key: String) -> Double? { Heat.rate(stats[key]) }
+    private var worst: Double { Heat.worst(stats) }
+    private var trouble: [(String, Double)] { Heat.trouble(stats) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -405,7 +396,7 @@ struct HeatmapView: View {
             GeometryReader { geo in
                 let gap: CGFloat = 4
                 let unit = (geo.size.width - gap * 13) / 14.5
-                let height = max(14, min(unit * 1.25, (geo.size.height - gap * 4) / 5))
+                let height = max(14, min(unit * 1.5, (geo.size.height - gap * 4) / 5))
                 VStack(alignment: .leading, spacing: gap) {
                     ForEach(Self.rows.indices, id: \.self) { r in
                         HStack(spacing: gap) {
@@ -466,7 +457,7 @@ struct HistoryView: View {
                 Spacer()
                 if !history.isEmpty {
                     summary("Best", history.map(\.netWPM).max() ?? 0)
-                    summary("Average", history.suffix(10).map(\.netWPM).reduce(0, +) / Double(min(10, history.count)))
+                    summary("Average", recent.map(\.element.netWPM).reduce(0, +) / Double(recent.count))
                     Text("\(history.count) tests").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
             }
@@ -476,8 +467,8 @@ struct HistoryView: View {
             } else {
                 let values = recent.map(\.element.netWPM)
                 let average = values.reduce(0, +) / Double(values.count)
-                let low = max(0, ((values.min() ?? 0) - 8) / 10).rounded(.down) * 10
-                let high = (((values.max() ?? 0) + 8) / 10).rounded(.up) * 10
+                let low = max(0, ((values.min() ?? 0) - 3) / 10).rounded(.down) * 10
+                let high = (((values.max() ?? 0) + 3) / 10).rounded(.up) * 10
                 Chart {
                     ForEach(recent, id: \.element.id) { i, r in
                         AreaMark(x: .value("Test", i), yStart: .value("Low", low), yEnd: .value("WPM", r.netWPM))

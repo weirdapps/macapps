@@ -10,6 +10,7 @@ TypistApp.main()
 final class AppDelegate: NSObject, NSApplicationDelegate {
     // A single-window utility: closing the window quits, like Calculator.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationWillTerminate(_ notification: Notification) { TypistModel.flushSaves() }
 }
 
 struct TypistApp: App {
@@ -37,12 +38,10 @@ struct TypistApp: App {
                 Button("Clear History…") { model.confirmingClear = true }.disabled(model.history.isEmpty)
             }
             CommandMenu("Test") {
-                Picker("Mode", selection: $model.config.mode) {
-                    Text("Time").tag(TestMode.time).keyboardShortcut("1")
-                    Text("Words").tag(TestMode.words).keyboardShortcut("2")
-                    Text("Quote").tag(TestMode.quote).keyboardShortcut("3")
+                ForEach(Array(TestMode.allCases.enumerated()), id: \.element) { i, mode in
+                    Toggle(mode.title, isOn: Binding(get: { model.config.mode == mode }, set: { if $0 { model.config.mode = mode } }))
+                        .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")))
                 }
-                .pickerStyle(.inline)
                 Divider()
                 Menu("Time Limit") {
                     Picker("Time Limit", selection: $model.config.seconds) {

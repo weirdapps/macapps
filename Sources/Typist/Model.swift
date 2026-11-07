@@ -39,6 +39,31 @@ enum KeyMap {
     }
 }
 
+enum Heat {
+    /// A key needs this many presses before its miss rate counts: one slip on a rarely typed key is not a pattern.
+    static let minimumHits = 5
+
+    static func rate(_ s: (hits: Int, errors: Int)?) -> Double? {
+        guard let s, s.hits > 0 else { return nil }
+        return min(1, Double(s.errors) / Double(s.hits))
+    }
+
+    /// The worst miss rate among keys pressed often enough, so the map scale shows where the trouble is.
+    static func worst(_ stats: [String: (hits: Int, errors: Int)]) -> Double {
+        max(0.02, stats.values.filter { $0.hits >= minimumHits }.compactMap { rate($0) }.max() ?? 0)
+    }
+
+    /// Up to three most missed keys, worst first, ties broken by name so the order is stable.
+    static func trouble(_ stats: [String: (hits: Int, errors: Int)]) -> [(String, Double)] {
+        var out: [(String, Double)] = []
+        for (key, value) in stats where value.hits >= minimumHits {
+            if let r = rate(value), r > 0 { out.append((key, r)) }
+        }
+        out.sort { a, b in a.1 != b.1 ? a.1 > b.1 : a.0 < b.0 }
+        return Array(out.prefix(3))
+    }
+}
+
 enum Wrap {
     /// Greedy word wrap of `text` into lines of at most `columns` characters. Each line keeps its trailing space,
     /// so the ranges tile the whole text; a word longer than a line is broken.
@@ -301,8 +326,8 @@ final class TypistModel: ObservableObject {
         }
     }
 
-    private func recordSample(at second: Int) {
-        let s = Double(second)
+    private func recordSample(at second: Int, seconds: Double? = nil) {
+        let s = seconds ?? Double(second)
         samples.append(Sample(second: second,
                               wpm: Stats.netWPM(characters: session.typed.count, uncorrectedErrors: session.uncorrectedErrors, seconds: s),
                               raw: Stats.grossWPM(characters: session.typed.count, seconds: s),
@@ -314,7 +339,10 @@ final class TypistModel: ObservableObject {
         timer?.invalidate()
         timer = nil
         if config.mode != .time, let startDate { elapsed = Date().timeIntervalSince(startDate) }
-        if Double(samples.count) < elapsed.rounded(.down) || samples.isEmpty { recordSample(at: samples.count + 1) }
+        // The last part second gets its own point, measured over the real time so it matches the result.
+        if samples.isEmpty || elapsed > Double(samples.count) + 0.2 {
+            recordSample(at: samples.count + 1, seconds: max(elapsed, 1))
+        }
         phase = .finished
         let result = TestResult(date: Date(), mode: config.mode == .quote ? "quote" : config.label + config.extras.map { " +" + $0 }.joined(),
                                 netWPM: liveNet, rawWPM: liveRaw, accuracy: liveAccuracy, seconds: elapsed,
@@ -353,16 +381,30 @@ final class TypistModel: ObservableObject {
         history = []
         save()
         undoManager?.registerUndo(withTarget: self) { model in
-            MainActor.assumeIsolated {
-                model.history = old
-                model.save()
-            }
+            MainActor.assumeIsolated { model.restoreHistory(old, undoManager: undoManager) }
         }
         undoManager?.setActionName("Clear History")
     }
 
+    private func restoreHistory(_ old: [TestResult], undoManager: UndoManager?) {
+        history = old
+        save()
+        undoManager?.registerUndo(withTarget: self) { model in
+            MainActor.assumeIsolated { model.clearHistory(undoManager: undoManager) }
+        }
+        undoManager?.setActionName("Clear History")
+    }
+
+    /// Writes on a serial queue, so a long history never stalls typing and saves land in order.
+    nonisolated private static let saveQueue = DispatchQueue(label: "com.weirdapps.typist.save")
+
+    /// Waits for pending writes, so quitting straight after a test still keeps it.
+    nonisolated static func flushSaves() { saveQueue.sync {} }
+
     private func save() {
-        if persists { Storage.save(history, app: "Typist", file: "history.json") }
+        guard persists else { return }
+        let snapshot = history
+        Self.saveQueue.async { Storage.save(snapshot, app: "Typist", file: "history.json") }
     }
 
     // MARK: Keys
@@ -428,9 +470,9 @@ final class TypistModel: ObservableObject {
             let net = 58 + Double(i) * 0.95 + Double(Int.random(in: -40...40, using: &r)) / 10
             var hits: [String: Int] = [:], errors: [String: Int] = [:]
             for (n, k) in keys.enumerated() {
-                hits[k] = max(4, 60 - n * 2)
-                let weight = ["e": 3, "r": 4, "b": 5, "y": 3, "p": 3, "o": 2, ",": 3, ";": 4, "q": 2][k] ?? 0
-                errors[k] = Int.random(in: 0...(1 + weight), using: &r)
+                hits[k] = max(12, 64 - n * 2)
+                let weight = ["e": 2, "r": 3, "b": 3, "y": 2, "p": 2, "o": 1, ",": 2, ";": 2, "q": 1][k] ?? 0
+                errors[k] = (Int.random(in: 0..<3, using: &r) == 0 ? 1 : 0) + Int.random(in: 0...weight, using: &r)
             }
             h.append(TestResult(date: start.addingTimeInterval(Double(i) * 43_000), mode: "60 seconds", netWPM: net,
                                 rawWPM: net + 4, accuracy: 93 + Double(i) / 6, seconds: 60, characters: Int(net * 5),
