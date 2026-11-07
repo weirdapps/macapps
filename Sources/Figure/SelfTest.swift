@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 /// `Figure --selftest`: exercises the tokenizer, parser, evaluator, formatting and sheet persistence.
 enum SelfTest {
@@ -125,6 +125,54 @@ enum SelfTest {
         sheet("g = 9.81\nt = 2\n0.5 × g × t^2", ["9.81", "2", "19.62"])
         sheet("walk: 7.2 km in mi\nbudget = $2,400\nbudget - 10%", ["4.47 mi", "$2,400.00", "$2,160.00"])
 
+        // Pasted text with other line endings keeps one result per line, like the editor's lines.
+        sheet("1\r\n2\r\nsum", ["1", "2", "3"])
+        sheet("4\r5\rprev * 2", ["4", "5", "10"])
+        sheet("6\u{2028}7\u{2029}total", ["6", "7", "13"])
+        check(Engine.lines("a\r\nb\n").count == 3, "CRLF counts as one line break")
+        check(Sheet(text: "\r\n# Groceries\r\n$5").title == "Groceries", "title with CRLF")
+
+        // Money and measurements do not mix.
+        expect("$5 + 3 km", nil)
+        expect("3 km - $5", nil)
+        expect("$5 in km", nil)
+        sheet("$5\n3 km\ntotal", ["$5.00", "3 km", nil])
+
+        // Odd input: empty, zero, negatives, unicode names, overflow.
+        sheet("", [nil])
+        check(Sheet(text: "").lastResult == nil, "empty sheet has no last result")
+        expect("0 * 5", "0")
+        expect("-0", "0")
+        expect("0 / 0", nil)
+        expect("-5 km in mi", "-3.11 mi")
+        expect("-40 C in F", "-40°F")
+        expect("10^400", nil)
+        expect("1e400", nil)
+        expect("🙂 + 1", nil)
+        sheet("ενοίκιο = 950\nενοίκιο × 2", ["950", "1,900"])
+        sheet("café = 3.5\ncafé * 2", ["3.5", "7"])
+        expect(String(repeating: "(", count: 200) + "1" + String(repeating: ")", count: 200), "1")
+
+        // A long sheet stays quick enough to evaluate on every keystroke.
+        let long = (0..<3000).map { $0 % 7 == 6 ? "total" : "item \($0): $\($0 % 50).25 × 2" }.joined(separator: "\n")
+        let clock = ContinuousClock.now
+        let longResults = Engine.evaluate(long)
+        check(longResults.count == 3000 && longResults.allSatisfy { $0.value != nil }, "long sheet evaluates every line")
+        check(ContinuousClock.now - clock < .seconds(1.5), "long sheet evaluates in under 1.5 s")
+
+        // Every result gets a click target, including lines a partial redraw skipped.
+        MainActor.assumeIsolated {
+            let view = SheetTextView(frame: NSRect(x: 0, y: 0, width: 800, height: 300))
+            view.string = (1...80).map { $0 % 10 == 0 ? "# note" : "\($0) km in mi" }.joined(separator: "\n")
+            view.fitContainer()
+            view.results = Engine.evaluate(view.string)
+            let slots = view.layoutResults()
+            check(slots.count == 72, "a click target for every result (\(slots.count))")
+            check(zip(slots, slots.dropFirst()).allSatisfy { $0.textRect.minY < $1.textRect.minY }, "results stack top to bottom")
+            check(slots.last.map { $0.pill.minY > 300 } == true, "results below the fold are placed too")
+            check(slots.allSatisfy { $0.pill.maxX <= view.bounds.width }, "results stay inside the view")
+        }
+
         // Formatting.
         check(Format.number(1234567.891, maxFraction: 2) == "1,234,567.89", "grouping with decimals")
         check(Format.number(-0.0000001, maxFraction: 2) == "-1e-07", "tiny numbers go scientific")
@@ -156,7 +204,7 @@ enum SelfTest {
 
         // Every demo line that looks like a calculation produces a result.
         for sheet in Demo.sheets + [Sheet(text: Demo.welcome)] {
-            let lines = sheet.text.components(separatedBy: "\n")
+            let lines = Engine.lines(sheet.text)
             for (line, r) in zip(lines, Engine.evaluate(sheet.text)) {
                 let isProse = line.isEmpty || line.hasPrefix("#") || line.hasPrefix("Type ") || line.hasPrefix("Click ")
                 check(isProse || r.value != nil, "demo line \"\(line)\" has a result")

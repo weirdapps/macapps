@@ -11,7 +11,7 @@ struct Sheet: Codable, Identifiable, Hashable {
 
     /// The first line with text, without its `#`.
     var title: String {
-        for line in text.components(separatedBy: "\n") {
+        for line in Engine.lines(text) {
             let t = line.trimmingCharacters(in: CharacterSet(charactersIn: "# \t"))
             if !t.isEmpty { return String(t.prefix(60)) }
         }
@@ -25,7 +25,7 @@ struct Sheet: Codable, Identifiable, Hashable {
 
     /// The sheet as plain text with every result after an `=`, for export and Copy Sheet with Results.
     var textWithResults: String {
-        let lines = text.components(separatedBy: "\n")
+        let lines = Engine.lines(text)
         let results = Engine.evaluate(text)
         let width = min(48, lines.map(\.count).max() ?? 0)
         return zip(lines, results).map { line, result in
@@ -48,6 +48,9 @@ final class FigureModel: ObservableObject {
     @Published var flash: Flash?
     @Published var showReference = false
     @Published var pendingDelete: Sheet.ID?
+    /// The sheet whose editor takes the keyboard when it appears: on launch and for a new sheet, never when the
+    /// sidebar selection moves, so arrow keys keep walking the list.
+    var focusRequest: Sheet.ID?
 
     private let persists: Bool
     private var saveTask: Task<Void, Never>?
@@ -60,6 +63,7 @@ final class FigureModel: ObservableObject {
         let saved = persists ? Storage.load([Sheet].self, app: "Figure", file: Self.storeFile) : nil
         sheets = saved?.isEmpty == false ? saved! : [Sheet(text: Demo.welcome)]
         selection = sheets.first?.id
+        focusRequest = persists ? selection : nil
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.saveNow() }
         }
@@ -90,6 +94,7 @@ final class FigureModel: ObservableObject {
     func newSheet() {
         let sheet = Sheet(text: "")
         sheets.insert(sheet, at: 0)
+        focusRequest = sheet.id
         selection = sheet.id
     }
 
@@ -97,6 +102,7 @@ final class FigureModel: ObservableObject {
         guard let s = current, let i = sheets.firstIndex(of: s) else { return }
         let copy = Sheet(text: s.text)
         sheets.insert(copy, at: i + 1)
+        focusRequest = copy.id
         selection = copy.id
     }
 

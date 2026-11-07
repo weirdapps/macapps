@@ -53,16 +53,26 @@ final class SheetTextView: NSTextView {
         NSRect(x: x, y: rect.minY, width: columnWidth, height: rect.height).fill()
         Palette.accent.withAlphaComponent(0.16).setFill()
         NSRect(x: x, y: rect.minY, width: 1, height: rect.height).fill()
+        drawPlaceholder()
         drawResults(in: rect)
     }
 
-    /// Results draw with the background, which every display path (including window snapshots) runs.
-    private func drawResults(in dirtyRect: NSRect) {
-        guard let layout = layoutManager else { return }
+    /// One result in the column: where its pill sits, what it shows and what a click copies.
+    struct Slot {
+        var pill: NSRect
+        var textRect: NSRect
+        var line: Int
+        var label: String
+        var value: String
+    }
+
+    /// Places every result, visible or not, so clicks and hovers work on lines a partial redraw (a scroll) skipped.
+    func layoutResults() -> [Slot] {
+        guard let layout = layoutManager else { return [] }
         let text = string as NSString
         let font = Self.resultFont(fontSize)
         let column = NSRect(x: bounds.width - columnWidth + 12, y: 0, width: columnWidth - 26, height: 0)
-        var newHits: [(NSRect, Int, String)] = []
+        var slots: [Slot] = []
         var location = 0
         for (index, result) in results.enumerated() {
             let range = text.lineRange(for: NSRange(location: min(location, text.length), length: 0))
@@ -76,29 +86,51 @@ final class SheetTextView: NSTextView {
                 fragment = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
             }
             fragment.origin.y += textContainerOrigin.y
-            guard fragment.maxY >= dirtyRect.minY - 40, fragment.minY <= dirtyRect.maxY + 40 else { continue }
-            let isCopied = copied == index
-            let label = isCopied ? "Copied" : display
-            let color = isCopied ? NSColor.secondaryLabelColor : Palette.accent
-            let attributed = NSAttributedString(string: label, attributes: [.font: font, .foregroundColor: color])
-            let size = attributed.size()
+            let label = copied == index ? "Copied" : display
+            let size = NSAttributedString(string: label, attributes: [.font: font]).size()
             let width = min(size.width, column.width)
             let textRect = NSRect(x: column.maxX - width, y: fragment.minY + (fragment.height - size.height) / 2,
                                   width: width, height: size.height)
-            let pill = textRect.insetBy(dx: -7, dy: -1.5)
-            if hovered == index || isCopied {
-                Palette.accent.withAlphaComponent(isCopied ? 0.1 : 0.14).setFill()
-                NSBezierPath(roundedRect: pill, xRadius: 6, yRadius: 6).fill()
-            }
-            let style = NSMutableParagraphStyle()
-            style.lineBreakMode = .byTruncatingTail
-            style.alignment = .right
-            let drawn = NSAttributedString(string: label, attributes: [.font: font, .foregroundColor: color, .paragraphStyle: style])
-            drawn.draw(with: textRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], context: nil)
-            newHits.append((pill, index, display))
+            slots.append(Slot(pill: textRect.insetBy(dx: -7, dy: -1.5), textRect: textRect, line: index, label: label, value: display))
         }
-        hits = newHits
+        return slots
+    }
+
+    /// Results draw with the background, which every display path (including window snapshots) runs.
+    private func drawResults(in dirtyRect: NSRect) {
+        let font = Self.resultFont(fontSize)
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        style.alignment = .right
+        let slots = layoutResults()
+        for slot in slots where slot.pill.maxY >= dirtyRect.minY && slot.pill.minY <= dirtyRect.maxY {
+            let isCopied = copied == slot.line
+            let color = isCopied ? NSColor.secondaryLabelColor : Palette.accent
+            if hovered == slot.line || isCopied {
+                Palette.accent.withAlphaComponent(isCopied ? 0.1 : 0.14).setFill()
+                NSBezierPath(roundedRect: slot.pill, xRadius: 6, yRadius: 6).fill()
+            }
+            let drawn = NSAttributedString(string: slot.label, attributes: [.font: font, .foregroundColor: color, .paragraphStyle: style])
+            drawn.draw(with: slot.textRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], context: nil)
+        }
+        hits = slots.map { ($0.pill, $0.line, $0.value) }
         window?.invalidateCursorRects(for: self)
+    }
+
+    /// An empty sheet says what to type instead of showing a blank page.
+    private func drawPlaceholder() {
+        guard string.isEmpty else { return }
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .regular),
+            .foregroundColor: NSColor.placeholderTextColor,
+        ]
+        let origin = textContainerOrigin
+        var y = origin.y
+        for line in ["Type a calculation, like 20% of 150", "or rent = 950, then rent × 12"] {
+            let text = NSAttributedString(string: line, attributes: attributes)
+            text.draw(at: NSPoint(x: origin.x, y: y))
+            y += text.size().height * 1.3
+        }
     }
 
     static func resultFont(_ size: CGFloat) -> NSFont {
@@ -159,6 +191,7 @@ struct SheetEditor: NSViewRepresentable {
     @Binding var text: String
     var fontSize: CGFloat
     var focus: Bool
+    var onFocused: () -> Void
     var onCopy: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -197,7 +230,11 @@ struct SheetEditor: NSViewRepresentable {
         scroll.documentView = textView
         context.coordinator.refresh(textView)
         if focus {
-            DispatchQueue.main.async { textView.window?.makeFirstResponder(textView) }
+            let done = onFocused
+            DispatchQueue.main.async {
+                textView.window?.makeFirstResponder(textView)
+                done()
+            }
         }
         return scroll
     }
@@ -209,6 +246,7 @@ struct SheetEditor: NSViewRepresentable {
         var changed = false
         if textView.string != text {
             textView.string = text
+            context.coordinator.undo.removeAllActions()
             changed = true
         }
         if textView.fontSize != fontSize {
@@ -221,7 +259,11 @@ struct SheetEditor: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: SheetEditor
+        /// Each sheet keeps its own undo history instead of sharing the window's.
+        let undo = UndoManager()
         init(_ parent: SheetEditor) { self.parent = parent }
+
+        func undoManager(for view: NSTextView) -> UndoManager? { undo }
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? SheetTextView else { return }
@@ -239,10 +281,15 @@ struct SheetEditor: NSViewRepresentable {
             paragraph.paragraphSpacing = 3
             let base: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph]
             textView.typingAttributes = base
-            guard let storage = textView.textStorage else { return }
+            // While an accent or an input method is composing, restyling the text would break the composition.
+            guard let storage = textView.textStorage, !textView.hasMarkedText() else {
+                textView.results = results
+                return
+            }
             storage.beginEditing()
             storage.setAttributes(base, range: NSRange(location: 0, length: storage.length))
-            let lines = text.components(separatedBy: "\n")
+            let lines = Engine.lines(text)
+            let ns = text as NSString
             var offset = 0
             for (line, result) in zip(lines, results) {
                 let isHeading = result.kind == .comment && line.trimmingCharacters(in: .whitespaces).hasPrefix("#")
@@ -261,7 +308,7 @@ struct SheetEditor: NSViewRepresentable {
                     case .unit: storage.addAttribute(.foregroundColor, value: Palette.unit, range: r)
                     }
                 }
-                offset += (line as NSString).length + 1
+                offset = NSMaxRange(ns.lineRange(for: NSRange(location: min(offset, ns.length), length: 0)))
             }
             storage.endEditing()
             textView.fitContainer()

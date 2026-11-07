@@ -31,7 +31,7 @@ struct FigureApp: App {
                 Divider()
                 Button("Export with Results…") { model.export() }.keyboardShortcut("e", modifiers: [.command, .shift])
                 Divider()
-                Button("Delete Sheet…") { model.requestDelete() }
+                Button("Delete Sheet…") { model.requestDelete() }.keyboardShortcut(.delete, modifiers: [.command, .option])
             }
             CommandGroup(after: .pasteboard) {
                 Divider()
@@ -90,7 +90,7 @@ func appIcon() -> NSBitmapImageRep {
         ctx.restoreGState()
 
         // The equals sign, two glowing bars breaking out past the page edge.
-        for (k, y) in [CGFloat(508), 392].enumerated() {
+        for y in [CGFloat(508), 392] {
             let bar = CGRect(x: 480, y: y, width: 360, height: 84)
             ctx.saveGState()
             ctx.setShadow(offset: .zero, blur: 60, color: rgb(0xFFF1B8, 0.95).cgColor)
@@ -112,8 +112,12 @@ func appIcon() -> NSBitmapImageRep {
             ctx.setFillColor(NSColor.white.withAlphaComponent(0.8).cgColor)
             ctx.addPath(roundedRect(CGRect(x: bar.minX + 30, y: bar.maxY - 26, width: bar.width - 60, height: 12), 6))
             ctx.fillPath()
-            _ = k
             ctx.restoreGState()
+            // A warm rim so the bars read against the white page as well as the tile.
+            ctx.addPath(roundedRect(bar.insetBy(dx: 2, dy: 2), 40))
+            ctx.setStrokeColor(rgb(0xF08A4B, 0.7).cgColor)
+            ctx.setLineWidth(4)
+            ctx.strokePath()
         }
         sparkle(ctx, at: CGPoint(x: 800, y: 680), size: 46, color: NSColor.white.withAlphaComponent(0.95))
         sparkle(ctx, at: CGPoint(x: 735, y: 300), size: 24, color: NSColor.white.withAlphaComponent(0.8))

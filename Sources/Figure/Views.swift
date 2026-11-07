@@ -20,7 +20,8 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 320)
         } detail: {
             if let sheet = model.current {
-                EditorPane(model: model, sheet: sheet, fontSize: fontSize)
+                // The snapshot always shows the default size, whatever the user chose.
+                EditorPane(model: model, sheet: sheet, fontSize: Desktop.isSnapshot ? Theme.defaultFontSize : fontSize)
                     .id(sheet.id)
             } else {
                 ContentUnavailableView("No Sheet", systemImage: "equal.square",
@@ -101,7 +102,8 @@ struct EditorPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SheetEditor(text: model.binding(for: sheet.id), fontSize: fontSize, focus: !Desktop.isSnapshot) { value in
+            SheetEditor(text: model.binding(for: sheet.id), fontSize: fontSize, focus: model.focusRequest == sheet.id,
+                        onFocused: { if model.focusRequest == sheet.id { model.focusRequest = nil } }) { value in
                 model.copy(value)
             }
             Divider()

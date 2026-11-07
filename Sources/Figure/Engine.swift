@@ -305,11 +305,19 @@ enum Engine {
         return functions.contains(n) || constants[n] != nil || references.contains(n) || keywords.contains(n)
     }
 
+    /// The line endings NSString (and so the editor) breaks on, so results never drift from their lines
+    /// when pasted text uses \r\n, a lone \r or a Unicode line separator.
+    static let lineBreaks: Set<Character> = ["\n", "\r", "\r\n", "\u{85}", "\u{2028}", "\u{2029}"]
+
+    static func lines(_ text: String) -> [String] {
+        text.split(omittingEmptySubsequences: false, whereSeparator: { lineBreaks.contains($0) }).map(String.init)
+    }
+
     /// Evaluates every line of a sheet in order, carrying variables and line references downwards.
     static func evaluate(_ text: String) -> [LineResult] {
         var results: [LineResult] = []
         var vars: [String: Quantity] = [:]
-        for line in text.components(separatedBy: "\n") {
+        for line in lines(text) {
             results.append(evaluateLine(line, vars: &vars, above: results))
         }
         return results
@@ -349,7 +357,7 @@ enum Engine {
 enum Arithmetic {
     /// Converts `q` into `unit`. A plain number takes the unit as is: "5 in km" is 5 km.
     static func convert(_ q: Quantity, to unit: Unit) throws -> Quantity {
-        if q.isPercent { throw FigureError.units }
+        if q.isPercent || q.currency != nil { throw FigureError.units }
         guard let from = q.unit else { return Quantity(q.number, unit: unit, currency: q.currency) }
         guard from.dimension == unit.dimension else { throw FigureError.units }
         return Quantity(unit.fromBase(from.toBase(q.number)), unit: unit, currency: q.currency)
@@ -363,6 +371,8 @@ enum Arithmetic {
         }
         if a.isPercent != b.isPercent { throw FigureError.units }
         if a.isPercent { return Quantity(a.number + sign * b.number, isPercent: true) }
+        // Money and measurements do not add up: $5 + 3 km has no answer.
+        if (a.currency != nil && b.unit != nil) || (a.unit != nil && b.currency != nil) { throw FigureError.units }
         switch (a.unit, b.unit) {
         case (nil, nil):
             return Quantity(a.number + sign * b.number, currency: currency)
