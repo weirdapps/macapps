@@ -129,6 +129,16 @@ final class JSONTree: @unchecked Sendable {
         }
     }
 
+    /// The size of a string's source text between its quotes (escapes undecoded), or a scalar's literal.
+    func valueByteCount(_ id: Int32) -> Int { kind(id).isContainer ? 0 : Int(valLen[Int(id)]) }
+
+    /// Text for a one-line label: line breaks and tabs shown as their escapes, so a key or value never wraps a row.
+    static func oneLine(_ s: String) -> String {
+        guard s.contains(where: { $0 == "\n" || $0 == "\r" || $0 == "\t" || $0 == "\r\n" }) else { return s }
+        return s.replacingOccurrences(of: "\r\n", with: "\\r\\n").replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r").replacingOccurrences(of: "\t", with: "\\t")
+    }
+
     /// The node's source text, as it appears in the file.
     func rawRange(_ id: Int32) -> Range<Int> {
         let i = Int(id)
@@ -232,6 +242,24 @@ enum JSONPathFormat {
         return ok(first, first: true) && s.unicodeScalars.dropFirst().allSatisfy { ok($0, first: false) }
     }
 
+    /// A key inside a quoted path segment: backslash, the quote and control characters escaped, so a key with a
+    /// line break or a tab still gives a one-line path that JSONPath and jq read back as the same key.
+    static func escape(_ key: String, quote: Character) -> String {
+        var out = ""
+        for c in key.unicodeScalars {
+            switch c {
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            case _ where c.value < 0x20: out += String(format: "\\u%04x", c.value)
+            case _ where Character(c) == quote: out += "\\" + String(quote)
+            default: out.unicodeScalars.append(c)
+            }
+        }
+        return out
+    }
+
     /// `$.store.book[0]['first name']`
     static func jsonPath(_ segs: [PathSegment]) -> String {
         var out = "$"
@@ -240,8 +268,7 @@ enum JSONPathFormat {
             case .index(let n): out += "[\(n)]"
             case .key(let k):
                 if isIdentifier(k, allowDollar: true) { out += "." + k } else {
-                    let escaped = k.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
-                    out += "['\(escaped)']"
+                    out += "['\(escape(k, quote: "'"))']"
                 }
             }
         }
@@ -256,8 +283,7 @@ enum JSONPathFormat {
             case .index(let n): out += out.isEmpty ? ".[\(n)]" : "[\(n)]"
             case .key(let k):
                 if isIdentifier(k, allowDollar: false) { out += "." + k } else {
-                    let escaped = k.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-                    out += ".\"\(escaped)\""
+                    out += ".\"\(escape(k, quote: "\""))\""
                 }
             }
         }
@@ -313,6 +339,22 @@ enum JSONParser {
             if lines { try p.parseLines() } else { try p.parseDocument() }
         }
         return tree
+    }
+
+    /// JSON saved as UTF-16 or UTF-32 (Windows tools do this), recognised by its byte order mark and converted to
+    /// UTF-8. Anything else is returned as it is.
+    static func utf8(_ bytes: [UInt8]) -> [UInt8] {
+        let encoding: String.Encoding
+        if bytes.starts(with: [0xFF, 0xFE, 0, 0]) || bytes.starts(with: [0, 0, 0xFE, 0xFF]) {
+            encoding = .utf32
+        } else if bytes.starts(with: [0xFF, 0xFE]) || bytes.starts(with: [0xFE, 0xFF]) {
+            encoding = .utf16
+        } else {
+            return bytes
+        }
+        guard let text = String(data: Data(bytes), encoding: encoding) else { return bytes }
+        let out = Array(text.utf8)
+        return out.starts(with: [0xEF, 0xBB, 0xBF]) ? Array(out.dropFirst(3)) : out
     }
 
     /// Fills in the line, column and excerpt of an error from its byte offset.

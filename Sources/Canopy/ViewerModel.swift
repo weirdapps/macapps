@@ -77,7 +77,7 @@ final class ViewerModel: ObservableObject {
             if let size = values?.fileSize, size >= Int(Int32.max) {
                 throw ParseError(message: "Files over 2 GB are not supported", offset: 0)
             }
-            return [UInt8](try Data(contentsOf: url, options: .mappedIfSafe))
+            return JSONParser.utf8([UInt8](try Data(contentsOf: url, options: .mappedIfSafe)))
         }
     }
 
@@ -208,7 +208,14 @@ final class ViewerModel: ObservableObject {
     func copyValue(_ id: Int32? = nil) {
         guard let tree, !Desktop.isSnapshot else { return }
         let node = id ?? focusID
-        copy(tree.copyText(node), what: tree.kind(node).isContainer ? "Copied \(tree.kind(node).name.lowercased()) as JSON" : "Copied value")
+        let what = tree.kind(node).isContainer ? "Copied \(tree.kind(node).name.lowercased()) as JSON" : "Copied value"
+        // Printing a big branch takes a moment: do it off the main thread so the window stays responsive.
+        guard tree.rawRange(node).count > 1_000_000 else { copy(tree.copyText(node), what: what); return }
+        show(Notice(message: "Copying…"))
+        Task {
+            let text = await Task.detached(priority: .userInitiated) { tree.copyText(node) }.value
+            copy(text, what: what)
+        }
     }
 
     func copyJSONPath(_ id: Int32? = nil) { copy(jsonPath(id), what: "Copied JSONPath") }
@@ -228,7 +235,7 @@ final class ViewerModel: ObservableObject {
         panel.allowedContentTypes = [.json]
         let base = (name as NSString).deletingPathExtension
         let part = node == 0 ? "" : " " + (tree.key(node) ?? "item \(tree.position(node))")
-        panel.nameFieldStringValue = "\(base)\(part) pretty.json"
+        panel.nameFieldStringValue = Self.exportName(base: base, part: part)
         if let url { panel.directoryURL = url.deletingLastPathComponent() }
         guard panel.runModal() == .OK, let dest = panel.url else { return }
         Task {
@@ -237,6 +244,12 @@ final class ViewerModel: ObservableObject {
             }.value
             show(ok ? Notice(message: "Saved \(dest.lastPathComponent)", reveal: dest) : Notice(message: "Could not save \(dest.lastPathComponent)"))
         }
+    }
+
+    /// The suggested export name: no slashes, colons or line breaks from the key, and not absurdly long.
+    nonisolated static func exportName(base: String, part: String) -> String {
+        let cleaned = String((base + part).map { "/:\n\r\t".contains($0) ? "-" : $0 }.prefix(120))
+        return cleaned.trimmingCharacters(in: .whitespaces) + " pretty.json"
     }
 
     func show(_ notice: Notice) {
@@ -300,7 +313,7 @@ final class ViewerModel: ObservableObject {
                 outline?.refreshVisible()
                 if !hits.isEmpty { step(1) }
             } else {
-                let ranges = Self.ranges(of: q, in: text ?? "")
+                let ranges = await Task.detached(priority: .userInitiated) { Self.ranges(of: q, in: text ?? "") }.value
                 guard !Task.isCancelled else { return }
                 textMatches = ranges
                 matchIndex = nil
@@ -310,7 +323,7 @@ final class ViewerModel: ObservableObject {
         }
     }
 
-    static func ranges(of query: String, in text: String, limit: Int = 10_000) -> [NSRange] {
+    nonisolated static func ranges(of query: String, in text: String, limit: Int = 10_000) -> [NSRange] {
         let ns = text as NSString
         var out: [NSRange] = [], from = 0
         while out.count < limit {
@@ -342,7 +355,8 @@ final class ViewerModel: ObservableObject {
     func refreshText() {
         guard let tree, mode == .text else { return }
         let focus = focusID
-        if let pretty, pretty.tree === tree, pretty.range(of: focus) != nil {
+        // Already showing it: in full, or as the top of a text that had to stop at the size limit.
+        if let pretty, pretty.tree === tree, pretty.node == focus || pretty.range(of: focus) != nil {
             textPane?.reveal(pretty.range(of: focus))
             return
         }
@@ -386,12 +400,17 @@ final class PrettyText: @unchecked Sendable {
     }
 
     static func make(_ tree: JSONTree, focus: Int32) -> PrettyText {
-        let whole = PrettyText(tree: tree, node: 0, rendered: tree.render(0, limit: limit, track: true))
-        if whole.range(of: focus) != nil { return whole }
+        // Whether `focus` was printed in full in a rendering of `node`. Checked before colouring, which is the slow part.
+        func shows(_ r: JSONTree.Rendered, from node: Int32) -> Bool {
+            let k = Int(focus) - Int(node)
+            return k >= 0 && k < r.starts.count && r.ends[k] >= 0
+        }
+        let whole = tree.render(0, limit: limit, track: true)
+        if focus == 0 || shows(whole, from: 0) { return PrettyText(tree: tree, node: 0, rendered: whole) }
         // Too big to show whole: the largest branch around the selection that fits.
         for candidate in tree.ancestors(focus).dropFirst() where tree.rawRange(candidate).count < limit / 3 {
-            let part = PrettyText(tree: tree, node: candidate, rendered: tree.render(candidate, limit: limit, track: true))
-            if part.range(of: focus) != nil { return part }
+            let part = tree.render(candidate, limit: limit, track: true)
+            if shows(part, from: candidate) { return PrettyText(tree: tree, node: candidate, rendered: part) }
         }
         return PrettyText(tree: tree, node: focus, rendered: tree.render(focus, limit: limit, track: true))
     }
@@ -483,6 +502,29 @@ enum Recents {
 
 extension Notification.Name {
     static let recentsChanged = Notification.Name("CanopyRecentsChanged")
+}
+
+/// File paths given on the command line. Skips the executable, `--flags`, and `-Key value` pairs that AppKit reads
+/// as defaults, and keeps only files that exist.
+enum CommandLineFiles {
+    static func urls(_ arguments: [String], exists: (String) -> Bool = CommandLineFiles.isFile) -> [URL] {
+        var out: [URL] = [], skipNext = false
+        for arg in arguments.dropFirst() {
+            if skipNext { skipNext = false; continue }
+            if arg.hasPrefix("-") {
+                skipNext = !arg.hasPrefix("--") && !arg.hasPrefix("-psn_")
+                continue
+            }
+            let url = URL(fileURLWithPath: arg).standardizedFileURL
+            if exists(url.path), !out.contains(url) { out.append(url) }
+        }
+        return out
+    }
+
+    static func isFile(_ path: String) -> Bool {
+        var dir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &dir) && !dir.boolValue
+    }
 }
 
 /// Routes files from Finder, the command line and menus to an empty window, or to a new one.

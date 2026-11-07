@@ -157,6 +157,79 @@ enum SelfTest {
             check(error is ParseCancelled, "cancelled parse stops")
         }
 
+        // Keys with line breaks, tabs and control characters still give one-line, readable-back paths.
+        check(JSONPathFormat.jsonPath([.key("a\nb")]) == #"$['a\nb']"#, "JSONPath escapes a line break in a key")
+        check(JSONPathFormat.jq([.key("a\tb\u{1}")]) == #"."a\tb\u0001""#, "jq path escapes tabs and control characters")
+        check(!JSONPathFormat.jq([.key("x\ny")]).contains("\n"), "jq path stays on one line")
+
+        // UTF-16 and UTF-32 files are read through their byte order mark.
+        let sample = #"{"ключ": "🌳"}"#
+        for (encoding, name) in [(String.Encoding.utf16LittleEndian, "UTF-16 LE"), (.utf16BigEndian, "UTF-16 BE"), (.utf32LittleEndian, "UTF-32 LE")] {
+            let bom: [UInt8] = switch name {
+            case "UTF-16 LE": [0xFF, 0xFE]
+            case "UTF-16 BE": [0xFE, 0xFF]
+            default: [0xFF, 0xFE, 0, 0]
+            }
+            let bytes = bom + [UInt8](sample.data(using: encoding)!)
+            let t = try? JSONParser.parse(JSONParser.utf8(bytes))
+            check(t.map { $0.key($0.child(0, 0)) == "ключ" && $0.scalarText($0.child(0, 0)) == "🌳" } == true, "\(name) file parses")
+        }
+        check(JSONParser.utf8(Array("[1]".utf8)) == Array("[1]".utf8), "UTF-8 bytes pass through unchanged")
+
+        // Export names never carry path separators from a key.
+        check(ViewerModel.exportName(base: "data", part: " a/b:c\nd") == "data a-b-c-d pretty.json", "export name drops slashes, colons and line breaks")
+        check(ViewerModel.exportName(base: "x", part: " " + String(repeating: "k", count: 500)).count < 140, "export name stays short")
+
+        // Text search used by the text view and row highlights.
+        check(ViewerModel.ranges(of: "ab", in: "xABab").count == 2, "text search ignores case")
+        check(ViewerModel.ranges(of: "a", in: String(repeating: "a", count: 50), limit: 10).count == 10, "text search stops at its limit")
+
+        // A path thousands of levels deep keeps the breadcrumb bar short.
+        if let t = parse(String(repeating: "[", count: 3000) + "1" + String(repeating: "]", count: 3000)) {
+            let leaf = Int32(t.count - 1)
+            let crumbs = PathBar.crumbs(t, leaf)
+            check(crumbs.count == 26 && crumbs.first == 0 && crumbs[1] == -1 && crumbs.last == leaf, "deep breadcrumbs are capped (got \(crumbs.count))")
+            check(PathBar.crumbs(t, 3) == [0, 1, 2, 3], "shallow breadcrumbs show every level")
+        } else { check(false, "parse a deep path") }
+
+        // The inspector never decodes a whole huge string on every redraw.
+        let long = String(repeating: "é", count: 300_000)
+        if let t = parse("[\"\(long)\", \"pending\", \"x\"]") {
+            check(SelectionSection.lengthText(t, t.child(0, 0)).hasSuffix("KB"), "a huge string's length is shown as its size")
+            check(SelectionSection.lengthText(t, t.child(0, 1)) == "7 characters", "a short string's length in characters")
+            check(SelectionSection.lengthText(t, t.child(0, 2)) == "1 character", "one character, singular")
+            let preview = SelectionSection.previewText(t, t.child(0, 0))
+            check(preview.count == 2001 && preview.hasSuffix("…"), "a huge string's preview is cut")
+            check(SelectionSection.previewText(t, t.child(0, 1)) == "pending", "a short string's preview is whole")
+        } else { check(false, "parse a huge string") }
+
+        // The text view of a document over the size limit.
+        var wide = "{\"head\": 1, \"rows\": ["
+        for i in 0..<120_000 { wide += #"{"id":\#(i),"label":"row \#(i)"},"# }
+        wide.removeLast()
+        wide += "], \"tail\": {\"end\": true}}"
+        if let t = parse(wide) {
+            let root = PrettyText.make(t, focus: 0)
+            check(root.node == 0 && root.truncated, "the root of a big document shows its first 4 MB")
+            let end = find(t, [.key("tail"), .key("end")])!
+            let part = PrettyText.make(t, focus: end)
+            check(part.node != 0 && !part.truncated && part.range(of: end) != nil, "a node past the limit is shown with its branch")
+            if let r = part.range(of: end) {
+                check((part.string.string as NSString).substring(with: r) == "true", "and its text range is right")
+            }
+        } else { check(false, "parse a wide document") }
+
+        // Labels stay on one line.
+        check(JSONTree.oneLine("multi\nline\tkey\r\nend") == #"multi\nline\tkey\r\nend"#, "line breaks and tabs show as escapes in labels")
+        check(JSONTree.oneLine("plain é") == "plain é", "plain labels are unchanged")
+
+        // Files named on the command line.
+        let argv = ["/Applications/Canopy.app/Contents/MacOS/Canopy", "-NSQuitAlwaysKeepsWindows", "NO", "/tmp/a.json", "--flag",
+                    "/tmp/b.jsonl", "/tmp/a.json", "-psn_0_123", "/tmp/missing.json"]
+        let files = CommandLineFiles.urls(argv) { $0 != "/tmp/missing.json" }
+        check(files.map(\.path) == ["/tmp/a.json", "/tmp/b.jsonl"], "command line files skip flags, defaults pairs, repeats and missing files (got \(files.map(\.path)))")
+        check(CommandLineFiles.urls(["Canopy", "--selftest"]).isEmpty, "no files on a plain launch")
+
         print(failures == 0 ? "PASS: \(checks) checks" : "\(failures) of \(checks) checks failed")
         return failures == 0 ? 0 : 1
     }

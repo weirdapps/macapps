@@ -364,7 +364,7 @@ private struct NoticeToast: View {
 }
 
 /// The selection's path as clickable crumbs, with copy buttons.
-private struct PathBar: View {
+struct PathBar: View {
     @ObservedObject var model: ViewerModel
 
     var body: some View {
@@ -372,13 +372,16 @@ private struct PathBar: View {
             if let tree = model.tree {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 3) {
-                        let chain = tree.ancestors(model.focusID) + [model.focusID]
-                        ForEach(Array(chain.enumerated()), id: \.offset) { index, id in
+                        ForEach(Array(Self.crumbs(tree, model.focusID).enumerated()), id: \.offset) { index, id in
                             if index > 0 {
                                 Image(systemName: "chevron.compact.right").font(.system(size: 10)).foregroundStyle(.tertiary)
                             }
-                            Crumb(title: crumbTitle(tree, id), kind: tree.kind(id), current: id == model.focusID) {
-                                model.select(id)
+                            if id < 0 {
+                                Text("…").foregroundStyle(.tertiary).padding(.horizontal, 4)
+                            } else {
+                                Crumb(title: crumbTitle(tree, id), kind: tree.kind(id), current: id == model.focusID) {
+                                    model.select(id)
+                                }
                             }
                         }
                     }
@@ -407,9 +410,17 @@ private struct PathBar: View {
         .background(.bar)
     }
 
+    /// The crumbs from the root to `id`. A very deep path keeps the root and the last levels, with -1 standing for
+    /// the levels left out, so a node thousands of levels down does not build thousands of buttons.
+    nonisolated static func crumbs(_ tree: JSONTree, _ id: Int32, keep: Int = 24) -> [Int32] {
+        let chain = tree.ancestors(id) + [id]
+        guard chain.count > keep + 2 else { return chain }
+        return [chain[0], -1] + chain.suffix(keep)
+    }
+
     private func crumbTitle(_ tree: JSONTree, _ id: Int32) -> String {
         guard let parent = tree.parent(id) else { return "$" }
-        return tree.kind(parent) == .object ? (tree.key(id) ?? "") : "[\(tree.position(id))]"
+        return tree.kind(parent) == .object ? JSONTree.oneLine(tree.key(id) ?? "") : "[\(tree.position(id))]"
     }
 }
 
@@ -479,7 +490,7 @@ struct TypeBadge: View {
     }
 }
 
-private struct SelectionSection: View {
+struct SelectionSection: View {
     @ObservedObject var model: ViewerModel
     let tree: JSONTree
     let id: Int32
@@ -515,25 +526,38 @@ private struct SelectionSection: View {
 
     private var title: String {
         guard let parent = tree.parent(id) else { return model.name }
-        return tree.kind(parent) == .object ? (tree.key(id) ?? "") : "Item \(tree.position(id))"
+        return tree.kind(parent) == .object ? JSONTree.oneLine(tree.key(id) ?? "") : "Item \(tree.position(id))"
     }
 
     private var kindLine: String {
         let kind = tree.kind(id)
         if kind.isContainer { return "\(kind.name), \(tree.summary(id))" }
-        if kind == .string { return "String, \(tree.scalarText(id).count.formatted()) characters" }
+        if kind == .string { return "String, " + SelectionSection.lengthText(tree, id) }
         return kind.name
     }
 
-    private var preview: String {
+    /// "7 characters", or the size for a string so long that counting its characters on every redraw would stall.
+    nonisolated static func lengthText(_ tree: JSONTree, _ id: Int32) -> String {
+        let bytes = tree.valueByteCount(id)
+        guard bytes <= 200_000 else { return ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file) }
+        let n = tree.scalarText(id).count
+        return n == 1 ? "1 character" : "\(n.formatted()) characters"
+    }
+
+    /// The value as shown in the inspector: at most about 2,000 characters, decoded from the start of the value only.
+    nonisolated static func previewText(_ tree: JSONTree, _ id: Int32) -> String {
         let kind = tree.kind(id)
         if kind.isContainer {
             let r = tree.render(id, indent: nil, limit: 600)
             return String(decoding: r.bytes, as: UTF8.self) + (r.truncated ? "…" : "")
         }
-        let text = tree.scalarText(id)
-        return text.count > 2000 ? String(text.prefix(2000)) + "…" : (text.isEmpty ? " " : text)
+        let cap = 8_000
+        let text = tree.scalarText(id, maxBytes: cap)
+        if text.count > 2000 || tree.valueByteCount(id) > cap { return String(text.prefix(2000)) + "…" }
+        return text.isEmpty ? " " : text
     }
+
+    private var preview: String { Self.previewText(tree, id) }
 }
 
 private struct PathRow: View {

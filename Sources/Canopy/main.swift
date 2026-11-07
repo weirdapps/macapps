@@ -11,6 +11,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // A viewer, like Preview: closing the last window keeps the app ready for the next file.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    /// `Canopy data.json more.json` from Terminal opens those files, like Open With in Finder does.
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let urls = CommandLineFiles.urls(CommandLine.arguments)
+        guard !urls.isEmpty, !Desktop.isSnapshot else { return }
+        MainActor.assumeIsolated { Router.shared.open(urls) }
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
         MainActor.assumeIsolated { Router.shared.open(urls) }
     }
@@ -37,6 +44,7 @@ enum Theme {
     /// Object keys in the text view and object badges: the leaf green, lighter in dark mode.
     static let keyColor = NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? rgb(0x6DD47E) : rgb(0x1C7F52) }
     static let highlight = NSColor(srgbRed: 1, green: 0.84, blue: 0.2, alpha: 0.75)
+    static let currentMatch = NSColor(srgbRed: 1, green: 0.62, blue: 0.1, alpha: 1)
 }
 
 // MARK: - Menus

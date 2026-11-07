@@ -23,13 +23,13 @@ struct TextPane: NSViewRepresentable {
         scroll.autohidesScrollers = true
         context.coordinator.textView = text
         model.textPane = context.coordinator
-        context.coordinator.show(model.pretty, focus: model.pretty?.range(of: model.focusID))
+        context.coordinator.show(model.pretty, focusID: model.focusID)
         return scroll
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         model.textPane = context.coordinator
-        context.coordinator.show(model.pretty, focus: model.pretty?.range(of: model.focusID))
+        context.coordinator.show(model.pretty, focusID: model.focusID)
     }
 }
 
@@ -38,13 +38,18 @@ final class TextPaneController: NSObject {
     weak var textView: NSTextView?
     private var shown: PrettyText?
     private var highlighted: [NSRange] = []
+    /// The syntax colours that match highlights painted over, put back when the highlights go.
+    private var savedColors: [(NSRange, NSColor)] = []
 
     private var focus: NSRange?
 
-    func show(_ pretty: PrettyText?, focus: NSRange?) {
+    /// Shows a new text. Called on every SwiftUI update, so it does nothing (and finds no range) when the text is the same.
+    func show(_ pretty: PrettyText?, focusID: Int32) {
         guard let textView, pretty !== shown else { return }
+        let focus = pretty?.range(of: focusID)
         shown = pretty
         highlighted = []
+        savedColors = []
         self.focus = nil
         textView.textStorage?.setAttributedString(pretty?.string ?? NSAttributedString())
         textView.scroll(.zero)
@@ -67,13 +72,26 @@ final class TextPaneController: NSObject {
         let length = storage.length
         storage.beginEditing()
         for r in highlighted where NSMaxRange(r) <= length { storage.removeAttribute(.backgroundColor, range: r) }
+        for (r, color) in savedColors where NSMaxRange(r) <= length { storage.addAttribute(.foregroundColor, value: color, range: r) }
+        savedColors = []
         let shownRanges = ranges.filter { NSMaxRange($0) <= length }
-        for r in shownRanges { storage.addAttribute(.backgroundColor, value: Theme.highlight.withAlphaComponent(0.55), range: r) }
+        for r in shownRanges {
+            // Dark text on the yellow marker reads in light and dark mode; remember the colours it covers.
+            storage.enumerateAttribute(.foregroundColor, in: r) { value, sub, _ in
+                if let color = value as? NSColor { savedColors.append((sub, color)) }
+            }
+            storage.addAttributes([.backgroundColor: Theme.highlight, .foregroundColor: NSColor.black], range: r)
+        }
+        // The current match in a stronger marker, like Safari's find, rather than a selection that turns grey
+        // while the search field has focus.
+        if let current, current < shownRanges.count {
+            storage.addAttribute(.backgroundColor, value: Theme.currentMatch, range: shownRanges[current])
+        }
         storage.endEditing()
         highlighted = shownRanges
         if let current, current < shownRanges.count {
             let r = shownRanges[current]
-            textView.setSelectedRange(r)
+            textView.setSelectedRange(NSRange(location: r.location, length: 0))
             textView.scrollRangeToVisible(r)
             textView.showFindIndicator(for: r)
         }

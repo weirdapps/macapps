@@ -348,7 +348,7 @@ final class NodeCell: NSTableCellView {
         }
         if let parent = tree.parent(id) {
             if tree.kind(parent) == .object {
-                append(tree.key(id) ?? "", .labelColor, Self.keyFont)
+                append(JSONTree.oneLine(tree.key(id) ?? ""), .labelColor, Self.keyFont)
             } else {
                 append("[\(tree.position(id))]", .secondaryLabelColor, Self.valueFont, highlight: false)
             }
@@ -360,8 +360,7 @@ final class NodeCell: NSTableCellView {
             var value = tree.scalarText(id, maxBytes: 1200)
             if kind == .string {
                 if value.utf16.count > 400 { value = String(value.prefix(400)) + "…" }
-                value = "\"" + value.replacingOccurrences(of: "\n", with: "\\n").replacingOccurrences(of: "\t", with: "\\t")
-                    .replacingOccurrences(of: "\r", with: "\\r") + "\""
+                value = "\"" + JSONTree.oneLine(value) + "\""
             }
             append(value, TypeStyle.color(kind), Self.valueFont)
             count.stringValue = ""
