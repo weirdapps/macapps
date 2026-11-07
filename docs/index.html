@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Useful Mac Menu Apps</title>
-<meta name="description" content="Fifty small, native menu bar apps for macOS. Each does one thing, stays out of the way, and looks like it belongs on a Mac. Free and open source.">
-<meta property="og:title" content="Useful Mac Menu Apps">
-<meta property="og:description" content="Fifty small, native menu bar apps for macOS. Free and open source.">
+<title>Useful Mac Apps</title>
+<meta name="description" content="A hundred small, native Mac apps: fifty for the menu bar, fifty for the desktop. Each does one thing and looks like it belongs on a Mac. Free and open source.">
+<meta property="og:title" content="Useful Mac Apps">
+<meta property="og:description" content="A hundred small, native Mac apps, for the menu bar and the desktop. Free and open source.">
 <meta property="og:image" content="https://weirdapps.github.io/macapps/icons.png">
 <link rel="icon" href="icons/Jot.png">
 <style>
@@ -67,7 +67,15 @@ h1 {
 .btn.secondary { background: var(--card); color: var(--fg); }
 .meta { margin-top: 18px; font-size: 14px; color: var(--faint); }
 
-nav.filters { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 48px 0 32px; }
+nav.kinds { display: inline-flex; gap: 4px; padding: 4px; border-radius: 980px; background: var(--card); margin: 56px auto 0; position: relative; left: 50%; transform: translateX(-50%); }
+nav.kinds button {
+  font: inherit; font-size: 15px; font-weight: 600; border: 0; cursor: pointer;
+  padding: 9px 20px; border-radius: 980px; background: transparent; color: var(--muted);
+  transition: background .15s, color .15s;
+}
+nav.kinds button:hover { color: var(--fg); }
+nav.kinds button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+nav.filters { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 24px 0 32px; }
 nav.filters button {
   font: inherit; font-size: 14px; font-weight: 500;
   border: 0; cursor: pointer;
@@ -124,6 +132,8 @@ dialog[open] { animation: pop .28s cubic-bezier(.2,.8,.2,1); }
 .sheet-head p { margin: 2px 0 0; color: var(--muted); }
 .shot { display: block; width: 100%; max-width: 400px; margin: 0 auto 24px; border-radius: 14px; border: 1px solid var(--line); box-shadow: 0 10px 30px rgba(0,0,0,.12); }
 .sheet .actions { justify-content: flex-start; }
+dialog.wide { width: min(980px, calc(100vw - 32px)); }
+dialog.wide .shot { max-width: 100%; border-radius: 12px; }
 .close {
   position: absolute; top: 14px; right: 14px; width: 30px; height: 30px; border-radius: 50%;
   border: 0; cursor: pointer; background: var(--card); color: var(--muted); font-size: 18px; line-height: 30px;
@@ -145,24 +155,28 @@ dialog[open] { animation: pop .28s cubic-bezier(.2,.8,.2,1); }
 <body>
 <div class="wrap">
   <header>
-    <img class="hero" src="icons.png" alt="Fifty app icons" width="1720" height="860">
-    <h1>Useful Mac Menu Apps</h1>
-    <p class="lede">Fifty native menu bar apps for macOS. Each does one thing, stays out of the way, and looks like it belongs on a Mac.</p>
+    <img class="hero" id="hero" src="icons.png" alt="Fifty app icons" width="1720" height="860">
+    <h1>Useful Mac Apps</h1>
+    <p class="lede">A hundred native apps for macOS: fifty that live in the menu bar, fifty that open a window. Each does one thing and looks like it belongs on a Mac.</p>
     <div class="actions">
-      <a class="btn" href="https://github.com/weirdapps/macapps/releases/latest/download/SmallMacApps.zip">Download all</a>
+      <a class="btn" id="dl-all" href="https://github.com/weirdapps/macapps/releases/latest/download/SmallMacApps.zip">Download all 50 menu bar apps</a>
       <a class="btn secondary" href="https://github.com/weirdapps/macapps">Source on GitHub</a>
     </div>
     <p class="meta">Free and open source · macOS 14 or later · Apple silicon · <a href="https://github.com/weirdapps/macapps#install">First launch help</a></p>
   </header>
 
+  <nav class="kinds" id="kinds" aria-label="Kind of app">
+    <button data-kind="menu">Menu bar apps</button>
+    <button data-kind="desktop">Desktop apps</button>
+  </nav>
   <nav class="filters" id="filters" aria-label="Filter by category"></nav>
   <main id="groups"></main>
 
   <div class="features">
     <div><h3>Native</h3><p>AppKit and SwiftUI, no web views. Each app is a few hundred kilobytes and idles at zero CPU.</p></div>
-    <div><h3>Private</h3><p>Nothing leaves your Mac. Only Reach and Address touch the network, and only for their one job.</p></div>
-    <div><h3>No permissions</h3><p>No Accessibility, Screen Recording or Automation. Global shortcuts use Carbon hot keys. Only Bin asks for Full Disk Access, to read the Trash.</p></div>
-    <div><h3>Out of the way</h3><p>No Dock icons, no windows, no onboarding. Every app has launch at login in its gear menu.</p></div>
+    <div><h3>Private</h3><p>Nothing leaves your Mac. Only Reach, Address and Request touch the network, and only for their one job.</p></div>
+    <div><h3>No permissions</h3><p>No Accessibility, Screen Recording or Automation. Only Bin asks for Full Disk Access, to read the Trash, and only Hush and Tune use the microphone.</p></div>
+    <div><h3>At home on a Mac</h3><p>Menu bar apps stay out of the way, with no Dock icon. Desktop apps have real menus, shortcuts, drag and drop, undo and dark mode.</p></div>
   </div>
 </div>
 
@@ -256,6 +270,79 @@ const GROUPS = [
   ]],
 ];
 
+const DESKTOP = [
+  ["Images", [
+    ["Shrink", "Resize and compress images in batches"],
+    ["Scrub", "See and remove the metadata hidden in your photos"],
+    ["Mat", "Put screenshots on a beautiful background"],
+    ["Iconsmith", "Turn any image into a Mac app icon"],
+    ["Pixel", "A tiny pixel art editor"],
+    ["Loop", "Make animated GIFs from video or images"],
+    ["Arrow", "Mark up screenshots with arrows, boxes and text"],
+    ["Hues", "Pull a colour palette from any image"],
+  ]],
+  ["Documents and writing", [
+    ["Binder", "Merge, split and reorder PDF pages"],
+    ["Invoice", "Clean PDF invoices in a minute"],
+    ["Mark", "Write Markdown with a live native preview"],
+    ["Draft", "Distraction-free writing with a word goal"],
+    ["Grid", "Open big CSV files, sort and filter them"],
+    ["Specimen", "Preview every font with your own text"],
+  ]],
+  ["Organise", [
+    ["Board", "A simple kanban board"],
+    ["Streak", "Track daily habits on a calendar grid"],
+    ["Diary", "A private daily journal"],
+    ["Recall", "Flashcards with spaced repetition"],
+    ["Hours", "Track time per project and export timesheets"],
+    ["Split", "Share expenses with friends and settle up"],
+    ["Cue", "A teleprompter for talks and videos"],
+    ["Mind", "Mind maps you can build with the keyboard"],
+  ]],
+  ["Files and developer", [
+    ["Rename", "Rename files in bulk with a live preview"],
+    ["Twins", "Find duplicate files and free up space"],
+    ["Heft", "See what fills a folder"],
+    ["Tail", "Follow log files as they grow"],
+    ["Lite", "Browse SQLite databases"],
+    ["Plist", "View and edit property lists"],
+    ["Hex", "A hex viewer for any file"],
+    ["Request", "A tiny HTTP client"],
+    ["Canopy", "Explore big JSON files as a tree"],
+  ]],
+  ["Numbers and science", [
+    ["Figure", "A notepad that calculates as you type"],
+    ["Plot", "Paste numbers, get a chart"],
+    ["Curve", "Plot functions and explore them"],
+    ["Loan", "Loans and savings, worked out"],
+    ["Elements", "An interactive periodic table"],
+    ["Life", "Conway's Game of Life, beautifully"],
+  ]],
+  ["Sound and video", [
+    ["Beat", "A metronome that keeps perfect time"],
+    ["Tune", "Tune your instrument with the microphone"],
+    ["Hum", "Background noise for focus and sleep"],
+    ["Ivory", "A piano you play with your keyboard"],
+    ["Trim", "Trim audio and video without re-encoding"],
+  ]],
+  ["Design", [
+    ["Sight", "See your designs as people with colour blindness do"],
+    ["Blend", "Design gradients and export them anywhere"],
+  ]],
+  ["Wellbeing and play", [
+    ["Exhale", "Guided breathing in a calm window"],
+    ["Typist", "Practise touch typing and track your speed"],
+    ["Score", "Keep score for board and card games"],
+    ["Nine", "Sudoku, calm and clean"],
+    ["Patience", "Classic Klondike solitaire"],
+    ["Reversi", "The classic disc-flipping strategy game"],
+  ]],
+];
+const KINDS = {
+  menu: { groups: GROUPS, hero: "icons.png", all: "SmallMacApps.zip", label: "Download all 50 menu bar apps" },
+  desktop: { groups: DESKTOP, hero: "icons-desktop.png", all: "MacDesktopApps.zip", label: "Download all 50 desktop apps" },
+};
+
 const el = (tag, { dataset, ...props } = {}, ...kids) => {
   const n = Object.assign(document.createElement(tag), props);
   Object.assign(n.dataset, dataset);
@@ -267,37 +354,54 @@ const filtersEl = document.getElementById("filters");
 const sheet = document.getElementById("sheet");
 const APPS = {};
 
-for (const [title, apps] of GROUPS) {
-  const grid = el("div", { className: "grid" });
-  for (const [name, desc, key] of apps) {
-    APPS[name] = { desc, key };
-    const nameEl = el("span", { className: "name" }, name);
-    if (key) nameEl.append(el("kbd", {}, key));
-    grid.append(el("button", { className: "app", onclick: () => openApp(name), ariaLabel: `${name}: ${desc}` },
-      el("img", { src: `icons/${name}.png`, alt: "", loading: "lazy", width: 84, height: 84 }),
-      nameEl,
-      el("span", { className: "desc" }, desc)));
+for (const [kind, { groups }] of Object.entries(KINDS)) {
+  for (const [title, apps] of groups) {
+    const grid = el("div", { className: "grid" });
+    for (const [name, desc, key] of apps) {
+      APPS[name] = { desc, key, kind };
+      const nameEl = el("span", { className: "name" }, name);
+      if (key) nameEl.append(el("kbd", {}, key));
+      grid.append(el("button", { className: "app", onclick: () => openApp(name), ariaLabel: `${name}: ${desc}` },
+        el("img", { src: `icons/${name}.png`, alt: "", loading: "lazy", width: 84, height: 84 }),
+        nameEl,
+        el("span", { className: "desc" }, desc)));
+    }
+    groupsEl.append(el("section", { className: "group", dataset: { group: title, kind } }, el("h2", {}, title), grid));
   }
-  groupsEl.append(el("section", { className: "group", dataset: { group: title } }, el("h2", {}, title), grid));
 }
 
+let currentKind = "menu";
 function setFilter(group) {
   for (const b of filtersEl.children) b.setAttribute("aria-pressed", String(b.dataset.group === group));
-  for (const s of groupsEl.children) s.hidden = group !== "All" && s.dataset.group !== group;
+  for (const s of groupsEl.children) s.hidden = s.dataset.kind !== currentKind || (group !== "All" && s.dataset.group !== group);
 }
-for (const g of ["All", ...GROUPS.map(g => g[0])]) {
-  filtersEl.append(el("button", { onclick: () => setFilter(g), dataset: { group: g } }, g));
+function setKind(kind) {
+  currentKind = kind;
+  const k = KINDS[kind];
+  for (const b of document.getElementById("kinds").children) b.setAttribute("aria-pressed", String(b.dataset.kind === kind));
+  const hero = document.getElementById("hero");
+  hero.src = k.hero;
+  hero.alt = kind === "desktop" ? "Fifty desktop app icons" : "Fifty menu bar app icons";
+  const dl = document.getElementById("dl-all");
+  dl.href = `${REPO}/releases/latest/download/${k.all}`;
+  dl.textContent = k.label;
+  filtersEl.replaceChildren(...["All", ...k.groups.map(g => g[0])].map(g =>
+    el("button", { onclick: () => setFilter(g), dataset: { group: g } }, g)));
+  setFilter("All");
 }
-setFilter("All");
+for (const b of document.getElementById("kinds").children) b.onclick = () => setKind(b.dataset.kind);
+setKind("menu");
 
 function openApp(name) {
   const a = APPS[name];
   document.getElementById("sheet-icon").src = `icons/${name}.png`;
   document.getElementById("sheet-title").textContent = name;
   document.getElementById("sheet-desc").textContent = a.desc + (a.key ? `. Shortcut ${a.key}.` : ".");
+  if (a.kind !== currentKind) setKind(a.kind);
+  sheet.classList.toggle("wide", a.kind === "desktop");
   const shot = document.getElementById("sheet-shot");
   shot.src = `screenshots/${name}.png`;
-  shot.alt = `The ${name} panel`;
+  shot.alt = a.kind === "desktop" ? `The ${name} window` : `The ${name} panel`;
   document.getElementById("sheet-dl").href = `${REPO}/releases/latest/download/${name}.zip`;
   document.getElementById("sheet-src").href = `${REPO}/tree/master/Sources/${name}`;
   history.replaceState(null, "", `#${name.toLowerCase()}`);
@@ -306,6 +410,7 @@ function openApp(name) {
 sheet.addEventListener("close", () => history.replaceState(null, "", location.pathname));
 sheet.addEventListener("click", e => { if (e.target === sheet) sheet.close(); });
 const hash = location.hash.slice(1);
+if (hash === "desktop") setKind("desktop");
 const match = Object.keys(APPS).find(n => n.toLowerCase() === hash);
 if (match) openApp(match);
 </script>
