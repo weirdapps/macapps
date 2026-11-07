@@ -178,17 +178,18 @@ struct BlendGradient: Codable, Hashable, Identifiable, Sendable {
         return last.color
     }
 
-    /// Stops for SwiftUI and Core Graphics, which mix in sRGB: OKLab gradients are expanded into dense sRGB samples.
+    /// Stops for SwiftUI and Core Graphics, sampled densely with `mix`, so both draw the premultiplied sRGB or OKLab
+    /// blend that CSS draws, whatever their own interpolation does.
     func renderStops(samples: Int = 24) -> [(RGBA, Double)] {
         let s = sortedStops
-        guard interpolation == .oklab, s.count > 1 else { return s.map { ($0.color, $0.location) } }
+        guard s.count > 1 else { return s.map { ($0.color, $0.location) } }
         var out: [(RGBA, Double)] = [(s[0].color, s[0].location)]
         for (p, q) in zip(s, s.dropFirst()) {
             let span = q.location - p.location
             if span <= 0 { out.append((q.color, q.location)); continue }
             for i in 1...samples {
                 let f = Double(i) / Double(samples)
-                out.append((mix(p.color, q.color, f, in: .oklab), p.location + span * f))
+                out.append((mix(p.color, q.color, f, in: interpolation), p.location + span * f))
             }
         }
         return out
@@ -216,6 +217,29 @@ struct BlendGradient: Codable, Hashable, Identifiable, Sendable {
     var isCentered: Bool { abs(centerX - 0.5) < 0.0005 && abs(centerY - 0.5) < 0.0005 }
 
     var hexList: String { sortedStops.map(\.color.hex).joined(separator: "\n") }
+
+    /// Repairs a gradient read from disk: finite numbers in range, unique stop ids and at least two stops.
+    var sanitized: BlendGradient {
+        func unit(_ v: Double, _ fallback: Double) -> Double { v.isFinite ? min(max(v, 0), 1) : fallback }
+        var g = self
+        g.angle = angle.isFinite ? Export.degrees(angle) : 0
+        g.centerX = unit(centerX, 0.5)
+        g.centerY = unit(centerY, 0.5)
+        var seen = Set<UUID>()
+        g.stops = stops.map { s in
+            var s = s
+            s.location = unit(s.location, 0)
+            s.color = RGBA(r: unit(s.color.r, 0), g: unit(s.color.g, 0), b: unit(s.color.b, 0), a: unit(s.color.a, 1))
+            if !seen.insert(s.id).inserted { s.id = UUID() }
+            return s
+        }
+        if g.stops.isEmpty { g.stops = [Stop(color: RGBA(0x000000), location: 0)] }
+        if g.stops.count == 1 {
+            g.stops[0].location = 0
+            g.stops.append(Stop(color: g.stops[0].color, location: 1))
+        }
+        return g
+    }
 }
 
 // MARK: - Export
@@ -301,6 +325,12 @@ enum Export {
         return "Rectangle()\n    .fill(.\(fn)(\n\(gradient)\n\(tail)\n    ))"
     }
 
+    /// The suggested PNG file name: the gradient's name, or "Gradient" when it has none.
+    static func fileName(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed.isEmpty || trimmed.hasPrefix(".") ? "Gradient" : trimmed) + ".png"
+    }
+
     static func code(_ g: BlendGradient, format: CodeFormat) -> String {
         switch format {
         case .css: css(g)
@@ -309,14 +339,48 @@ enum Export {
         }
     }
 
-    /// Renders the gradient to a PNG of exactly `width` by `height` pixels.
-    @MainActor
+    /// Draws the gradient into a `width` by `height` pixel image with Core Graphics, the same geometry as the
+    /// preview. Safe off the main thread, so big exports never stall the window.
+    static func image(_ g: BlendGradient, width: Int, height: Int) -> CGImage? {
+        guard width > 0, height > 0, let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let opaque = g.stops.allSatisfy { $0.color.a >= 0.9995 }
+        let info = opaque ? CGImageAlphaInfo.noneSkipLast.rawValue : CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: space, bitmapInfo: info) else { return nil }
+        let stops = g.renderStops()
+        let colors = stops.map { CGColor(colorSpace: space, components: [$0.0.r, $0.0.g, $0.0.b, $0.0.a])! } as CFArray
+        var locations = stops.map { CGFloat($0.1) }
+        guard let gradient = CGGradient(colorsSpace: space, colors: colors, locations: &locations) else { return nil }
+        let w = CGFloat(width), h = CGFloat(height)
+        // Work in a y-down space like SwiftUI and CSS.
+        ctx.translateBy(x: 0, y: h)
+        ctx.scaleBy(x: 1, y: -1)
+        let extend: CGGradientDrawingOptions = [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+        switch g.kind {
+        case .linear:
+            let (start, end) = g.linearPoints(size: CGSize(width: w, height: h))
+            ctx.drawLinearGradient(gradient, start: CGPoint(x: start.x * w, y: start.y * h),
+                                   end: CGPoint(x: end.x * w, y: end.y * h), options: extend)
+        case .radial:
+            // A circle in unit space is the ellipse CSS draws: stretch a unit radial to the box.
+            ctx.translateBy(x: g.centerX * w, y: g.centerY * h)
+            ctx.scaleBy(x: w, y: h)
+            ctx.drawRadialGradient(gradient, startCenter: .zero, startRadius: 0, endCenter: .zero,
+                                   endRadius: g.radialFraction, options: extend)
+        case .conic:
+            CGContextDrawConicGradient(ctx, gradient, CGPoint(x: g.centerX * w, y: g.centerY * h),
+                                       (g.angle - 90) * .pi / 180)
+        }
+        return ctx.makeImage()
+    }
+
+    /// Renders the gradient to PNG data of exactly `width` by `height` pixels.
     static func png(_ g: BlendGradient, width: Int, height: Int) -> Data? {
-        let renderer = ImageRenderer(content: GradientFill(gradient: g).frame(width: CGFloat(width), height: CGFloat(height)))
-        renderer.scale = 1
-        renderer.isOpaque = g.stops.allSatisfy { $0.color.a >= 0.9995 }
-        guard let cg = renderer.cgImage else { return nil }
-        return NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])
+        guard let cg = image(g, width: width, height: height) else { return nil }
+        let data = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dest, cg, nil)
+        return CGImageDestinationFinalize(dest) ? data as Data : nil
     }
 }
 
@@ -395,6 +459,13 @@ final class BlendModel: ObservableObject {
     @Published var exportHeight = 1440
     @Published var notice: String?
     @Published var lastExport: URL?
+    /// True while a text field has keyboard focus, so Undo and Delete go to the text instead of the gradient.
+    @Published var textFocused = false
+    /// True while a PNG export renders in the background.
+    @Published private(set) var exporting = false
+    private var exportTask: Task<Void, Never>?
+    /// The library gradient deleted last and where it was, for the notice's Undo button.
+    @Published private(set) var recentlyDeleted: (gradient: BlendGradient, index: Int)?
 
     private let persists: Bool
     private var undoStack: [BlendGradient] = []
@@ -406,7 +477,7 @@ final class BlendModel: ObservableObject {
 
     init(persists: Bool = !Desktop.isSnapshot) {
         self.persists = persists
-        let saved = persists ? (Storage.load([BlendGradient].self, app: Self.app, file: "library.json") ?? []) : []
+        let saved = persists ? Self.loadLibrary() : []
         library = saved
         if let first = saved.first {
             current = first
@@ -416,6 +487,35 @@ final class BlendModel: ObservableObject {
             selection = .preset(Presets.all[0].id)
         }
         selectedStop = current.sortedStops.first?.id
+        if persists {
+            NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil,
+                                                   queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.saveNow() }
+            }
+        }
+    }
+
+    /// Reads the library, repairing odd values. A file that cannot be read is set aside, never overwritten.
+    private static func loadLibrary() -> [BlendGradient] {
+        let url = Storage.url(app: app, file: "library.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        guard let saved = Storage.load([BlendGradient].self, app: app, file: "library.json") else {
+            let stamp = Int(Date().timeIntervalSince1970)
+            try? FileManager.default.moveItem(at: url, to: url.deletingLastPathComponent()
+                .appendingPathComponent("library unreadable \(stamp).json"))
+            return []
+        }
+        return repaired(saved)
+    }
+
+    /// Sanitises each gradient and gives duplicate ids fresh ones.
+    static func repaired(_ list: [BlendGradient]) -> [BlendGradient] {
+        var ids = Set<UUID>()
+        return list.map { g in
+            var g = g.sanitized
+            if !ids.insert(g.id).inserted { g.id = UUID() }
+            return g
+        }
     }
 
     static var demo: BlendModel {
@@ -474,6 +574,13 @@ final class BlendModel: ObservableObject {
     private func restore(_ g: BlendGradient) {
         lastKey = ""
         current = g
+        if library.contains(where: { $0.id == g.id }) {
+            selection = .library(g.id)
+        } else if Presets.all.contains(where: { $0.id == g.id }) {
+            selection = .preset(g.id)
+        } else {
+            selection = nil
+        }
         if !current.stops.contains(where: { $0.id == selectedStop }) { selectedStop = current.sortedStops.first?.id }
         writeBack()
     }
@@ -494,6 +601,14 @@ final class BlendModel: ObservableObject {
         }
         saveTask = task
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: task)
+    }
+
+    /// Writes a pending save straight away, when the app quits.
+    func saveNow() {
+        guard persists, let task = saveTask, !task.isCancelled else { return }
+        task.cancel()
+        saveTask = nil
+        Storage.save(library, app: Self.app, file: "library.json")
     }
 
     private func load(_ g: BlendGradient) {
@@ -567,6 +682,7 @@ final class BlendModel: ObservableObject {
 
     func distribute() {
         let order = current.sortedStops.map(\.id)
+        guard order.count > 1 else { return }
         edit { g in
             for (n, id) in order.enumerated() {
                 if let i = g.stops.firstIndex(where: { $0.id == id }) { g.stops[i].location = Double(n) / Double(order.count - 1) }
@@ -585,11 +701,17 @@ final class BlendModel: ObservableObject {
         scheduleSave()
     }
 
+    /// Rolls a new gradient. It is one undo step, so a gradient rolled past can be brought back.
     func randomize() {
         var g = dice.roll()
         g.name = "Random"
+        undoStack.append(current)
+        if undoStack.count > 200 { undoStack.removeFirst() }
+        redoStack.removeAll()
+        lastKey = ""
         selection = nil
-        load(g)
+        current = g
+        selectedStop = g.sortedStops.first?.id
     }
 
     /// Saves the gradient on screen to the library (presets and random gradients become a copy there).
@@ -621,7 +743,9 @@ final class BlendModel: ObservableObject {
 
     func delete(_ id: UUID) {
         guard let i = library.firstIndex(where: { $0.id == id }) else { return }
-        library.remove(at: i)
+        let gone = library.remove(at: i)
+        recentlyDeleted = (gone, i)
+        notice = "Deleted \(gone.name.isEmpty ? "Untitled" : gone.name)"
         scheduleSave()
         if current.id == id {
             if library.indices.contains(min(i, library.count - 1)) {
@@ -633,6 +757,17 @@ final class BlendModel: ObservableObject {
                 load(Presets.all[0])
             }
         }
+    }
+
+    /// Puts the gradient deleted last back where it was and opens it.
+    func undoDelete() {
+        guard let (g, i) = recentlyDeleted else { return }
+        recentlyDeleted = nil
+        library.insert(g, at: min(i, library.count))
+        selection = .library(g.id)
+        load(g)
+        scheduleSave()
+        notice = nil
     }
 
     func rename(_ name: String) {
@@ -660,16 +795,35 @@ final class BlendModel: ObservableObject {
         let width = min(max(exportWidth, 1), 8192), height = min(max(exportHeight, 1), 8192)
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
-        panel.nameFieldStringValue = current.name + ".png"
+        panel.nameFieldStringValue = Export.fileName(current.name)
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard let data = Export.png(current, width: width, height: height) else { notice = "Could not render the image"; return }
-        do {
-            try data.write(to: url, options: .atomic)
-            lastExport = url
-            notice = "Saved \(url.lastPathComponent)"
-        } catch {
-            notice = "Could not save: \(error.localizedDescription)"
+        let gradient = current
+        exporting = true
+        notice = "Exporting \(width) × \(height)"
+        // Rendering and encoding run off the main thread; the file is written only if the export was not cancelled.
+        exportTask = Task {
+            let data = await Task.detached(priority: .userInitiated) {
+                Export.png(gradient, width: width, height: height)
+            }.value
+            guard !Task.isCancelled else { return }
+            exporting = false
+            exportTask = nil
+            guard let data else { notice = "Could not render the image"; return }
+            do {
+                try data.write(to: url, options: .atomic)
+                lastExport = url
+                notice = "Saved \(url.lastPathComponent)"
+            } catch {
+                notice = "Could not save: \(error.localizedDescription)"
+            }
         }
+    }
+
+    func cancelExport() {
+        exportTask?.cancel()
+        exportTask = nil
+        exporting = false
+        notice = "Export cancelled"
     }
 }

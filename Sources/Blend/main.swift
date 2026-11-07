@@ -76,8 +76,8 @@ func appIcon() -> NSBitmapImageRep {
         let shade = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
                                colors: [NSColor.black.withAlphaComponent(0).cgColor,
                                         NSColor.black.withAlphaComponent(0).cgColor,
-                                        rgb(0x1A1050, 0.45).cgColor] as CFArray,
-                               locations: [0, 0.62, 1])!
+                                        rgb(0x2A1A78, 0.38).cgColor] as CFArray,
+                               locations: [0, 0.7, 1])!
         ctx.drawRadialGradient(shade, startCenter: CGPoint(x: orb.midX - 60, y: orb.midY + 70), startRadius: 0,
                                endCenter: CGPoint(x: orb.midX, y: orb.midY), endRadius: orb.width / 2, options: [])
         // Reflected light along the lower edge.

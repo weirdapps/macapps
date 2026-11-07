@@ -10,6 +10,17 @@ enum Theme {
     static let hairline = Color.primary.opacity(0.1)
 }
 
+/// Routes Edit menu commands to a focused text field, which would otherwise lose them to the gradient.
+@MainActor
+enum TextEditing {
+    static var active: Bool { (NSApp.keyWindow?.firstResponder as? NSTextView)?.isEditable == true }
+
+    /// Sends a standard responder action (`undo:`, `redo:`, `deleteToBeginningOfLine:`) to the focused field.
+    static func send(_ action: String) {
+        NSApp.sendAction(Selector(action), to: nil, from: nil)
+    }
+}
+
 // MARK: - Rendering
 
 /// Fills its frame with the gradient, the same way the CSS output draws it.
@@ -108,6 +119,7 @@ struct BlendToolbar: ToolbarContent {
                 .help("Copy CSS (⇧⌘C)")
             Button { model.showingExport = true } label: { Label("Export PNG", systemImage: "photo.badge.arrow.down") }
                 .help("Export PNG (⇧⌘E)")
+                .disabled(model.exporting)
         }
     }
 }
@@ -286,11 +298,25 @@ struct NoticeBanner: View {
     var body: some View {
         Group {
             if let notice = model.notice {
+                let deleted = notice.hasPrefix("Deleted ") && model.recentlyDeleted != nil
+                let file = notice.hasPrefix("Saved ") && notice != "Saved to library" ? model.lastExport : nil
                 HStack(spacing: 10) {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.accent)
-                    Text(notice).font(.system(size: 12, weight: .semibold))
-                    if notice.hasPrefix("Saved "), notice != "Saved to library", let url = model.lastExport {
-                        Button("Show in Finder") { revealInFinder([url]) }
+                    if model.exporting {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: deleted ? "trash.fill" : "checkmark.circle.fill").foregroundStyle(Theme.accent)
+                    }
+                    Text(notice).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                    if let file {
+                        Button("Show in Finder") { revealInFinder([file]) }
+                            .buttonStyle(.link).font(.system(size: 12, weight: .semibold))
+                    }
+                    if deleted {
+                        Button("Undo") { model.undoDelete() }
+                            .buttonStyle(.link).font(.system(size: 12, weight: .semibold))
+                    }
+                    if model.exporting {
+                        Button("Cancel") { model.cancelExport() }
                             .buttonStyle(.link).font(.system(size: 12, weight: .semibold))
                     }
                 }
@@ -299,7 +325,9 @@ struct NoticeBanner: View {
                 .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
                 .task(id: notice) {
-                    try? await Task.sleep(for: .seconds(notice.hasPrefix("Saved ") && notice != "Saved to library" ? 5 : 1.6))
+                    if model.exporting { return }
+                    let lingers = (notice.hasPrefix("Saved ") && notice != "Saved to library") || notice.hasPrefix("Deleted ")
+                    try? await Task.sleep(for: .seconds(lingers ? 5 : 1.6))
                     withAnimation(.snappy) { model.notice = nil }
                 }
             }
@@ -431,6 +459,9 @@ struct Card<Content: View>: View {
 struct Inspector: View {
     @ObservedObject var model: BlendModel
     @State private var hexText = ""
+    @FocusState private var focus: Field?
+
+    enum Field { case name, hex, position, angle }
 
     private var stopColor: Binding<Color> {
         Binding(get: { model.selectedStopValue?.color.color ?? .clear },
@@ -453,6 +484,7 @@ struct Inspector: View {
                     label("Name")
                     TextField("Name", text: Binding(get: { model.current.name }, set: { model.rename($0) }))
                         .textFieldStyle(.roundedBorder)
+                        .focused($focus, equals: .name)
                 }
                 GridRow {
                     label("Stop")
@@ -463,12 +495,14 @@ struct Inspector: View {
                             .textFieldStyle(.roundedBorder)
                             .font(.system(size: 12, design: .monospaced))
                             .frame(width: 88)
+                            .focused($focus, equals: .hex)
                             .onSubmit(applyHex)
                         TextField("Position", value: stopLocation, format: .number.precision(.fractionLength(0...1)))
                             .textFieldStyle(.roundedBorder)
                             .multilineTextAlignment(.trailing)
                             .monospacedDigit()
                             .frame(width: 50)
+                            .focused($focus, equals: .position)
                         Text("%").foregroundStyle(.secondary)
                         Spacer(minLength: 0)
                         Button { model.deleteSelectedStop() } label: { Image(systemName: "trash") }
@@ -489,6 +523,7 @@ struct Inspector: View {
                                 .multilineTextAlignment(.trailing)
                                 .monospacedDigit()
                                 .frame(width: 56)
+                                .focused($focus, equals: .angle)
                             Text("°").foregroundStyle(.secondary)
                             Spacer(minLength: 0)
                             if model.current.kind == .conic {
@@ -514,6 +549,10 @@ struct Inspector: View {
         }
         .onAppear { hexText = model.selectedStopValue?.color.hex ?? "" }
         .onChange(of: model.selectedStopValue?.color) { _, c in hexText = c?.hex ?? "" }
+        .onChange(of: focus) { old, new in
+            if old == .hex, new != .hex { applyHex() }
+            model.textFocused = new != nil
+        }
     }
 
     private var centerRow: some View {
@@ -715,6 +754,9 @@ struct ExportSheet: View {
 struct BlendCommands: Commands {
     @ObservedObject var model: BlendModel
 
+    /// A text field (in the window or the export sheet) may have focus: keep the text commands available.
+    private var typing: Bool { model.textFocused || model.showingExport }
+
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             Button("New Gradient") { model.newGradient() }.keyboardShortcut("n")
@@ -726,10 +768,13 @@ struct BlendCommands: Commands {
         }
         CommandGroup(replacing: .importExport) {
             Button("Export PNG…") { model.showingExport = true }.keyboardShortcut("e", modifiers: [.command, .shift])
+                .disabled(model.exporting)
         }
         CommandGroup(replacing: .undoRedo) {
-            Button("Undo") { model.undo() }.keyboardShortcut("z").disabled(!model.canUndo)
-            Button("Redo") { model.redo() }.keyboardShortcut("z", modifiers: [.command, .shift]).disabled(!model.canRedo)
+            Button("Undo") { TextEditing.active ? TextEditing.send("undo:") : model.undo() }
+                .keyboardShortcut("z").disabled(!(model.canUndo || typing))
+            Button("Redo") { TextEditing.active ? TextEditing.send("redo:") : model.redo() }
+                .keyboardShortcut("z", modifiers: [.command, .shift]).disabled(!(model.canRedo || typing))
         }
         CommandGroup(after: .pasteboard) {
             Divider()
@@ -750,7 +795,10 @@ struct BlendCommands: Commands {
                 .keyboardShortcut("b", modifiers: [.command, .option])
             Divider()
             Button("Add Stop") { model.addStopInWidestGap() }.keyboardShortcut("=")
-            Button("Delete Stop") { model.deleteSelectedStop() }.keyboardShortcut(.delete).disabled(!model.canDeleteStop)
+            Button("Delete Stop") {
+                TextEditing.active ? TextEditing.send("deleteToBeginningOfLine:") : model.deleteSelectedStop()
+            }
+            .keyboardShortcut(.delete).disabled(!(model.canDeleteStop || typing))
             Button("Select Previous Stop") { model.selectNeighbourStop(-1) }.keyboardShortcut("[")
             Button("Select Next Stop") { model.selectNeighbourStop(1) }.keyboardShortcut("]")
             Divider()

@@ -26,6 +26,7 @@ enum SelfTest {
         geometry()
         editing()
         random()
+        robustness()
         rendering()
         print(failures == 0 ? "All \(checks) checks passed." : "\(failures) of \(checks) checks failed.")
         return failures == 0 ? 0 : 1
@@ -179,6 +180,56 @@ enum SelfTest {
         check(ok, "random gradients have two or more in-gamut stops spanning 0 to 100%")
     }
 
+    private static func robustness() {
+        // Random is one undo step, and undo brings back the library row it replaced.
+        let m = BlendModel(persists: false)
+        m.newGradient()
+        let mine = m.current
+        m.randomize()
+        check(m.current.id != mine.id && m.selection == nil, "random replaces the gradient on screen")
+        m.undo()
+        check(m.current == mine && m.selection == .library(mine.id), "undo after random brings back the library gradient")
+        m.redo()
+        check(m.current.id != mine.id && m.selection == nil, "redo rolls the random gradient again")
+
+        // Deleting from the library can be undone, back in place.
+        let l = BlendModel(persists: false)
+        l.newGradient(); l.newGradient(); l.newGradient()
+        let middle = l.library[1]
+        l.delete(middle.id)
+        check(l.library.count == 2 && l.notice?.hasPrefix("Deleted ") == true, "delete says what it removed")
+        l.undoDelete()
+        check(l.library.count == 3 && l.library[1] == middle && l.current.id == middle.id, "undo delete puts the gradient back in place")
+
+        // Odd data from disk is repaired instead of crashing the editor.
+        var bad = BlendGradient(name: "Bad", colors: [0xFF0000])
+        bad.angle = .nan
+        bad.centerX = .infinity
+        bad.stops[0].location = .nan
+        bad.stops[0].color.r = 7
+        let fixed = bad.sanitized
+        check(fixed.stops.count == 2 && fixed.angle == 0 && fixed.centerX == 0.5 && fixed.stops[0].color.r == 1
+              && fixed.stops.allSatisfy { $0.location.isFinite }, "a one stop gradient with bad numbers is repaired")
+        var empty = BlendGradient(name: "Empty", colors: [])
+        empty.stops = []
+        check(empty.sanitized.stops.count == 2, "a gradient with no stops gets two")
+        var twin = BlendGradient(name: "Twin", colors: [0xFF0000, 0x0000FF])
+        twin.stops[1].id = twin.stops[0].id
+        let repaired = BlendModel.repaired([twin, twin])
+        check(Set(repaired[0].stops.map(\.id)).count == 2 && repaired[0].id != repaired[1].id,
+              "duplicate gradient and stop ids get fresh ones")
+        let one = BlendModel(persists: false)
+        one.distribute()
+        check(one.current.stops.allSatisfy { $0.location.isFinite }, "distribute keeps finite positions")
+
+        check(Export.fileName("") == "Gradient.png" && Export.fileName("  ") == "Gradient.png"
+              && Export.fileName(".hidden") == "Gradient.png" && Export.fileName("Hero") == "Hero.png",
+              "PNG file names never come out empty or hidden")
+        let unicode = BlendGradient(name: "Ζεστό 🌅", colors: [0xFF0000, 0x0000FF])
+        check(Export.css(unicode).hasPrefix("background: linear-gradient(") && Export.fileName(unicode.name) == "Ζεστό 🌅.png",
+              "unicode names export cleanly")
+    }
+
     private static func pixel(_ data: Data?, _ x: Int, _ y: Int) -> RGBA? {
         guard let data, let rep = NSBitmapImageRep(data: data), let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { return nil }
         return RGBA(r: c.redComponent, g: c.greenComponent, b: c.blueComponent, a: c.alphaComponent)
@@ -200,5 +251,27 @@ enum SelfTest {
         let c = Export.png(conic, width: 100, height: 100)
         let after = pixel(c, 54, 2), before = pixel(c, 46, 2)
         check((after?.r ?? 0) > 0.85 && (before?.b ?? 0) > 0.85, "PNG conic starts at the top and turns clockwise")
+
+        // The exported PNG matches what the preview shows, for every kind and both blend spaces.
+        for preset in [Presets.all[0], Presets.all[5], Presets.all[6], Presets.all[8]] {
+            for space in Interpolation.allCases {
+                var g = preset
+                g.interpolation = space
+                let exported = Export.png(g, width: 120, height: 80)
+                let renderer = ImageRenderer(content: GradientFill(gradient: g).frame(width: 120, height: 80))
+                renderer.scale = 1
+                let shown = renderer.nsImage?.tiffRepresentation
+                var worst = 0.0
+                for (x, y) in [(10, 10), (60, 40), (110, 70), (30, 60), (95, 20)] {
+                    guard let a = pixel(exported, x, y), let b = pixel(shown, x, y) else { worst = 1; continue }
+                    worst = max(worst, abs(a.r - b.r), abs(a.g - b.g), abs(a.b - b.b))
+                }
+                check(worst < 0.04, "PNG export of \(g.name) in \(space.rawValue) matches the preview, off by \(worst)")
+            }
+        }
+        let wide = Export.png(Presets.all[2], width: 3000, height: 7)
+        check(wide.flatMap { NSBitmapImageRep(data: $0) }.map { $0.pixelsWide == 3000 && $0.pixelsHigh == 7 } == true,
+              "odd export sizes come out exact")
+        check(Export.png(Presets.all[0], width: 0, height: 10) == nil, "a zero size export is refused, not crashed")
     }
 }
