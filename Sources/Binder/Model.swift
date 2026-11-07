@@ -72,8 +72,6 @@ enum Binder {
     /// Every PDFDocument read and write after loading happens here, off the main thread.
     static let queue = DispatchQueue(label: "com.weirdapps.binder.pdf", qos: .userInitiated)
 
-    static let imageTypes: [UTType] = [.png, .jpeg, .heic, .tiff, .gif, .bmp, .webP, .image]
-
     /// Expands folders (one level, sorted by name like Finder) and keeps only PDFs and images.
     static func expand(_ urls: [URL]) -> [URL] {
         var out: [URL] = []
@@ -101,12 +99,13 @@ enum Binder {
         let name = url.deletingPathExtension().lastPathComponent
         let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Int64($0) } ?? 0
         let type = UTType(filenameExtension: url.pathExtension)
-        if type?.conforms(to: .pdf) ?? false {
-            guard let doc = PDFDocument(url: url) else { throw LoadError.unreadable(url.lastPathComponent) }
+        // Anything not named as an image is tried as a PDF first, so a PDF without an extension keeps all its pages.
+        if !(type?.conforms(to: .image) ?? false), let doc = PDFDocument(url: url) {
             if doc.isLocked { throw LoadError.locked(url.lastPathComponent) }
             if doc.pageCount == 0 { throw LoadError.empty(url.lastPathComponent) }
             return Source(name: name, url: url, document: doc, tint: tint, bytes: bytes, isImage: false)
         }
+        if type?.conforms(to: .pdf) ?? false { throw LoadError.unreadable(url.lastPathComponent) }
         guard let image = NSImage(contentsOf: url), image.isValid, let page = imagePage(image) else {
             throw LoadError.unreadable(url.lastPathComponent)
         }
@@ -191,6 +190,17 @@ enum Binder {
             n += 1
         }
         return url
+    }
+
+    /// A name Finder accepts: no slashes or colons, no leading dots that would hide the file, not too long.
+    static func safeFileName(_ name: String, fallback: String = "Binder") -> String {
+        var t = name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+            .components(separatedBy: .newlines).joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        while t.hasPrefix(".") { t.removeFirst() }
+        while t.utf8.count > 200 { t.removeLast() }
+        t = t.trimmingCharacters(in: .whitespaces)
+        return t.isEmpty ? fallback : t
     }
 
     /// File names for a split: `Base 07` for single pages (zero padded to the page count), `Base 1-3` for ranges.
@@ -285,23 +295,38 @@ struct Notice: Equatable {
 
 @MainActor
 final class BinderModel: ObservableObject {
-    static let shared = BinderModel()
+    static let shared = BinderModel(defaults: Desktop.isSnapshot ? nil : .standard)
+    static let tileSizeKey = "tileSize"
+    /// Where the thumbnail size is remembered; nil for the demo and tests.
+    private let defaults: UserDefaults?
+
+    init(defaults: UserDefaults? = nil) {
+        self.defaults = defaults
+        if let saved = defaults?.object(forKey: Self.tileSizeKey) as? Double, saved.isFinite {
+            tileSize = min(Self.tileRange.upperBound, max(Self.tileRange.lowerBound, saved))
+        }
+    }
 
     @Published private(set) var sources: [Source] = []
     @Published private(set) var pages: [PageItem] = []
     @Published var selection: Set<UUID> = []
     @Published private(set) var thumbnails: [String: NSImage] = [:]
-    @Published var tileSize: Double = 150
+    @Published var tileSize: Double = 150 {
+        didSet { defaults?.set(tileSize, forKey: Self.tileSizeKey) }
+    }
     @Published var dropTarget: UUID?
     @Published var job: Job?
     @Published var notice: Notice?
     @Published var errorMessage: String?
+    @Published private(set) var errorTitle = "Some files could not be added"
     @Published var showingSplit = false
     /// The page the website snapshot shows hovered, with its buttons.
     var demoHover: UUID?
 
     weak var undoManager: UndoManager?
     var dragging: Set<UUID> = []
+    /// The text a page drag carries, checked on drop so text from another app never moves pages.
+    private(set) var dragPayload: String?
     private var anchor: UUID?
     private var nextTint = 0
     private var requested: Set<String> = []
@@ -362,7 +387,7 @@ final class BinderModel: ObservableObject {
                 problems.append(error.localizedDescription)
             }
         }
-        if !problems.isEmpty { errorMessage = problems.joined(separator: "\n") }
+        if !problems.isEmpty { fail("Some files could not be added", problems.joined(separator: "\n")) }
         add(added, at: index)
     }
 
@@ -434,7 +459,13 @@ final class BinderModel: ObservableObject {
 
     // MARK: Selection
 
+    func fail(_ title: String, _ message: String) {
+        errorTitle = title
+        errorMessage = message
+    }
+
     func click(_ id: UUID, modifiers: NSEvent.ModifierFlags) {
+        if !dragging.isEmpty { endDrag() }
         if modifiers.contains(.command) {
             if selection.contains(id) { selection.remove(id) } else { selection.insert(id) }
             anchor = id
@@ -467,12 +498,21 @@ final class BinderModel: ObservableObject {
     func beginDrag(_ id: UUID) -> Set<UUID> {
         if !selection.contains(id) { selection = [id]; anchor = id }
         dragging = selection
+        dragPayload = "Binder: \(dragging.count) page\(dragging.count == 1 ? "" : "s") (\(UUID().uuidString.prefix(8)))"
         return dragging
     }
 
     func endDrag() {
         dragging = []
+        dragPayload = nil
         dropTarget = nil
+    }
+
+    /// Finishes a drop of dragged pages: they move only if the dropped text is this drag's own.
+    func dropPages(payload: String?, before target: UUID?) {
+        defer { endDrag() }
+        guard let payload, payload == dragPayload, !dragging.isEmpty else { return }
+        move(dragging, before: target)
     }
 
     // MARK: Thumbnails
@@ -491,7 +531,8 @@ final class BinderModel: ObservableObject {
     }
 
     private static func store(_ image: NSImage?, key: String, in model: BinderModel) {
-        if let image { model.thumbnails[key] = image }
+        // A failed render is forgotten so the tile asks again when it next appears.
+        if let image { model.thumbnails[key] = image } else { model.requested.remove(key) }
     }
 
     nonisolated static func renderThumbnail(_ source: Source, index: Int) -> NSImage? {
@@ -522,8 +563,10 @@ final class BinderModel: ObservableObject {
 
     /// Writes one file per group of 1-based positions into `folder`.
     func split(_ groups: [[Int]], into folder: URL, base: String) {
+        let groups = groups.map { $0.filter { pages.indices.contains($0 - 1) } }.filter { !$0.isEmpty }
+        guard !groups.isEmpty else { return }
         let items = groups.map { g in g.map { pages[$0 - 1] } }
-        let names = Binder.splitNames(groups, base: base, total: pages.count)
+        let names = Binder.splitNames(groups, base: Binder.safeFileName(base, fallback: suggestedName), total: pages.count)
         var used: Set<String> = []
         let urls = names.map { name -> URL in
             var url = Binder.uniqueURL(in: folder, name: name)
@@ -568,7 +611,9 @@ final class BinderModel: ObservableObject {
                     let model = self
                     model.job = nil
                     model.cancelToken = nil
-                    if let finalFailure { model.errorMessage = finalFailure }
+                    if let finalFailure {
+                        model.fail("The PDF could not be saved", finalFailure + " Check that the folder exists and you can write to it.")
+                    }
                     if !finalWritten.isEmpty {
                         let text = cancelled ? "Stopped after \(finalWritten.count) file\(finalWritten.count == 1 ? "" : "s")" : message(total)
                         withAnimation(.snappy) { model.notice = Notice(text: text, urls: finalWritten) }

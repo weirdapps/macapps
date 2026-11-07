@@ -23,6 +23,93 @@ enum SelfTest {
         names()
         files()
         modelEdits()
+        oddInput()
+        dragAndPrefs()
+    }
+
+    /// Odd names and files: each check stands for a bug found in review.
+    @MainActor
+    private static func oddInput() {
+        check(Binder.safeFileName("Q3/Q4: notes") == "Q3-Q4- notes", "slashes and colons become dashes in file names")
+        check(Binder.safeFileName("..hidden") == "hidden", "leading dots never hide a split file")
+        check(Binder.safeFileName("   ", fallback: "Doc") == "Doc", "a blank name falls back")
+        check(Binder.safeFileName("Résumé 📄") == "Résumé 📄", "unicode names are kept")
+        check(Binder.safeFileName(String(repeating: "é", count: 300)).utf8.count <= 200, "very long names are shortened")
+        check(Binder.safeFileName("a\nb") == "a b", "line breaks become spaces")
+
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("BinderOdd-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let doc = DemoPDF.document(.letter, title: "Odd", pages: 3)
+
+        let bare = dir.appendingPathComponent("scan")
+        _ = doc.write(to: bare)
+        check((try? Binder.load(bare, tint: 0))?.pageCount == 3, "a PDF without an extension keeps all its pages")
+        let upper = dir.appendingPathComponent("SCAN.PDF")
+        _ = doc.write(to: upper)
+        check((try? Binder.load(upper, tint: 0))?.pageCount == 3, "an upper case .PDF loads")
+        let emptyPDF = dir.appendingPathComponent("Empty.pdf")
+        FileManager.default.createFile(atPath: emptyPDF.path, contents: Data())
+        do { _ = try Binder.load(emptyPDF, tint: 0); check(false, "an empty PDF file is refused") } catch {
+            check(error as? LoadError == .unreadable("Empty.pdf"), "an empty PDF file is refused")
+        }
+        let emptyPNG = dir.appendingPathComponent("Empty.png")
+        FileManager.default.createFile(atPath: emptyPNG.path, contents: Data())
+        check((try? Binder.load(emptyPNG, tint: 0)) == nil, "an empty image file is refused")
+        let huge = NSImage(size: NSSize(width: 6000, height: 3000), flipped: false) { r in NSColor.gray.setFill(); r.fill(); return true }
+        let hugeBox = Binder.imagePage(huge)?.bounds(for: .mediaBox).size ?? .zero
+        check(max(hugeBox.width, hugeBox.height) <= 1700.5 && hugeBox.width > hugeBox.height, "huge images become a sensible page size")
+
+        let model = BinderModel()
+        model.add([Source(name: "Odd", url: nil, document: doc, tint: 0, bytes: 3000, isImage: false)])
+        model.split([[1], [2, 3]], into: dir, base: "Q1/Q2")
+        Binder.queue.sync {}
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        check(FileManager.default.fileExists(atPath: dir.appendingPathComponent("Q1-Q2 1.pdf").path)
+              && FileManager.default.fileExists(atPath: dir.appendingPathComponent("Q1-Q2 2-3.pdf").path),
+              "a slash in the split name does not make a subfolder")
+        model.notice = nil
+        model.split([[9]], into: dir, base: "Gone")
+        check(model.job == nil, "a split with no valid pages does nothing")
+
+        model.exportPDF(to: dir.appendingPathComponent("missing/Out.pdf"))
+        Binder.queue.sync {}
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        check(model.errorMessage != nil && model.errorTitle == "The PDF could not be saved" && model.job == nil,
+              "a failed export says the PDF was not saved, not that files could not be added")
+        model.add([URL(fileURLWithPath: "/nonexistent/x.pdf")])
+        check(model.errorTitle == "Some files could not be added", "a bad file says it could not be added")
+    }
+
+    @MainActor
+    private static func dragAndPrefs() {
+        let model = BinderModel()
+        let doc = DemoPDF.document(.letter, title: "Drag", pages: 3)
+        model.add([Source(name: "Drag", url: nil, document: doc, tint: 0, bytes: 3000, isImage: false)])
+        let ids = model.pages.map(\.id)
+        model.selectNone()
+        _ = model.beginDrag(ids[0])
+        model.dropPages(payload: "some text from another app", before: nil)
+        check(model.pages.map(\.id) == ids && model.dragging.isEmpty, "text from another app never moves pages")
+        _ = model.beginDrag(ids[0])
+        model.dropPages(payload: model.dragPayload, before: nil)
+        check(model.pages.map(\.index) == [1, 2, 0], "the drag's own drop moves the pages")
+        _ = model.beginDrag(ids[1])
+        let stale = model.dragPayload
+        model.click(ids[2], modifiers: [])
+        check(model.dragging.isEmpty, "a click clears a drag that was cancelled outside the window")
+        model.dropPages(payload: stale, before: nil)
+        check(model.pages.map(\.index) == [1, 2, 0], "a stale drag cannot move pages later")
+
+        let suite = "BinderSelfTest-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else { check(false, "test defaults"); return }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let first = BinderModel(defaults: defaults)
+        first.tileSize = 212
+        check(BinderModel(defaults: defaults).tileSize == 212, "thumbnail size is remembered")
+        defaults.set(9999.0, forKey: BinderModel.tileSizeKey)
+        check(BinderModel(defaults: defaults).tileSize == BinderModel.tileRange.upperBound, "a saved size out of range is clamped")
+        check(BinderModel().tileSize == 150, "the demo and tests never read saved settings")
     }
 
     private static func ranges() {

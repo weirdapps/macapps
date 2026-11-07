@@ -74,7 +74,7 @@ struct BinderCommands: Commands {
                 .disabled(model.sources.isEmpty || editing)
         }
         CommandGroup(after: .toolbar) {
-            Button("Larger Thumbnails") { zoom(30) }.keyboardShortcut("+")
+            Button("Larger Thumbnails") { zoom(30) }.keyboardShortcut("=")
             Button("Smaller Thumbnails") { zoom(-30) }.keyboardShortcut("-")
             Divider()
         }

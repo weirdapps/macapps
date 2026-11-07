@@ -36,7 +36,7 @@ struct ContentView: View {
         .navigationSubtitle(model.pages.isEmpty ? "" : "\(model.pages.count) page\(model.pages.count == 1 ? "" : "s")")
         .toolbar { Toolbar(model: model) }
         .sheet(isPresented: $model.showingSplit) { SplitSheet(model: model) }
-        .alert("Some files could not be added", isPresented: Binding(get: { model.errorMessage != nil },
+        .alert(model.errorTitle, isPresented: Binding(get: { model.errorMessage != nil },
                                                                    set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK") { model.errorMessage = nil }
         } message: {
@@ -107,6 +107,10 @@ struct SourceList: View {
             }
         }
         .listStyle(.sidebar)
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            Task { @MainActor in model.add(await PageDrop.urls(from: providers)) }
+            return true
+        }
         .overlay {
             if model.sources.isEmpty {
                 Text("Files you add are listed here, each with its own colour.")
@@ -150,18 +154,32 @@ struct SourceRow: View {
 struct PageGrid: View {
     @ObservedObject var model: BinderModel
     @FocusState private var focused: Bool
+    @State private var width: CGFloat = 0
+
+    private enum Layout {
+        static let gutter: CGFloat = 22
+        static let spacing: CGFloat = 12
+    }
+
+    /// How many tiles fit in a row, the way the adaptive grid lays them out; up and down arrows step by this.
+    private var columns: Int {
+        let minimum = model.tileSize + 20
+        return max(1, Int((width - 2 * Layout.gutter + Layout.spacing) / (minimum + Layout.spacing)))
+    }
 
     var body: some View {
         ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: model.tileSize + 20, maximum: model.tileSize + 50), spacing: 12, alignment: .top)],
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: model.tileSize + 20, maximum: model.tileSize + 50),
+                                         spacing: Layout.spacing, alignment: .top)],
                       spacing: 18) {
                 ForEach(Array(model.pages.enumerated()), id: \.element.id) { position, page in
-                    PageTile(model: model, page: page, position: position + 1)
+                    PageTile(model: model, page: page, position: position + 1) { focused = true }
                 }
             }
-            .padding(.horizontal, 22)
+            .padding(.horizontal, Layout.gutter)
             .padding(.vertical, 20)
         }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
         .background {
             Color(nsColor: .underPageBackgroundColor).opacity(0.28)
                 .contentShape(Rectangle())
@@ -180,6 +198,10 @@ struct PageGrid: View {
             if press.modifiers.contains(.command) { model.nudge(step) } else { model.step(step, extend: press.modifiers.contains(.shift)) }
             return .handled
         }
+        .onKeyPress(keys: [.upArrow, .downArrow]) { press in
+            model.step(press.key == .upArrow ? -columns : columns, extend: press.modifiers.contains(.shift))
+            return .handled
+        }
     }
 }
 
@@ -187,6 +209,8 @@ struct PageTile: View {
     @ObservedObject var model: BinderModel
     let page: PageItem
     let position: Int
+    /// Gives the grid keyboard focus, so arrows and Delete work after a click.
+    var focus: () -> Void = {}
     @State private var hovering = false
 
     private var source: Source? { model.source(page.sourceID) }
@@ -218,14 +242,21 @@ struct PageTile: View {
             caption
         }
         .contentShape(Rectangle())
-        .onHover { if !Desktop.isSnapshot { hovering = $0 } }
+        .onHover { inside in
+            guard !Desktop.isSnapshot else { return }
+            hovering = inside
+            // Hover events only arrive outside a drag, so a drag still marked here was cancelled elsewhere.
+            if inside, !model.dragging.isEmpty, NSEvent.pressedMouseButtons == 0 { model.endDrag() }
+        }
         .animation(.snappy(duration: 0.18), value: hovering)
         .animation(.snappy(duration: 0.18), value: model.dropTarget)
-        .onTapGesture { model.click(page.id, modifiers: NSEvent.modifierFlags) }
+        .onTapGesture {
+            model.click(page.id, modifiers: NSEvent.modifierFlags)
+            focus()
+        }
         .onDrag {
-            let ids = model.beginDrag(page.id)
-            let provider = NSItemProvider(object: "Binder: \(ids.count) page\(ids.count == 1 ? "" : "s")" as NSString)
-            return provider
+            _ = model.beginDrag(page.id)
+            return NSItemProvider(object: (model.dragPayload ?? "") as NSString)
         } preview: {
             DragPreview(count: model.dragging.count, image: model.thumbnails[page.thumbnailKey])
         }
@@ -366,8 +397,15 @@ struct PageDrop: DropDelegate {
 
     func performDrop(info: DropInfo) -> Bool {
         if !model.dragging.isEmpty && !info.hasItemsConforming(to: [.fileURL]) {
-            model.move(model.dragging, before: target)
-            model.endDrag()
+            // Move only when the text dropped is this drag's own, never text from another app.
+            guard let provider = info.itemProviders(for: [.plainText]).first else { model.endDrag(); return false }
+            let model = model, target = target
+            Task { @MainActor in
+                let text: String? = await withCheckedContinuation { done in
+                    _ = provider.loadObject(ofClass: NSString.self) { value, _ in done.resume(returning: (value as? NSString).map { $0 as String }) }
+                }
+                model.dropPages(payload: text, before: target)
+            }
             return true
         }
         let providers = info.itemProviders(for: [.fileURL])
@@ -426,7 +464,7 @@ struct StatusBar: View {
                     Slider(value: $model.tileSize, in: BinderModel.tileRange).controlSize(.mini).tint(Theme.top).frame(width: 90)
                     Image(systemName: "square.grid.2x2").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
-                .help("Thumbnail size (⌘+ and ⌘-)")
+                .help("Thumbnail size (⌘= and ⌘-)")
             }
         }
         .font(.system(size: 12))
@@ -506,7 +544,7 @@ struct SplitSheet: View {
                 Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Choose Folder…") {
                     guard let groups else { return }
-                    let name = base.trimmingCharacters(in: .whitespaces).isEmpty ? model.suggestedName : base
+                    let name = fileName
                     dismiss()
                     DispatchQueue.main.async { model.splitPanel(groups, base: name) }
                 }
@@ -519,9 +557,11 @@ struct SplitSheet: View {
         .frame(width: 440)
     }
 
+    /// The base name as it will be written, with characters Finder refuses replaced.
+    private var fileName: String { Binder.safeFileName(base, fallback: model.suggestedName) }
+
     private func preview(_ groups: [[Int]]) -> String {
-        let name = base.trimmingCharacters(in: .whitespaces).isEmpty ? model.suggestedName : base
-        let names = Binder.splitNames(groups, base: name, total: model.pages.count)
+        let names = Binder.splitNames(groups, base: fileName, total: model.pages.count)
         let shown = names.prefix(2).map { $0 + ".pdf" }.joined(separator: ", ")
         return "Makes \(groups.count) PDF\(groups.count == 1 ? "" : "s"): \(shown)\(names.count > 2 ? " and \(names.count - 2) more" : "")"
     }
