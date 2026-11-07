@@ -1,5 +1,7 @@
 import AppKit
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 /// `Mat --selftest`: checks layout, rendering, persistence and naming without touching the user's data.
 enum SelfTest {
@@ -173,6 +175,95 @@ enum SelfTest {
         check(Renderer.exportName(for: "") == "Screenshot Mat.png", "export name has a fallback")
         let demo = DemoShot.make()
         check(demo.width == 1440 && demo.height == 900, "demo screenshot draws")
+
+        // Damaged settings are pulled back into range instead of breaking the window.
+        var wild = MatStyle()
+        wild.padding = 7
+        wild.radius = -3
+        wild.shadow = .nan
+        wild.scale = 0
+        wild.backdrop = .solid(42)
+        let tame = wild.sanitized()
+        check(tame.padding == 0.25 && tame.radius == 0 && tame.shadow == 0.55, "sanitize clamps sliders and replaces NaN")
+        check(tame.scale == 1 && tame.backdrop == .gradient(0), "sanitize fixes scale and an unknown preset")
+        check(MatStyle().sanitized() == MatStyle(), "sanitize leaves a good style alone")
+
+        // Huge or extreme screenshots never ask for an enormous bitmap.
+        style = MatStyle()
+        style.aspect = .square
+        layout = MatLayout.compute(image: CGSize(width: 12000, height: 40), style: style)
+        let huge = layout.pixels(scale: 2)
+        check(max(huge.width, huge.height) <= MatLayout.maxSide, "output is capped at the longest side Mat writes")
+        check(near(huge.width / huge.height, 1, 0.001), "the cap keeps the aspect ratio")
+        check(MatLayout.compute(image: CGSize(width: 1, height: 1), style: MatStyle()).pixels(scale: 1).width >= 1,
+              "a one pixel screenshot still lays out")
+        let tiny = solidImage(1, 1, 0x000000)
+        check(Renderer.render(tiny, style: MatStyle()) != nil, "a one pixel screenshot renders")
+
+        // Photos carry rotation as metadata; Mat applies it.
+        do {
+            let data = NSMutableData()
+            let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil)!
+            CGImageDestinationAddImage(dest, solidImage(200, 100, 0x2060E0), [kCGImagePropertyOrientation: 6] as CFDictionary)
+            CGImageDestinationFinalize(dest)
+            let rotated = Renderer.decode(data as Data)
+            check(rotated?.width == 100 && rotated?.height == 200, "EXIF orientation is applied on decode")
+        }
+        check(Renderer.decode(Data()) == nil, "empty data is rejected")
+
+        // Copy and export encode off the main thread through one helper.
+        if let enc = Renderer.encoded(red, style: MatStyle(), tiff: true) {
+            check(Renderer.decode(enc.png) != nil && enc.tiff.map { Renderer.decode($0) != nil } == true, "copy encodes PNG and TIFF")
+        } else {
+            check(false, "copy encodes")
+        }
+
+        MainActor.assumeIsolated {
+            // Pasting a non image file copied in Finder must not paste the file's icon.
+            let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mat-selftest-\(UUID().uuidString).txt")
+            try? Data("hello".utf8).write(to: tmp)
+            defer { try? FileManager.default.removeItem(at: tmp) }
+            let pb = NSPasteboard(name: NSPasteboard.Name("mat.selftest.\(UUID().uuidString)"))
+            defer { pb.releaseGlobally() }
+            pb.clearContents()
+            pb.writeObjects([tmp as NSURL])
+            if let tiff = NSBitmapImageRep(cgImage: red).tiffRepresentation { pb.setData(tiff, forType: .tiff) }
+            let model = MatModel(persist: false)
+            model.paste(from: pb)
+            check(!model.hasImage && model.toast?.isError == true, "pasting a Finder text file shows an error, not its icon")
+
+            let imagePB = NSPasteboard(name: NSPasteboard.Name("mat.selftest.\(UUID().uuidString)"))
+            defer { imagePB.releaseGlobally() }
+            imagePB.clearContents()
+            imagePB.setData(Renderer.png(red), forType: .png)
+            model.paste(from: imagePB)
+            check(model.hasImage && model.source?.width == 1000 && model.preview != nil, "pasting PNG data loads it with a preview")
+
+            // A colour drag is one undo step, other edits are their own.
+            let undo = UndoManager()
+            undo.groupsByEvent = false
+            model.undoManager = undo
+            let before = model.style
+            for hex: UInt32 in [0x111111, 0x222222, 0x333333] {
+                undo.beginUndoGrouping()
+                model.updateColour { $0.customTop = RGB(hex: hex); $0.backdrop = .custom }
+                undo.endUndoGrouping()
+            }
+            undo.beginUndoGrouping()
+            model.update { $0.border.toggle() }
+            undo.endUndoGrouping()
+            undo.undo()
+            check(model.style.border == before.border && model.style.customTop == RGB(hex: 0x333333), "undo reverts the last edit only")
+            // Count the undos that change something; empty groups from this test do not.
+            var steps = 0
+            while undo.canUndo {
+                let prior = model.style
+                undo.undo()
+                if model.style != prior { steps += 1 }
+            }
+            check(model.style == before && steps == 1, "one undo reverts a whole colour drag")
+            check(!model.style.isColourEdit(of: { var s = before; s.padding = 0.2; return s }()), "a padding change is not a colour edit")
+        }
 
         print("\(passed) passed, \(failures) failed")
         return failures == 0 ? 0 : 1

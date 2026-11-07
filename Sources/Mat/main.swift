@@ -36,10 +36,10 @@ struct MatApp: App {
             }
             CommandGroup(replacing: .saveItem) {
                 Button("Export PNG…") { model.export() }.keyboardShortcut("e", modifiers: [.command, .shift])
-                    .disabled(!model.hasImage)
+                    .disabled(!model.hasImage || model.busy)
             }
             CommandGroup(replacing: .pasteboard) {
-                Button("Copy Image") { model.copy() }.keyboardShortcut("c").disabled(!model.hasImage)
+                Button("Copy Image") { model.copy() }.keyboardShortcut("c").disabled(!model.hasImage || model.busy)
                 Button("Paste") { model.paste() }.keyboardShortcut("v")
             }
             CommandMenu("Style") {
@@ -95,10 +95,10 @@ struct ContentView: View {
                     .help("Paste a screenshot from the clipboard (⌘V)")
                 Button { model.copy() } label: { Label("Copy", systemImage: "doc.on.doc") }
                     .help("Copy the finished image (⌘C)")
-                    .disabled(!model.hasImage)
+                    .disabled(!model.hasImage || model.busy)
                 Button { model.export() } label: { Label("Export", systemImage: "square.and.arrow.up") }
                     .help("Export a PNG (⇧⌘E)")
-                    .disabled(!model.hasImage)
+                    .disabled(!model.hasImage || model.busy)
             }
         }
         .navigationTitle(model.hasImage ? model.sourceName : "Mat")
@@ -141,7 +141,8 @@ struct ContentView: View {
     private var toastView: some View {
         if let toast = model.toast {
             HStack(spacing: 10) {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.gradient)
+                Image(systemName: toast.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                    .foregroundStyle(toast.isError ? AnyShapeStyle(Color.orange) : AnyShapeStyle(Theme.gradient))
                 Text(toast.text).font(.system(size: 12.5, weight: .medium))
                 if let file = toast.file {
                     Button("Show in Finder") { revealInFinder([file]) }
@@ -176,6 +177,10 @@ struct ContentView: View {
                 Text("No image").foregroundStyle(.tertiary)
             }
             Spacer()
+            if model.busy {
+                ProgressView().controlSize(.mini)
+                Text("Rendering…")
+            }
             Text(model.style.aspect.title).foregroundStyle(.tertiary)
         }
         .font(.system(size: 11.5))
@@ -204,10 +209,10 @@ struct Inspector: View {
                         }
                         Text("Custom").foregroundStyle(.secondary)
                         Spacer()
-                        ColorPicker("Top", selection: colorBinding(\.customTop), supportsOpacity: false).labelsHidden()
-                            .controlSize(.small).help("Top left colour")
-                        ColorPicker("Bottom", selection: colorBinding(\.customBottom), supportsOpacity: false).labelsHidden()
-                            .controlSize(.small).help("Bottom right colour")
+                        ColourWell(colour: model.style.customTop) { c in model.updateColour { $0.customTop = c; $0.backdrop = .custom } }
+                            .help("Top left colour")
+                        ColourWell(colour: model.style.customBottom) { c in model.updateColour { $0.customBottom = c; $0.backdrop = .custom } }
+                            .help("Bottom right colour")
                     }
                 }
                 .padding(.vertical, 4)
@@ -243,7 +248,7 @@ struct Inspector: View {
                     .buttonStyle(.borderedProminent)
                     .tint(Theme.bottom)
                 }
-                .disabled(!model.hasImage)
+                .disabled(!model.hasImage || model.busy)
                 .padding(.vertical, 2)
             }
         }
@@ -260,11 +265,6 @@ struct Inspector: View {
                 }
             }
         }
-    }
-
-    private func colorBinding(_ key: WritableKeyPath<MatStyle, RGB>) -> Binding<Color> {
-        Binding(get: { model.style[keyPath: key].color },
-                set: { color in model.update("Change Colour") { $0[keyPath: key] = RGB(color); $0.backdrop = .custom } })
     }
 
     private func slider(_ title: String, value: WritableKeyPath<MatStyle, Double>, in range: ClosedRange<Double>,
@@ -331,7 +331,87 @@ struct Swatch: View {
     }
 }
 
+/// A colour swatch that edits through the shared system Colours panel, styled like the preset swatches.
+struct ColourWell: View {
+    let colour: RGB
+    let onChange: (RGB) -> Void
+    @State private var hovering = false
+    @StateObject private var link = ColourPanelLink()
+
+    var body: some View {
+        Button {
+            link.open(colour: colour, onChange: onChange)
+        } label: {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(colour.color)
+                .frame(width: 30, height: 24)
+                .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(.black.opacity(0.12)))
+                .overlay(alignment: .bottomTrailing) {
+                    Image(systemName: "eyedropper")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(colour.isLight ? .black.opacity(0.55) : .white.opacity(0.9))
+                        .padding(3)
+                }
+                .padding(2)
+                .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(link.active ? AnyShapeStyle(Theme.gradient) : AnyShapeStyle(.clear), lineWidth: 2))
+                .scaleEffect(hovering && !link.active ? 1.06 : 1)
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled()
+        .onHover { hovering = $0 }
+        .animation(.snappy(duration: 0.15), value: hovering)
+        .onChange(of: colour) { _, c in link.sync(c) }
+    }
+}
+
+/// Points the shared Colours panel at one swatch at a time, the way an NSColorWell does.
+@MainActor
+final class ColourPanelLink: NSObject, ObservableObject {
+    @Published private(set) var active = false
+    private var onChange: ((RGB) -> Void)?
+    private static weak var current: ColourPanelLink?
+
+    func open(colour: RGB, onChange: @escaping (RGB) -> Void) {
+        ColourPanelLink.current?.active = false
+        ColourPanelLink.current = self
+        self.onChange = onChange
+        active = true
+        let panel = NSColorPanel.shared
+        panel.showsAlpha = false
+        panel.setTarget(nil)
+        panel.color = NSColor(colour.color)
+        panel.setTarget(self)
+        panel.setAction(#selector(changed(_:)))
+        panel.orderFront(nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(closed(_:)), name: NSWindow.willCloseNotification, object: panel)
+    }
+
+    func sync(_ colour: RGB) {
+        guard active, RGB(NSColorPanel.shared.color).hex != colour.hex else { return }
+        NSColorPanel.shared.setTarget(nil)
+        NSColorPanel.shared.color = NSColor(colour.color)
+        NSColorPanel.shared.setTarget(self)
+    }
+
+    @objc func changed(_ sender: NSColorPanel) {
+        guard active else { return }
+        onChange?(RGB(sender.color))
+    }
+
+    @objc func closed(_ note: Notification) {
+        active = false
+        NotificationCenter.default.removeObserver(self, name: NSWindow.willCloseNotification, object: nil)
+    }
+}
+
 extension RGB {
+    init(_ color: NSColor) {
+        let c = color.usingColorSpace(.sRGB) ?? .white
+        self.init(r: Double(c.redComponent), g: Double(c.greenComponent), b: Double(c.blueComponent))
+    }
+
+
     var isLight: Bool { 0.299 * r + 0.587 * g + 0.114 * b > 0.7 }
 }
 

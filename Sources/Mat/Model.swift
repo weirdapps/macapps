@@ -149,6 +149,22 @@ struct MatStyle: Codable, Equatable {
         case .custom: (customTop, customBottom)
         }
     }
+
+    /// The same style with every value pulled back into the range the inspector offers, for a damaged or hand edited file.
+    func sanitized() -> MatStyle {
+        var s = self
+        func clamp(_ v: Double, _ lo: Double, _ hi: Double, _ fallback: Double) -> Double { v.isFinite ? min(max(v, lo), hi) : fallback }
+        s.padding = clamp(padding, 0, 0.25, 0.08)
+        s.radius = clamp(radius, 0, 40, 10)
+        s.shadow = clamp(shadow, 0, 1, 0.55)
+        s.scale = scale == 2 ? 2 : 1
+        switch backdrop {
+        case .gradient(let i) where !Presets.gradients.indices.contains(i): s.backdrop = .gradient(0)
+        case .solid(let i) where !Presets.solids.indices.contains(i): s.backdrop = .gradient(0)
+        default: break
+        }
+        return s
+    }
 }
 
 // MARK: - Layout and rendering
@@ -177,8 +193,13 @@ struct MatLayout: Equatable {
         return MatLayout(canvas: canvas, imageRect: rect, output: style.aspect.fixedSize ?? canvas)
     }
 
+    /// The longest side Mat will write, so a very long or very large screenshot cannot ask for gigabytes of memory.
+    static let maxSide: CGFloat = 16384
+
     func pixels(scale: Int) -> CGSize {
-        CGSize(width: (output.width * CGFloat(scale)).rounded(), height: (output.height * CGFloat(scale)).rounded())
+        let w = output.width * CGFloat(scale), h = output.height * CGFloat(scale)
+        let k = min(1, MatLayout.maxSide / max(w, h, 1))
+        return CGSize(width: max((w * k).rounded(), 1), height: max((h * k).rounded(), 1))
     }
 }
 
@@ -263,8 +284,31 @@ enum Renderer {
     }
 
     static func decode(_ data: Data) -> CGImage? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0 else { return nil }
+        let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let orientation = props?[kCGImagePropertyOrientation] as? Int ?? 1
+        // Photos from a phone carry their rotation as metadata; apply it so the mat is not drawn sideways.
+        if orientation != 1, let w = props?[kCGImagePropertyPixelWidth] as? Int, let h = props?[kCGImagePropertyPixelHeight] as? Int {
+            let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                            kCGImageSourceCreateThumbnailWithTransform: true,
+                                            kCGImageSourceThumbnailMaxPixelSize: max(w, h)]
+            if let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) { return image }
+        }
         return CGImageSourceCreateImageAtIndex(source, 0, nil)
+    }
+
+    /// The finished PNG and a TIFF twin for older apps that only paste TIFF.
+    static func encoded(_ source: CGImage, style: MatStyle, tiff: Bool) -> (png: Data, tiff: Data?, size: CGSize)? {
+        guard let image = render(source, style: style), let png = png(image) else { return nil }
+        var tiffData: Data?
+        if tiff {
+            let data = NSMutableData()
+            if let dest = CGImageDestinationCreateWithData(data, UTType.tiff.identifier as CFString, 1, nil) {
+                CGImageDestinationAddImage(dest, image, nil)
+                if CGImageDestinationFinalize(dest) { tiffData = data as Data }
+            }
+        }
+        return (png, tiffData, CGSize(width: image.width, height: image.height))
     }
 
     /// "Screenshot 2026-11-07.png" becomes "Screenshot 2026-11-07 Mat.png".
@@ -282,10 +326,13 @@ final class MatModel: ObservableObject {
     @Published private(set) var sourceName = ""
     @Published private(set) var preview: NSImage?
     @Published var toast: Toast?
+    /// True while an export or copy renders in the background.
+    @Published private(set) var busy = false
     @Published var style: MatStyle {
         didSet {
             guard style != oldValue else { return }
             if persist { Storage.save(style, app: "Mat", file: "style.json") }
+            if !style.isColourEdit(of: oldValue) { lastColourEdit = nil }
             refresh()
         }
     }
@@ -293,16 +340,20 @@ final class MatModel: ObservableObject {
     struct Toast: Equatable {
         let text: String
         let file: URL?
+        var isError = false
         let id = UUID()
     }
 
     weak var undoManager: UndoManager?
     private let persist: Bool
     private var sliderStart: MatStyle?
+    private var lastColourEdit: Date?
+    private var rendering = false
+    private var renderAgain = false
 
     init(persist: Bool = !Desktop.isSnapshot) {
         self.persist = persist
-        style = persist ? (Storage.load(MatStyle.self, app: "Mat", file: "style.json") ?? MatStyle()) : MatStyle()
+        style = persist ? (Storage.load(MatStyle.self, app: "Mat", file: "style.json")?.sanitized() ?? MatStyle()) : MatStyle()
     }
 
     static var demo: MatModel {
@@ -323,13 +374,14 @@ final class MatModel: ObservableObject {
     func set(_ image: CGImage, name: String) {
         source = image
         sourceName = name
+        preview = nil
         refresh()
     }
 
     @discardableResult
     func load(url: URL) -> Bool {
-        guard let data = try? Data(contentsOf: url), let image = Renderer.decode(data) else {
-            show("That file is not an image Mat can read.")
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe), let image = Renderer.decode(data) else {
+            show("\(url.lastPathComponent) is not an image Mat can read.", error: true)
             return false
         }
         set(image, name: url.lastPathComponent)
@@ -343,17 +395,20 @@ final class MatModel: ObservableObject {
         if panel.runModal() == .OK, let url = panel.url { load(url: url) }
     }
 
-    func paste() {
-        let pb = NSPasteboard.general
+    func paste(from pb: NSPasteboard = .general) {
+        // A file copied in Finder also puts its icon on the clipboard as TIFF; never paste the icon instead of the file.
         if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
-           let url = urls.first, load(url: url) { return }
+           let url = urls.first {
+            load(url: url)
+            return
+        }
         for type in [NSPasteboard.PasteboardType.png, .tiff] {
             if let data = pb.data(forType: type), let image = Renderer.decode(data) {
                 set(image, name: "Pasted Image.png")
                 return
             }
         }
-        show("The clipboard has no image. Take a screenshot with ⌃⇧⌘4, then paste.")
+        show("The clipboard has no image. Take a screenshot with ⌃⇧⌘4, then paste.", error: true)
     }
 
     func handleDrop(_ providers: [NSItemProvider]) -> Bool {
@@ -369,7 +424,11 @@ final class MatModel: ObservableObject {
             _ = provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
                 guard let data else { return }
                 Task { @MainActor in
-                    if let image = Renderer.decode(data) { self.set(image, name: "Dropped Image.png") }
+                    if let image = Renderer.decode(data) {
+                        self.set(image, name: "Dropped Image.png")
+                    } else {
+                        self.show("That is not an image Mat can read.", error: true)
+                    }
                 }
             }
             return true
@@ -380,36 +439,55 @@ final class MatModel: ObservableObject {
     // MARK: Output
 
     func copy() {
-        guard let source, let image = Renderer.render(source, style: style), let png = Renderer.png(image) else { return }
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.declareTypes([.png, .tiff], owner: nil)
-        pb.setData(png, forType: .png)
-        if let tiff = NSBitmapImageRep(cgImage: image).tiffRepresentation { pb.setData(tiff, forType: .tiff) }
-        show("Copied \(image.width) × \(image.height) PNG")
+        guard let source, !busy else { return }
+        let style = style
+        busy = true
+        Task.detached(priority: .userInitiated) {
+            let result = Renderer.encoded(source, style: style, tiff: true)
+            await MainActor.run {
+                self.busy = false
+                guard let result else { return self.show("Mat could not render the image.", error: true) }
+                let pb = NSPasteboard.general
+                pb.clearContents()
+                pb.declareTypes(result.tiff == nil ? [.png] : [.png, .tiff], owner: nil)
+                pb.setData(result.png, forType: .png)
+                if let tiff = result.tiff { pb.setData(tiff, forType: .tiff) }
+                self.show("Copied \(Int(result.size.width)) × \(Int(result.size.height)) PNG")
+            }
+        }
     }
 
     func export() {
-        guard let source else { return }
+        guard let source, !busy else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
         panel.nameFieldStringValue = Renderer.exportName(for: sourceName)
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard let image = Renderer.render(source, style: style), let png = Renderer.png(image) else {
-            show("Mat could not render the image.")
-            return
-        }
-        do {
-            try png.write(to: url, options: .atomic)
-            show("Saved \(url.lastPathComponent)", file: url)
-        } catch {
-            show("Could not save: \(error.localizedDescription)")
+        let style = style
+        busy = true
+        Task.detached(priority: .userInitiated) {
+            var message: (String, URL?, Bool)
+            if let result = Renderer.encoded(source, style: style, tiff: false) {
+                do {
+                    try result.png.write(to: url, options: .atomic)
+                    message = ("Saved \(url.lastPathComponent)", url, false)
+                } catch {
+                    message = ("Could not save: \(error.localizedDescription)", nil, true)
+                }
+            } else {
+                message = ("Mat could not render the image.", nil, true)
+            }
+            let final = message
+            await MainActor.run {
+                self.busy = false
+                self.show(final.0, file: final.1, error: final.2)
+            }
         }
     }
 
-    func show(_ text: String, file: URL? = nil) {
-        let toast = Toast(text: text, file: file)
+    func show(_ text: String, file: URL? = nil, error: Bool = false) {
+        let toast = Toast(text: text, file: file, isError: error)
         withAnimation(.snappy) { self.toast = toast }
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
             guard self?.toast == toast else { return }
@@ -423,6 +501,17 @@ final class MatModel: ObservableObject {
         let old = style
         change(&style)
         if style != old { registerUndo(old, name: name) }
+    }
+
+    /// A colour well sends a change for every step of a drag; one undo step covers a burst of them.
+    func updateColour(_ change: (inout MatStyle) -> Void) {
+        let old = style
+        let now = Date()
+        let coalesce = lastColourEdit.map { now.timeIntervalSince($0) < 1.0 } ?? false
+        change(&style)
+        guard style != old else { return }
+        if !coalesce { registerUndo(old, name: "Change Colour") }
+        lastColourEdit = now
     }
 
     func sliderEditing(_ editing: Bool, name: String) {
@@ -446,6 +535,7 @@ final class MatModel: ObservableObject {
     }
 
     /// A preview at most 1600 px on its long side, drawn by the same renderer as the export.
+    /// The first preview of an image draws at once; later ones draw off the main thread, newest style wins.
     private func refresh() {
         guard let source, let layout else {
             preview = nil
@@ -453,7 +543,39 @@ final class MatModel: ObservableObject {
         }
         let factor = min(1, 1600 / max(layout.output.width, layout.output.height))
         let pixels = CGSize(width: (layout.output.width * factor).rounded(), height: (layout.output.height * factor).rounded())
-        preview = Renderer.render(source, style: style, pixels: pixels).map { NSImage(cgImage: $0, size: .zero) }
+        if preview == nil || Desktop.isSnapshot {
+            preview = Renderer.render(source, style: style, pixels: pixels).map { NSImage(cgImage: $0, size: .zero) }
+            return
+        }
+        if rendering {
+            renderAgain = true
+            return
+        }
+        rendering = true
+        let style = style
+        Task.detached(priority: .userInitiated) {
+            let image = Renderer.render(source, style: style, pixels: pixels)
+            await MainActor.run {
+                self.rendering = false
+                if source === self.source, style == self.style, let image { self.preview = NSImage(cgImage: image, size: .zero) }
+                if self.renderAgain || source !== self.source || style != self.style {
+                    self.renderAgain = false
+                    self.refresh()
+                }
+            }
+        }
+    }
+}
+
+extension MatStyle {
+    /// True when `self` differs from `other` only in the custom colours (and the switch to Custom they imply).
+    func isColourEdit(of other: MatStyle) -> Bool {
+        var a = self, b = other
+        a.customTop = b.customTop
+        a.customBottom = b.customBottom
+        a.backdrop = .custom
+        b.backdrop = .custom
+        return a == b
     }
 }
 
