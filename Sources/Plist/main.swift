@@ -4,7 +4,7 @@ import SwiftUI
 
 IconKit.handleCommandLine(draw: appIcon)
 if CommandLine.arguments.contains("--selftest") { exit(SelfTest.run()) }
-Desktop.handleSnapshot(title: "Info.plist", size: CGSize(width: 900, height: 556)) {
+Desktop.handleSnapshot(title: "Info.plist", size: CGSize(width: 900, height: 526)) {
     let (document, editor) = MainActor.assumeIsolated { Demo.make() }
     ContentView(document: document, fileURL: nil, editor: editor)
 }

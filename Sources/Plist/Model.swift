@@ -329,10 +329,16 @@ enum Outline {
         }
         if below { open.insert(node.id) }
         let own = node.key.localizedCaseInsensitiveContains(query)
-            || (node.children == nil && node.value.text.localizedCaseInsensitiveContains(query))
+            || (node.children == nil && searchable(node.value) && node.value.text.localizedCaseInsensitiveContains(query))
         if own { hits.insert(node.id) }
         if own || below { keep.insert(node.id) }
         return own || below
+    }
+
+    /// Large data is not matched as hex, so filtering a file with a big blob in it stays instant.
+    static func searchable(_ value: PValue) -> Bool {
+        if case .data(let d) = value { return d.count <= 4096 }
+        return true
     }
 
     static func duplicates(_ c: [PNode]) -> Set<String> {
@@ -374,12 +380,16 @@ enum Format {
 
     /// Bytes as Xcode shows them: `<48656c6c 6f>`.
     static func hex(_ d: Data) -> String {
-        var out = "<"
+        let digits = Array("0123456789abcdef".utf8)
+        var out: [UInt8] = [UInt8(ascii: "<")]
+        out.reserveCapacity(d.count * 9 / 4 + 2)
         for (i, byte) in d.enumerated() {
-            if i > 0 && i % 4 == 0 { out += " " }
-            out += String(format: "%02x", byte)
+            if i > 0 && i % 4 == 0 { out.append(UInt8(ascii: " ")) }
+            out.append(digits[Int(byte >> 4)])
+            out.append(digits[Int(byte & 0x0F)])
         }
-        return out + ">"
+        out.append(UInt8(ascii: ">"))
+        return String(decoding: out, as: UTF8.self)
     }
 
     /// Parses hex digits, ignoring spaces and angle brackets. Nil for anything else or an odd count of digits.
@@ -394,6 +404,8 @@ enum Format {
         }
         return data
     }
+
+    static func items(_ n: Int) -> String { n == 1 ? "1 item" : "\(n) items" }
 
     static func bytes(_ n: Int) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .file)

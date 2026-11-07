@@ -247,6 +247,7 @@ struct ValueCell: View {
                        displayedComponents: [.date, .hourAndMinute])
                 .labelsHidden()
                 .datePickerStyle(.stepperField)
+                .controlSize(.small)
                 .fixedSize()
         case .data(let d):
             if d.count <= Theme.editableDataLimit {
@@ -417,7 +418,7 @@ enum Highlight {
         let whole = NSRange(location: 0, length: storage.length)
         storage.beginEditing()
         storage.setAttributes([.font: font, .foregroundColor: NSColor.textColor, .paragraphStyle: paragraph], range: whole)
-        if storage.length < 400_000 {
+        if storage.length < 150_000 {
             let s = storage.string
             func paint(_ re: NSRegularExpression, _ color: NSColor) {
                 re.enumerateMatches(in: s, range: whole) { m, _, _ in
@@ -457,7 +458,7 @@ struct StatusBar: View {
                 path
             }
             Spacer(minLength: 12)
-            Text("\(editor.root.count - 1) items")
+            Text(Format.items(editor.root.count - 1))
                 .monospacedDigit()
                 .contentTransition(.numericText())
                 .animation(.snappy, value: editor.root.count)

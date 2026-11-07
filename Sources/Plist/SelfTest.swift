@@ -175,6 +175,44 @@ enum SelfTest {
         undo.redo()
         check(doc.root.children?.first?.key == "k", "Redo add")
 
+        // Odd input found in review.
+        let empty = try? Codec.read(Data())
+        check(empty?.1 == .xml && empty?.0.value == .dictionary([]), "An empty file opens as an empty dictionary")
+        check((try? Codec.read(Data(" \n\t".utf8)))?.0.value == .dictionary([]), "A blank file opens as an empty dictionary")
+        do {
+            _ = try Codec.read(Data("{\n  \"a\": 1,\n  \"b\": }".utf8))
+            check(false, "Broken JSON file is rejected")
+        } catch {
+            check(error.localizedDescription.contains("line 3"), "Opening broken JSON names the line")
+        }
+        if let big = try? PropertyListSerialization.data(fromPropertyList: ["u": NSNumber(value: UInt64.max)], format: .binary, options: 0),
+           case .real(let r)? = (try? Codec.read(big))?.0.children?.first?.value {
+            check(r > 1e19, "Unsigned 64-bit integers do not wrap negative")
+        } else {
+            check(false, "Unsigned 64-bit integers do not wrap negative")
+        }
+        check(Format.items(1) == "1 item" && Format.items(0) == "0 items" && Format.items(19) == "19 items", "Item counts read right")
+        let blob = Data((0..<3_000_000).map { UInt8(truncatingIfNeeded: $0) })
+        let started = Date()
+        let hex = Format.hex(blob.prefix(1_000_000))
+        let blobTree = PNode(key: "Root", value: .dictionary([PNode(key: "Blob", value: .data(blob)), PNode(key: "Name", value: .string("x"))]))
+        let filtered = Outline.rows(blobTree, expanded: [], filter: "00010203")
+        check(hex.count == 2_250_001 && Date().timeIntervalSince(started) < 1.5 && filtered.count == 1, "Hex and filtering stay fast with large data")
+
+        // Leaving the source view applies its edits, or stays put when they do not parse.
+        MainActor.assumeIsolated {
+            let doc = PlistDocument()
+            let editor = Editor(document: doc)
+            editor.mode = .source
+            editor.sourceChanged(Codec.xml(PNode(key: "Root", value: .dictionary([PNode(key: "Typed", value: .integer(7))]))))
+            editor.mode = .outline
+            check(editor.mode == .outline && doc.root.children?.first?.key == "Typed", "Switching to the outline applies source edits")
+            editor.mode = .source
+            editor.sourceChanged("<plist><dict><key>x</key></dict></plist>")
+            editor.mode = .outline
+            check(editor.mode == .source && editor.sourceError != nil && doc.root.children?.count == 1, "Invalid source keeps the source view open")
+        }
+
         print(failures == 0 ? "All \(checks) checks passed." : "\(failures) of \(checks) checks failed.")
         return failures == 0 ? 0 : 1
     }

@@ -83,7 +83,11 @@ final class Editor: ObservableObject {
     @Published var selection: UUID?
     @Published var expanded: Set<UUID> = []
     @Published var mode: EditorMode = .outline {
-        didSet { if mode == .source && oldValue != .source && !sourceEdited { regenerateSource() } }
+        didSet {
+            if mode == .source && oldValue != .source && !sourceEdited { regenerateSource() }
+            // Leaving the source view applies its edits; text that does not parse keeps the view open with the error.
+            if oldValue == .source && mode != .source && sourceEdited && !applySource() { mode = .source }
+        }
     }
     @Published var search = ""
     @Published var searchFocused = false
@@ -227,16 +231,19 @@ final class Editor: ObservableObject {
         sourceError = nil
     }
 
-    func applySource() {
+    @discardableResult
+    func applySource() -> Bool {
         do {
             let parsed = document.isJSON ? try Codec.parseJSON(Data(source.utf8)) : try Codec.parseXML(Data(source.utf8))
             if !parsed.isSame(as: root) {
                 document.replace(root: PNode(id: root.id, key: parsed.key, value: parsed.value), format: document.format, name: "Edit Source")
             }
             regenerateSource()
+            return true
         } catch {
             sourceError = error.localizedDescription
             NSSound.beep()
+            return false
         }
     }
 

@@ -40,13 +40,15 @@ enum Codec {
             return (try foundationPlist(data), .binary)
         }
         let firstByte = data.first { !Set(Array(" \t\r\n".utf8) + [0xEF, 0xBB, 0xBF]).contains($0) }
+        // An empty file is an empty dictionary, the way Xcode opens one.
+        guard let firstByte else { return (PNode(key: "Root", value: .dictionary([])), .xml) }
         if firstByte == UInt8(ascii: "<") { return (try parseXML(data), .xml) }
-        if firstByte == UInt8(ascii: "{") || firstByte == UInt8(ascii: "[") || firstByte == UInt8(ascii: "\"") {
-            if let node = try? parseJSON(data) { return (node, .json) }
-        }
-        if let node = try? parseJSON(data) { return (node, .json) }
+        var jsonError: Error?
+        do { return (try parseJSON(data), .json) } catch { jsonError = error }
         // Old-style OpenStep plists: readable, saved as XML.
         if let node = try? foundationPlist(data) { return (node, .xml) }
+        // Text that looks like JSON gets the JSON error, which names the line.
+        if [UInt8(ascii: "{"), UInt8(ascii: "["), UInt8(ascii: "\"")].contains(firstByte), let jsonError { throw jsonError }
         throw CodecError(message: "This file is not a property list or JSON.")
     }
 
@@ -77,6 +79,8 @@ enum Codec {
         case let n as NSNumber:
             if CFGetTypeID(n) == CFBooleanGetTypeID() { return .boolean(n.boolValue) }
             if CFNumberIsFloatType(n) { return .real(n.doubleValue) }
+            // Unsigned values past Int.max would wrap; keep their magnitude as a real, as the XML reader does.
+            if n.compare(NSNumber(value: Int.max)) == .orderedDescending { return .real(n.doubleValue) }
             return .integer(n.intValue)
         case let a as [Any]:
             return .array(a.map { PNode(key: "", value: value(fromFoundation: $0)) })
