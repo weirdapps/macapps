@@ -306,6 +306,18 @@ struct Preset: Codable, Identifiable, Equatable {
 struct SavedState: Codable, Equatable {
     var config = MeterConfig()
     var presets = Preset.starters
+    /// The preset the settings came from, kept while they are edited.
+    var selection: UUID?
+
+    /// The state with anything out of range (a hand edited or damaged file) pulled back into range.
+    var sanitized: SavedState {
+        var s = self
+        s.config.bpm = Tempo.clamp(s.config.bpm)
+        s.config.volume = s.config.volume.isFinite ? min(max(s.config.volume, 0), 1) : MeterConfig().volume
+        for i in s.presets.indices { s.presets[i].bpm = Tempo.clamp(s.presets[i].bpm) }
+        if let id = s.selection, !s.presets.contains(where: { $0.id == id }) { s.selection = nil }
+        return s
+    }
 }
 
 /// What the naming sheet is for.
@@ -322,7 +334,7 @@ struct NameRequest: Identifiable {
 final class BeatModel: ObservableObject {
     @Published var config: MeterConfig { didSet { configChanged(from: oldValue) } }
     @Published var presets: [Preset] { didSet { save() } }
-    @Published var selection: Preset.ID?
+    @Published var selection: Preset.ID? { didSet { if selection != oldValue { save() } } }
     @Published private(set) var isPlaying = false
     @Published private(set) var anchors: [VisualAnchor] = []
     @Published private(set) var audioError: String?
@@ -337,10 +349,11 @@ final class BeatModel: ObservableObject {
     }
 
     init(state: SavedState, persists: Bool) {
+        let state = state.sanitized
         config = state.config
         presets = state.presets
         self.persists = persists
-        selection = state.presets.first(where: { $0.matches(state.config) })?.id
+        selection = state.selection ?? state.presets.first(where: { $0.matches(state.config) })?.id
     }
 
     convenience init() {
@@ -359,6 +372,15 @@ final class BeatModel: ObservableObject {
     }
 
     var selectedPreset: Preset? { presets.first { $0.id == selection } }
+
+    /// True when the settings no longer match the selected preset.
+    var isEdited: Bool { selectedPreset.map { !$0.matches(config) } ?? false }
+
+    /// A held key repeats; Space and T act once per press.
+    static var isKeyRepeat: Bool {
+        guard let event = NSApp?.currentEvent, event.type == .keyDown else { return false }
+        return event.isARepeat
+    }
 
     // MARK: Transport
 
@@ -415,19 +437,24 @@ final class BeatModel: ObservableObject {
     private func configChanged(from old: MeterConfig) {
         guard config != old else { return }
         if isPlaying, demoPosition == nil { engine.update(config) }
-        if let p = selectedPreset, !p.matches(config), !p.matches(old) { selection = nil }
+        // The preset stays selected while its settings are edited, so Update Preset and Revert work.
         save()
     }
 
     private func save() {
         guard persists else { return }
-        Storage.save(SavedState(config: config, presets: presets), app: "Beat", file: "state.json")
+        Storage.save(SavedState(config: config, presets: presets, selection: selection), app: "Beat", file: "state.json")
     }
 
     // MARK: Presets
 
     func select(_ id: Preset.ID?) {
         selection = id
+        if let p = selectedPreset { config = p.applied(to: config) }
+    }
+
+    /// Puts back the selected preset's settings after edits.
+    func revertToPreset() {
         if let p = selectedPreset { config = p.applied(to: config) }
     }
 
@@ -475,13 +502,16 @@ final class BeatModel: ObservableObject {
 
     /// Edits the preset list with an undo step that restores the previous list.
     private func change(_ undo: UndoManager?, _ name: String, _ edit: (inout [Preset]) -> Void) {
+        var list = presets
+        edit(&list)
+        setPresets(list, undo: undo, name: name)
+    }
+
+    /// Every undo registers its own redo and every redo its own undo, so the chain never breaks.
+    private func setPresets(_ list: [Preset], undo: UndoManager?, name: String) {
         let before = presets
-        edit(&presets)
-        undo?.registerUndo(withTarget: self) { model in
-            let redo = model.presets
-            model.presets = before
-            undo?.registerUndo(withTarget: model) { $0.presets = redo }
-        }
+        presets = list
+        undo?.registerUndo(withTarget: self) { $0.setPresets(before, undo: undo, name: name) }
         undo?.setActionName(name)
     }
 

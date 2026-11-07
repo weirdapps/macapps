@@ -44,6 +44,9 @@ struct PresetCommands: Commands {
             Button("Update Preset") { if let id = model.selection { model.updatePreset(id, undo: windowUndo()) } }
                 .keyboardShortcut("s")
                 .disabled(model.selection == nil || model.naming != nil)
+            Button("Revert to Preset") { model.revertToPreset() }
+                .keyboardShortcut("z", modifiers: [.command, .option])
+                .disabled(!model.isEdited || model.naming != nil)
             Button("Rename Preset…") { if let id = model.selection { model.requestRename(id) } }
                 .keyboardShortcut("r")
                 .disabled(model.selection == nil || model.naming != nil)
@@ -61,10 +64,11 @@ struct MetronomeCommands: Commands {
     var body: some Commands {
         CommandMenu("Metronome") {
             // Single keys, so they step aside while the naming sheet has a text field.
-            Button(model.isPlaying ? "Stop" : "Start") { model.toggle() }
+            // A held key repeats; acting on every repeat would flicker start and stop.
+            Button(model.isPlaying ? "Stop" : "Start") { if !BeatModel.isKeyRepeat { model.toggle() } }
                 .keyboardShortcut(.space, modifiers: [])
                 .disabled(model.naming != nil)
-            Button("Tap Tempo") { model.tap() }
+            Button("Tap Tempo") { if !BeatModel.isKeyRepeat { model.tap() } }
                 .keyboardShortcut("t", modifiers: [])
                 .disabled(model.naming != nil)
             Divider()

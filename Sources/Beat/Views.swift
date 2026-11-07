@@ -48,10 +48,14 @@ struct PresetList: View {
         List(selection: Binding(get: { model.selection }, set: { model.select($0) })) {
             Section("Presets") {
                 ForEach(model.presets) { preset in
-                    PresetRow(preset: preset, isLive: model.isPlaying && preset.id == model.selection)
+                    PresetRow(preset: preset, isLive: model.isPlaying && preset.id == model.selection,
+                              isEdited: preset.id == model.selection && model.isEdited)
                         .tag(preset.id)
                         .contextMenu {
                             Button("Update with Current Settings") { model.updatePreset(preset.id, undo: undo) }
+                            if preset.id == model.selection && model.isEdited {
+                                Button("Revert to Preset") { model.revertToPreset() }
+                            }
                             Button("Rename…") { model.requestRename(preset.id) }
                             Divider()
                             Button("Delete") { model.deletePreset(preset.id, undo: undo) }
@@ -61,6 +65,15 @@ struct PresetList: View {
             }
         }
         .listStyle(.sidebar)
+        .overlay {
+            if model.presets.isEmpty {
+                ContentUnavailableView {
+                    Label("No Presets", systemImage: "metronome")
+                } description: {
+                    Text("Save the tempo and meter you use most with New Preset.")
+                }
+            }
+        }
         .safeAreaInset(edge: .bottom) {
             HStack {
                 Button { model.requestNewPreset() } label: {
@@ -80,6 +93,7 @@ struct PresetList: View {
 struct PresetRow: View {
     let preset: Preset
     let isLive: Bool
+    var isEdited = false
 
     var body: some View {
         HStack(spacing: 9) {
@@ -95,6 +109,9 @@ struct PresetRow: View {
                     .font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
             }
             Spacer(minLength: 0)
+            if isEdited {
+                Circle().fill(Theme.top).frame(width: 6, height: 6).help("Edited since the preset was chosen")
+            }
             if isLive {
                 Image(systemName: "waveform").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
                     .symbolEffect(.variableColor.iterative, options: .repeating)
@@ -158,11 +175,16 @@ struct MetronomeView: View {
         .focusable()
         .focusEffectDisabled()
         .focused($focused)
-        .onKeyPress(.space) { model.toggle(); return .handled }
-        .onKeyPress("t") { model.tap(); return .handled }
+        .onKeyPress(.space, phases: .down) { _ in model.toggle(); return .handled }
+        .onKeyPress("t", phases: .down) { _ in model.tap(); return .handled }
         .onAppear { focused = true }
         .navigationTitle("Beat")
-        .navigationSubtitle(model.selectedPreset?.name ?? Tempo.marking(model.config.bpm))
+        .navigationSubtitle(subtitle)
+    }
+
+    private var subtitle: String {
+        guard let preset = model.selectedPreset else { return Tempo.marking(model.config.bpm) }
+        return model.isEdited ? "\(preset.name), edited" : preset.name
     }
 }
 

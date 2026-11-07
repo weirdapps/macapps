@@ -144,8 +144,57 @@ enum SelfTest {
         let back = data.flatMap { try? JSONDecoder().decode(SavedState.self, from: $0) }
         check(back == state, "saved state survives a JSON round trip")
         check(Preset.starters.allSatisfy { Tempo.range.contains($0.bpm) }, "starter presets are in range")
+        let oldFile = #"{"config":{"bpm":96,"signature":"3/4","subdivision":1,"sound":"wood","accent":true,"volume":0.5},"presets":[]}"#
+        let old = try? JSONDecoder().decode(SavedState.self, from: Data(oldFile.utf8))
+        check(old?.config.bpm == 96 && old?.selection == nil && old?.presets.isEmpty == true,
+              "a state file from before the selection was saved still loads")
+        var damaged = SavedState(config: MeterConfig(bpm: 9_000, volume: .nan), presets: [Preset.make("Odd", -5, .twoFour)])
+        damaged.selection = UUID()
+        let fixed = damaged.sanitized
+        check(fixed.config.bpm == 300 && fixed.config.volume == MeterConfig().volume && fixed.presets[0].bpm == 30
+              && fixed.selection == nil, "out of range values in a damaged file are pulled back into range")
+
+        MainActor.assumeIsolated { modelChecks() }
 
         print(failures == 0 ? "PASS: \(checks) checks" : "\(failures) of \(checks) checks failed")
         return failures == 0 ? 0 : 1
+    }
+
+    /// The window's model: presets stay selected while edited, and undo and redo go back and forth forever.
+    @MainActor private static func modelChecks() {
+        let model = BeatModel(state: SavedState(), persists: false)
+        let rock = Preset.starters[4]
+        model.select(rock.id)
+        check(model.config.bpm == 120 && model.config.subdivision == .eighths && !model.isEdited, "choosing a preset loads it")
+        model.nudge(1)
+        model.nudge(1)
+        check(model.selection == rock.id && model.isEdited, "the preset stays selected through several edits")
+        model.revertToPreset()
+        check(model.config.bpm == 120 && !model.isEdited, "revert puts back the preset's settings")
+        model.nudge(5)
+        model.updatePreset(rock.id, undo: nil)
+        check(model.selectedPreset?.bpm == 125 && !model.isEdited, "update saves the edits into the preset")
+        model.setBPM(1)
+        check(model.config.bpm == 30, "the tempo never goes below 30")
+
+        let undo = UndoManager()
+        undo.groupsByEvent = false
+        let count = model.presets.count
+        undo.beginUndoGrouping()
+        model.deletePreset(rock.id, undo: undo)
+        undo.endUndoGrouping()
+        check(model.presets.count == count - 1 && model.selection == nil, "delete removes the preset")
+        undo.undo()
+        check(model.presets.count == count, "undo brings the preset back")
+        undo.redo()
+        check(model.presets.count == count - 1, "redo deletes it again")
+        undo.undo()
+        check(model.presets.count == count && model.presets.contains { $0.id == rock.id }, "undo works again after a redo")
+
+        model.finishNaming(NameRequest(kind: .new, text: "  \u{1F941} Drum   "), undo: nil)
+        check(model.selectedPreset?.name == "\u{1F941} Drum", "a new preset takes a trimmed unicode name")
+        let before = model.presets.count
+        model.finishNaming(NameRequest(kind: .new, text: " \n "), undo: nil)
+        check(model.presets.count == before, "a blank name saves nothing")
     }
 }
