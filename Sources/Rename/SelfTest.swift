@@ -52,6 +52,14 @@ enum SelfTest {
         expect("number suffix", Engine.name(for: photo, index: 4, rules: [rule(.number) { $0.padding = 2; $0.separator = "-" }]), "IMG_4012-05.JPG")
         expect("number negative", Engine.name(for: photo, rules: [rule(.number) { $0.placement = .replace; $0.start = -3; $0.padding = 2 }]), "-03.JPG")
 
+        // Typed values outside the steppers never trap or explode.
+        expect("number overflow is skipped", Engine.name(for: photo, index: 3, rules: [rule(.number) { $0.start = Int.max; $0.step = 2 }]), "IMG_4012.JPG")
+        expect("huge step is skipped", Engine.name(for: photo, index: 5, rules: [rule(.number) { $0.step = Int.max }]), "IMG_4012.JPG")
+        expect("padding is capped", Engine.name(for: photo, rules: [rule(.number) { $0.placement = .replace; $0.padding = 1_000_000 }]),
+               String(repeating: "0", count: Rule.maxPadding - 1) + "1.JPG")
+        expect("min int start", Engine.name(for: photo, rules: [rule(.number) { $0.placement = .replace; $0.start = Int.min; $0.padding = 1 }]),
+               "-9223372036854775808.JPG")
+
         // Dates.
         let taken = FileItem.parseExif("2026:06:14 09:12:30")
         check("exif parse", taken != nil)
@@ -137,6 +145,18 @@ enum SelfTest {
             do { try Renamer.perform([Move(from: url("a.txt"), to: url("c.txt")), Move(from: url("missing"), to: url("d"))]) } catch { threw = true }
             check("failure throws", threw)
             check("failure rolls back", read("a.txt") == "A" && !fm.fileExists(atPath: url("c.txt").path))
+
+            // Dropping folders: a plain folder adds its visible items, a package stays one item.
+            let album = url("Album"), app = url("Tool.app"), rtfd = url("Notes.rtfd")
+            for d in [album, app.appendingPathComponent("Contents"), rtfd] { try fm.createDirectory(at: d, withIntermediateDirectories: true) }
+            for f in [album.appendingPathComponent("2.jpg"), album.appendingPathComponent("10.jpg"), album.appendingPathComponent(".hidden"),
+                      app.appendingPathComponent("Contents/Info.plist"), rtfd.appendingPathComponent("TXT.rtf")] {
+                fm.createFile(atPath: f.path, contents: Data())
+            }
+            let folder = RenameModel.collect([album]).map(\.lastPathComponent)
+            check("folder adds its items in name order", folder == ["2.jpg", "10.jpg"], folder.description)
+            let packages = RenameModel.collect([app, rtfd, url("gone.txt")]).map(\.lastPathComponent)
+            check("packages stay whole", packages == ["Tool.app", "Notes.rtfd"], packages.description)
         } catch {
             check("temporary files", false, error.localizedDescription)
         }
@@ -166,6 +186,22 @@ enum SelfTest {
             check("undo manager redo", listing() == ["x-one.txt", "x-two.txt"], listing().description)
             model.undoLastBatch()
             check("undo last batch", listing() == ["one.txt", "two.txt"] && model.lastBatch.isEmpty, listing().description)
+
+            // An undo that fails (a file moved away meanwhile) changes nothing and keeps the batch.
+            undo.beginUndoGrouping()
+            model.apply()
+            undo.endUndoGrouping()
+            try? fm.moveItem(at: dir.appendingPathComponent("x-two.txt"), to: dir.appendingPathComponent("moved.txt"))
+            undo.undo()
+            check("failed undo keeps the batch", !model.lastBatch.isEmpty && model.errorMessage != nil)
+            check("failed undo changes nothing", listing() == ["moved.txt", "x-one.txt"], listing().description)
+
+            // Moving with a selection that is no longer in the list is a no-op, not a crash.
+            model.selection = [UUID()]
+            let before = model.items.map(\.id)
+            model.moveSelection(-1)
+            model.moveSelection(1)
+            check("stale selection move", model.items.map(\.id) == before)
         }
 
         // Rules survive a JSON round trip.

@@ -15,6 +15,7 @@ struct ContentView: View {
     @Environment(\.undoManager) private var undoManager
     @State private var importing = false
     @State private var targeted = false
+    @FocusState private var tableFocused: Bool
 
     var body: some View {
         HStack(spacing: 0) {
@@ -28,6 +29,7 @@ struct ContentView: View {
                              button: "Add Files\u{2026}", tint: Theme.accent, isTargeted: targeted) { importing = true }
                 } else {
                     FileTable(model: model)
+                        .focused($tableFocused)
                 }
                 Divider()
                 BottomBar(model: model)
@@ -43,7 +45,10 @@ struct ContentView: View {
             if case .success(let urls) = result { model.add(urls) }
         }
         .onReceive(NotificationCenter.default.publisher(for: .renameOpen)) { _ in importing = true }
-        .onAppear { model.undoManager = undoManager }
+        .onAppear {
+            model.undoManager = undoManager
+            tableFocused = true // Arrow keys move through the list from the start.
+        }
         .onChange(of: undoManager) { _, manager in model.undoManager = manager }
         .alert("Could not rename", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK", role: .cancel) {}
@@ -234,13 +239,14 @@ struct RulesPanel: View {
                         Button { model.addRule(kind) } label: { Label(kind.title, systemImage: kind.symbol) }
                     }
                 } label: {
-                    Image(systemName: "plus").fontWeight(.semibold)
+                    Label("Add Rule", systemImage: "plus")
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.button)
+                .buttonStyle(.accessoryBar)
                 .menuIndicator(.hidden)
                 .fixedSize()
-                .focusEffectDisabled()
-                .help("Add a rule")
+                .focusable(false)
+                .help("Add a rule (\u{2318}1 to \u{2318}8)")
             }
             .padding(.horizontal, 16)
             .padding(.top, 14)
@@ -355,7 +361,7 @@ struct RuleCard: View {
                     labeled("Step", width: 34) { stepper($rule.step, range: 1...1000) }
                 }
                 HStack(spacing: 10) {
-                    labeled("Digits") { stepper($rule.padding, range: 1...8) }
+                    labeled("Digits") { stepper($rule.padding, range: 1...Rule.maxPadding) }
                     labeled("Join", width: 34) { separatorField }
                 }
                 placementRow([.prefix, .suffix, .index, .replace])
@@ -443,10 +449,12 @@ struct RuleCard: View {
     }
 
     private func stepper(_ value: Binding<Int>, range: ClosedRange<Int>) -> some View {
-        HStack(spacing: 3) {
-            TextField("", value: value, format: .number.grouping(.never)).textFieldStyle(.roundedBorder)
+        // Typed values are held to the stepper's range too.
+        let clamped = Binding(get: { value.wrappedValue }, set: { value.wrappedValue = min(max($0, range.lowerBound), range.upperBound) })
+        return HStack(spacing: 3) {
+            TextField("", value: clamped, format: .number.grouping(.never)).textFieldStyle(.roundedBorder)
                 .monospacedDigit().frame(width: 46)
-            Stepper("", value: value, in: range).labelsHidden()
+            Stepper("", value: clamped, in: range).labelsHidden()
         }
     }
 

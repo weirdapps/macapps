@@ -128,6 +128,8 @@ struct Rule: Identifiable, Codable, Equatable {
     var extensionMode: ExtensionMode = .lower
     var newExtension = ""
 
+    static let maxPadding = 12
+
     init(kind: RuleKind) {
         self.kind = kind
         if kind == .insert { placement = .suffix }
@@ -238,9 +240,13 @@ enum Engine {
                 base = lower.prefix(1).uppercased() + lower.dropFirst()
             }
         case .number:
-            let n = rule.start + index * rule.step
-            var digits = String(abs(n))
-            if digits.count < rule.padding { digits = String(repeating: "0", count: rule.padding - digits.count) + digits }
+            // The fields accept any typed number, so the maths must not trap and padding stays sane.
+            let (offset, o1) = index.multipliedReportingOverflow(by: rule.step)
+            let (n, o2) = rule.start.addingReportingOverflow(offset)
+            guard !o1, !o2 else { return }
+            var digits = String(n.magnitude)
+            let padding = min(max(rule.padding, 1), Rule.maxPadding)
+            if digits.count < padding { digits = String(repeating: "0", count: padding - digits.count) + digits }
             place(n < 0 ? "-" + digits : digits, in: &base, rule: rule)
         case .date:
             let date: Date? = switch rule.dateSource {
@@ -548,25 +554,33 @@ final class RenameModel: ObservableObject {
         let known = Set(items.map { $0.url.standardizedFileURL.path })
         loading += 1
         Task.detached(priority: .userInitiated) {
-            var found: [URL] = []
-            for url in urls {
-                var isDir: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
-                if isDir.boolValue, !url.pathExtension.lowercased().hasSuffix("app"),
-                   let children = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil,
-                                                                              options: [.skipsHiddenFiles]) {
-                    found += children.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-                } else {
-                    found.append(url)
-                }
-            }
             var seen = known
-            let fresh = found.map(\.standardizedFileURL).filter { seen.insert($0.path).inserted }.map(FileItem.load)
+            let fresh = Self.collect(urls).filter { seen.insert($0.path).inserted }.map(FileItem.load)
             await MainActor.run {
                 self.items += fresh
                 self.loading -= 1
             }
         }
+    }
+
+    /// The files `urls` stand for: a plain folder stands for the visible items inside it, sorted by name.
+    /// Packages (apps, Photos libraries, bundles) are single items; their insides are never listed.
+    nonisolated static func collect(_ urls: [URL]) -> [URL] {
+        var found: [URL] = []
+        for url in urls.map(\.standardizedFileURL) {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
+            let isPackage = (try? url.resourceValues(forKeys: [.isPackageKey]))?.isPackage ?? false
+            if isDir.boolValue, !isPackage,
+               let children = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil,
+                                                                          options: [.skipsHiddenFiles]) {
+                found += children.map(\.standardizedFileURL)
+                    .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            } else {
+                found.append(url)
+            }
+        }
+        return found
     }
 
     func removeSelected() {
@@ -605,11 +619,12 @@ final class RenameModel: ObservableObject {
         guard !selection.isEmpty else { return }
         var list = items
         let indices = list.indices.filter { selection.contains(list[$0].id) }
+        guard let first = indices.first, let last = indices.last else { return }
         if delta < 0 {
-            guard indices.first! > 0 else { return }
+            guard first > 0 else { return }
             for i in indices { list.swapAt(i, i - 1) }
         } else {
-            guard indices.last! < list.count - 1 else { return }
+            guard last < list.count - 1 else { return }
             for i in indices.reversed() { list.swapAt(i, i + 1) }
         }
         withAnimation(.snappy) { items = list }
@@ -683,8 +698,8 @@ final class RenameModel: ObservableObject {
             let inverse = moves.reversed().map(\.inverse)
             undoManager.registerUndo(withTarget: self) { model in
                 MainActor.assumeIsolated {
-                    model.run(inverse)
-                    model.lastBatch = model.lastBatch == moves ? [] : inverse
+                    // A failed undo leaves the files, and so the last batch, as they were.
+                    if model.run(inverse) { model.lastBatch = model.lastBatch == moves ? [] : inverse }
                 }
             }
             undoManager.setActionName("Rename \(moves.count) \(moves.count == 1 ? "File" : "Files")")
