@@ -27,7 +27,7 @@ struct DiaryApp: App {
             DiaryCommands(model: model)
         }
         Settings {
-            SettingsView()
+            SettingsView(model: model)
         }
     }
 }
@@ -43,7 +43,7 @@ struct DiaryCommands: Commands {
             Divider()
             Button("Export All to Markdown\u{2026}") { model.exportAll() }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
-                .disabled(model.locked || model.entries.isEmpty)
+                .disabled(model.locked || !model.hasEntries)
             Divider()
             Button("Lock Diary") { model.lock() }
                 .keyboardShortcut("l", modifiers: [.command, .control])
@@ -79,7 +79,7 @@ extension DiaryStore {
     /// Fixed entries for the website screenshot; never the user's own.
     static var demo: DiaryStore {
         let today = Day(year: 2026, month: 11, day: 26)
-        let calendar = Calendar.current
+        let calendar = Calendar.diary
         let lines: [(Int, String, Mood?, [String])] = [
             (0, """
             A slow morning off. Coffee on the balcony before anyone else was up, the light coming in low and gold over the rooftops.
@@ -114,7 +114,7 @@ extension DiaryStore {
         let entries = lines.map { offset, text, mood, tags in
             let day = offset == 365 ? Day(year: 2025, month: 11, day: 26)
                 : offset == 731 ? Day(year: 2024, month: 11, day: 26)
-                : today.adding(days: -offset, calendar: calendar)
+                : today.adding(days: -offset)
             let edited = day.date(calendar).addingTimeInterval(9 * 3600)
             return Entry(day: day, text: text, mood: mood, tags: tags, created: edited, modified: edited)
         }

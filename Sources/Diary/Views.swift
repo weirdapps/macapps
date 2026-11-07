@@ -7,6 +7,10 @@ enum Theme {
     static let bottom = Color(nsColor: rgb(0xA93A62))
     static let accent = Color(nsColor: rgb(0xC9527A))
     static let gradient = LinearGradient(colors: [top, bottom], startPoint: .topLeading, endPoint: .bottomTrailing)
+    /// Tag text: the deep rose in light mode, a pale rose in dark mode so it stays readable.
+    static let tagText = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? rgb(0xF4A9C0) : rgb(0xA93A62)
+    })
 }
 
 struct ContentView: View {
@@ -24,6 +28,11 @@ struct ContentView: View {
         }
         .tint(Theme.accent)
         .frame(minWidth: 780, minHeight: 520)
+        .alert("Diary", isPresented: Binding(get: { model.notice != nil }, set: { if !$0 { model.notice = nil } })) {
+            Button("OK") { model.notice = nil }
+        } message: {
+            Text(model.notice ?? "")
+        }
     }
 }
 
@@ -53,7 +62,7 @@ struct DiaryView: View {
                 }
                 Button { model.exportAll() } label: { Label("Export", systemImage: "square.and.arrow.up") }
                     .help("Export all entries to Markdown (⇧⌘E)")
-                    .disabled(model.entries.isEmpty)
+                    .disabled(!model.hasEntries)
                 Button { model.lock() } label: { Label("Lock", systemImage: "lock") }
                     .help("Lock Diary (⌃⌘L)")
             }
@@ -75,6 +84,9 @@ struct SearchField: NSViewRepresentable {
         let field = NSSearchField()
         field.placeholderString = prompt
         field.delegate = context.coordinator
+        // The clear button sends the action, not a text change.
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.searched(_:))
         field.sendsSearchStringImmediately = true
         field.controlSize = .large
         field.focusRingType = .default
@@ -99,6 +111,10 @@ struct SearchField: NSViewRepresentable {
         init(text: Binding<String>, focusRequest: Int) {
             self.text = text
             self.focusRequest = focusRequest
+        }
+
+        @objc func searched(_ field: NSSearchField) {
+            if text.wrappedValue != field.stringValue { text.wrappedValue = field.stringValue }
         }
 
         func controlTextDidChange(_ note: Notification) {
@@ -168,7 +184,7 @@ struct MonthCalendar: View {
                     GridRow {
                         ForEach(0..<7, id: \.self) { column in
                             if let day = cells[row * 7 + column] {
-                                DayCell(day: day, entry: model.entries[day], selected: day == model.selected,
+                                DayCell(day: day, entry: model.entry(day), selected: day == model.selected,
                                         isToday: day == model.today, future: model.isFuture(day)) { model.select(day) }
                             } else {
                                 Color.clear.frame(height: 34)
@@ -456,6 +472,7 @@ struct EditorView: View {
                 MoodPicker(mood: entry?.mood) { model.setMood($0, for: day) }
             }
             TagRow(tags: entry?.tags ?? [], add: { model.addTags($0, to: day) }, remove: { model.removeTag($0, from: day) })
+                .id(day)
                 .padding(.top, 14)
             Divider().padding(.top, 14).padding(.bottom, 10)
             ZStack(alignment: .topLeading) {
@@ -464,12 +481,13 @@ struct EditorView: View {
                     .lineSpacing(6)
                     .scrollContentBackground(.hidden)
                     .scrollIndicators(.automatic)
+                    // The text view insets its line fragments by 5 points; pull it back so text lines up with the date.
+                    .padding(.leading, -5)
                     .id(day)
                 if (entry?.text ?? "").isEmpty {
                     Text(day == model.today ? "What is on your mind today?" : "What happened on this day?")
                         .font(.system(size: 15, design: .serif))
                         .foregroundStyle(.tertiary)
-                        .padding(.leading, 5)
                         .allowsHitTesting(false)
                 }
             }
@@ -600,7 +618,7 @@ struct TagChip: View {
                 .transition(.opacity.combined(with: .scale))
             }
         }
-        .foregroundStyle(Theme.bottom)
+        .foregroundStyle(Theme.tagText)
         .padding(.horizontal, 9)
         .padding(.vertical, 4)
         .background(Capsule().fill(Theme.top.opacity(0.16)))
@@ -655,7 +673,6 @@ struct FlowLayout: Layout {
 
 struct LockView: View {
     @ObservedObject var model: DiaryStore
-    @State private var asked = false
 
     var body: some View {
         VStack(spacing: 18) {
@@ -686,8 +703,8 @@ struct LockView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear {
-            guard !asked, !Desktop.isSnapshot else { return }
-            asked = true
+            guard model.promptToUnlock, !Desktop.isSnapshot else { return }
+            model.promptToUnlock = false
             model.unlock()
         }
     }
@@ -696,6 +713,7 @@ struct LockView: View {
 // MARK: - Settings
 
 struct SettingsView: View {
+    @ObservedObject var model: DiaryStore
     @AppStorage(Prefs.lockEnabled) private var lockEnabled = false
     @AppStorage(Prefs.lockOnSleep) private var lockOnSleep = true
 
@@ -710,7 +728,7 @@ struct SettingsView: View {
                 Text("Privacy")
             } footer: {
                 Text(DiaryStore.canAuthenticate
-                     ? "Lock Diary from the File menu at any time with ⌃⌘L."
+                     ? (model.locked ? "Unlock Diary to change these settings." : "Lock Diary from the File menu at any time with ⌃⌘L.")
                      : "Set a login password for this Mac to use the lock.")
                     .foregroundStyle(.secondary)
             }
@@ -725,6 +743,8 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        // While the diary is locked nobody may switch the lock off or go looking for the file.
+        .disabled(model.locked)
         .frame(width: 460)
         .fixedSize(horizontal: false, vertical: true)
     }

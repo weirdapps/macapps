@@ -7,6 +7,18 @@ import SwiftUI
 
 // MARK: - Day
 
+extension Calendar {
+    /// Days are always Gregorian, whatever calendar the Mac shows, so stored dates and file names never shift.
+    /// The week still starts on the user's first weekday.
+    static var diary: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = .current
+        calendar.timeZone = .current
+        calendar.firstWeekday = Calendar.current.firstWeekday
+        return calendar
+    }
+}
+
 /// A calendar day, independent of time and time zone. Stored as "yyyy-MM-dd".
 struct Day: Hashable, Comparable, Codable {
     var year: Int
@@ -19,14 +31,15 @@ struct Day: Hashable, Comparable, Codable {
         self.day = day
     }
 
-    init(_ date: Date, calendar: Calendar = .current) {
+    init(_ date: Date, calendar: Calendar = .diary) {
         let c = calendar.dateComponents([.year, .month, .day], from: date)
         self.init(year: c.year ?? 2000, month: c.month ?? 1, day: c.day ?? 1)
     }
 
     init?(_ string: String) {
         let parts = string.split(separator: "-").compactMap { Int($0) }
-        guard parts.count == 3, (1...12).contains(parts[1]), (1...31).contains(parts[2]) else { return nil }
+        guard parts.count == 3, (1...9999).contains(parts[0]), (1...12).contains(parts[1]),
+              (1...Day.daysIn(month: parts[1], year: parts[0])).contains(parts[2]) else { return nil }
         self.init(year: parts[0], month: parts[1], day: parts[2])
     }
 
@@ -34,15 +47,40 @@ struct Day: Hashable, Comparable, Codable {
     var firstOfMonth: Day { Day(year: year, month: month, day: 1) }
 
     /// Noon on this day, which keeps day arithmetic clear of daylight saving changes.
-    func date(_ calendar: Calendar = .current) -> Date {
+    func date(_ calendar: Calendar = .diary) -> Date {
         calendar.date(from: DateComponents(year: year, month: month, day: day, hour: 12)) ?? Date()
     }
 
-    func adding(days: Int, calendar: Calendar = .current) -> Day {
-        Day(calendar.date(byAdding: .day, value: days, to: date(calendar)) ?? date(calendar), calendar: calendar)
+    /// Pure Gregorian day arithmetic through `ordinal`, so it is exact and fast.
+    func adding(days: Int) -> Day { Day(ordinal: ordinal + days) }
+
+    /// Days since 1970-01-01 in the proleptic Gregorian calendar (H. Hinnant's days_from_civil).
+    var ordinal: Int {
+        let y = month <= 2 ? year - 1 : year
+        let era = (y >= 0 ? y : y - 399) / 400
+        let yoe = y - era * 400
+        let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        return era * 146_097 + doe - 719_468
     }
 
-    func adding(months: Int, calendar: Calendar = .current) -> Day {
+    init(ordinal: Int) {
+        let z = ordinal + 719_468
+        let era = (z >= 0 ? z : z - 146_096) / 146_097
+        let doe = z - era * 146_097
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+        let mp = (5 * doy + 2) / 153
+        let m = mp < 10 ? mp + 3 : mp - 9
+        self.init(year: yoe + era * 400 + (m <= 2 ? 1 : 0), month: m, day: doy - (153 * mp + 2) / 5 + 1)
+    }
+
+    static func daysIn(month: Int, year: Int) -> Int {
+        let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+        return [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][(month - 1 + 12) % 12]
+    }
+
+    func adding(months: Int, calendar: Calendar = .diary) -> Day {
         Day(calendar.date(byAdding: .month, value: months, to: date(calendar)) ?? date(calendar), calendar: calendar)
     }
 
@@ -98,6 +136,26 @@ struct Entry: Codable, Identifiable, Equatable {
     }
 }
 
+/// Decodes an array of entries, skipping the ones that are damaged instead of failing the whole diary.
+struct LossyEntries: Decodable {
+    var entries: [Entry] = []
+    var skipped = 0
+
+    private struct Skip: Decodable { init(from decoder: Decoder) throws {} }
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        while !container.isAtEnd {
+            if let entry = try? container.decode(Entry.self) {
+                entries.append(entry)
+            } else {
+                _ = try container.decode(Skip.self)
+                skipped += 1
+            }
+        }
+    }
+}
+
 struct Stats: Equatable {
     var entries = 0
     var words = 0
@@ -109,8 +167,17 @@ struct Stats: Equatable {
 
 /// The pure parts of the diary: counting, searching, streaks, the month grid and Markdown export.
 enum Journal {
+    /// Runs of non-space characters. Scans scalars without allocating, since stats recount the whole diary as you type.
     static func wordCount(_ text: String) -> Int {
-        text.split { $0.isWhitespace || $0.isNewline }.count
+        var count = 0
+        var inWord = false
+        for scalar in text.unicodeScalars {
+            let v = scalar.value
+            let space = v < 0x80 ? (v == 0x20 || (0x09...0x0D).contains(v)) : scalar.properties.isWhitespace
+            if !space && !inWord { count += 1 }
+            inWord = !space
+        }
+        return count
     }
 
     /// "#Work Trips " becomes "work-trips". Returns nil for nothing.
@@ -130,34 +197,33 @@ enum Journal {
     }
 
     /// Consecutive days with an entry, ending today, or yesterday when today is not written yet.
-    static func streak(_ days: Set<Day>, today: Day, calendar: Calendar = .current) -> Int {
-        var day = days.contains(today) ? today : today.adding(days: -1, calendar: calendar)
+    static func streak(_ days: Set<Day>, today: Day) -> Int {
+        let set = Set(days.map(\.ordinal))
+        var n = set.contains(today.ordinal) ? today.ordinal : today.ordinal - 1
         var count = 0
-        while days.contains(day) {
+        while set.contains(n) {
             count += 1
-            day = day.adding(days: -1, calendar: calendar)
+            n -= 1
         }
         return count
     }
 
-    static func longestStreak(_ days: Set<Day>, calendar: Calendar = .current) -> Int {
+    static func longestStreak(_ days: Set<Day>) -> Int {
         var best = 0
-        for day in days where !days.contains(day.adding(days: -1, calendar: calendar)) {
-            var run = 1
-            var next = day.adding(days: 1, calendar: calendar)
-            while days.contains(next) {
-                run += 1
-                next = next.adding(days: 1, calendar: calendar)
-            }
+        var run = 0
+        var last: Int?
+        for n in days.map(\.ordinal).sorted() {
+            run = last == n - 1 ? run + 1 : 1
             best = max(best, run)
+            last = n
         }
         return best
     }
 
-    static func stats(_ entries: [Entry], today: Day, calendar: Calendar = .current) -> Stats {
+    static func stats(_ entries: [Entry], today: Day) -> Stats {
         let days = Set(entries.map(\.day))
         return Stats(entries: entries.count, words: entries.reduce(0) { $0 + $1.words },
-                     streak: streak(days, today: today, calendar: calendar), longest: longestStreak(days, calendar: calendar))
+                     streak: streak(days, today: today), longest: longestStreak(days))
     }
 
     /// Text and tags, ignoring case and accents. A query starting with "#" matches tags only.
@@ -199,7 +265,7 @@ enum Journal {
     }
 
     /// The month as rows of seven, with nil for the blanks before the first and after the last day.
-    static func monthGrid(year: Int, month: Int, calendar: Calendar = .current) -> [Day?] {
+    static func monthGrid(year: Int, month: Int, calendar: Calendar = .diary) -> [Day?] {
         let first = Day(year: year, month: month, day: 1).date(calendar)
         let lead = (calendar.component(.weekday, from: first) - calendar.firstWeekday + 7) % 7
         let count = calendar.range(of: .day, in: .month, for: first)?.count ?? 30
@@ -208,17 +274,17 @@ enum Journal {
         return cells
     }
 
-    static func weekdaySymbols(_ calendar: Calendar = .current) -> [String] {
+    static func weekdaySymbols(_ calendar: Calendar = .diary) -> [String] {
         let symbols = calendar.veryShortStandaloneWeekdaySymbols
         let shift = calendar.firstWeekday - 1
         return Array(symbols[shift...] + symbols[..<shift])
     }
 
-    static func longDate(_ day: Day, calendar: Calendar = .current) -> String {
+    static func longDate(_ day: Day, calendar: Calendar = .diary) -> String {
         day.date(calendar).formatted(.dateTime.weekday(.wide).day().month(.wide).year())
     }
 
-    static func markdown(_ entry: Entry, calendar: Calendar = .current) -> String {
+    static func markdown(_ entry: Entry, calendar: Calendar = .diary) -> String {
         var out = "# \(longDate(entry.day, calendar: calendar))\n\n"
         var meta: [String] = []
         if let mood = entry.mood { meta.append("Mood: \(mood.name)") }
@@ -230,7 +296,7 @@ enum Journal {
 
     /// Writes one Markdown file per entry into a new "Diary Export <date>" folder inside `parent` and returns it.
     /// Never reuses an existing folder.
-    static func export(_ entries: [Entry], into parent: URL, on day: Day, calendar: Calendar = .current) throws -> URL {
+    static func export(_ entries: [Entry], into parent: URL, on day: Day, calendar: Calendar = .diary) throws -> URL {
         let fm = FileManager.default
         var folder = parent.appendingPathComponent("Diary Export \(day.string)", isDirectory: true)
         var n = 2
@@ -261,6 +327,11 @@ final class DiaryStore: ObservableObject {
     @Published var locked = false
     @Published var lockMessage: String?
     @Published var searchFocusRequest = 0
+    @Published var notice: String?
+    /// True only while the lock screen shows at launch, so it asks once; a manual lock waits for the Unlock button.
+    var promptToUnlock = false
+    private var lastToday: Day
+    private var canSave = true
 
     let calendar: Calendar
     private let fixedToday: Day?
@@ -270,21 +341,35 @@ final class DiaryStore: ObservableObject {
 
     var today: Day { fixedToday ?? Day(Date(), calendar: calendar) }
 
-    init(entries: [Entry]? = nil, today: Day? = nil, calendar: Calendar = .current) {
+    init(entries: [Entry]? = nil, today: Day? = nil, calendar: Calendar = .diary) {
         self.calendar = calendar
         fixedToday = today
         persists = entries == nil && !Desktop.isSnapshot
         let start = today ?? Day(Date(), calendar: calendar)
         selected = start
         visibleMonth = start.firstOfMonth
-        let loaded = entries ?? (persists ? Storage.load([Entry].self, app: Self.appName, file: Self.file) ?? [] : [])
+        lastToday = start
+        var loaded = entries ?? []
+        if persists {
+            let result = Self.load(from: Storage.url(app: Self.appName, file: Self.file))
+            loaded = result.entries
+            canSave = result.writable
+            if !result.writable {
+                notice = "Diary could not read its entries file safely, so changes in this session will not be saved."
+            } else if let backup = result.backup {
+                notice = "Some of your diary could not be read. The original file was kept as \u{201C}\(backup.lastPathComponent)\u{201D} next to your entries."
+            }
+        }
         self.entries = Dictionary(loaded.map { ($0.day, $0) }, uniquingKeysWith: { a, b in a.modified > b.modified ? a : b })
         guard persists else { return }
         locked = UserDefaults.standard.bool(forKey: Prefs.lockEnabled)
+        promptToUnlock = locked
         $entries.dropFirst().debounce(for: .milliseconds(500), scheduler: RunLoop.main)
             .sink { [weak self] _ in self?.save() }.store(in: &bag)
         NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)
             .sink { [weak self] _ in self?.save() }.store(in: &bag)
+        NotificationCenter.default.publisher(for: .NSCalendarDayChanged).receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.dayChanged() }.store(in: &bag)
         let workspace = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.sessionDidResignActiveNotification,
                      NSWorkspace.willSleepNotification] {
@@ -292,18 +377,49 @@ final class DiaryStore: ObservableObject {
         }
     }
 
-    func save() {
-        guard persists else { return }
-        Storage.save(entries.values.sorted { $0.day < $1.day }, app: Self.appName, file: Self.file)
+    /// Reads the entries file, skipping any entry that cannot be decoded. When anything is skipped, or the file is
+    /// not JSON at all, the original is copied aside first, so the next save can never destroy what was there.
+    static func load(from url: URL) -> (entries: [Entry], backup: URL?, writable: Bool) {
+        guard FileManager.default.fileExists(atPath: url.path) else { return ([], nil, true) }
+        guard let data = try? Data(contentsOf: url) else { return ([], nil, false) }
+        if data.isEmpty { return ([], nil, true) }
+        let decoded = try? JSONDecoder().decode(LossyEntries.self, from: data)
+        if let decoded, decoded.skipped == 0 { return (decoded.entries, nil, true) }
+        let stamp = Day(Date()).string
+        var backup = url.deletingLastPathComponent().appendingPathComponent("entries unreadable \(stamp).json")
+        var n = 2
+        while FileManager.default.fileExists(atPath: backup.path) {
+            backup = url.deletingLastPathComponent().appendingPathComponent("entries unreadable \(stamp) \(n).json")
+            n += 1
+        }
+        // Without a safe copy, saving would replace the only one, so the diary stays read only for this session.
+        guard (try? FileManager.default.copyItem(at: url, to: backup)) != nil else { return (decoded?.entries ?? [], nil, false) }
+        return (decoded?.entries ?? [], backup, true)
     }
 
-    var all: [Entry] { entries.values.sorted { $0.day > $1.day } }
-    var stats: Stats { Journal.stats(Array(entries.values), today: today, calendar: calendar) }
-    var results: [Entry] { Journal.search(Array(entries.values), query: query) }
+    func save() {
+        guard persists, canSave else { return }
+        Storage.save(journal.sorted { $0.day < $1.day }, app: Self.appName, file: Self.file)
+    }
+
+    /// Entries with something in them. A day holding only spaces while it is being typed is not one yet.
+    var journal: [Entry] { entries.values.filter { !$0.isBlank } }
+    var hasEntries: Bool { entries.values.contains { !$0.isBlank } }
+    func entry(_ day: Day) -> Entry? { entries[day].flatMap { $0.isBlank ? nil : $0 } }
+    var stats: Stats { Journal.stats(journal, today: today) }
+    var results: [Entry] { Journal.search(journal, query: query) }
     var isSearching: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
     var current: Entry? { entries[selected] }
     func isFuture(_ day: Day) -> Bool { day > today }
-    func onThisDay(_ day: Day) -> [Entry] { Journal.onThisDay(Array(entries.values), day: day) }
+    func onThisDay(_ day: Day) -> [Entry] { Journal.onThisDay(journal, day: day) }
+
+    /// At midnight, a window left on today moves on to the new today.
+    private func dayChanged() {
+        let now = today
+        if selected == lastToday { select(now) }
+        lastToday = now
+        objectWillChange.send()
+    }
 
     // MARK: Navigation
 
@@ -315,7 +431,7 @@ final class DiaryStore: ObservableObject {
     }
 
     func goToday() { select(today) }
-    func step(days: Int) { select(selected.adding(days: days, calendar: calendar)) }
+    func step(days: Int) { select(selected.adding(days: days)) }
 
     func step(months: Int) {
         withAnimation(.snappy(duration: 0.22)) { visibleMonth = visibleMonth.adding(months: months, calendar: calendar) }
@@ -356,7 +472,7 @@ final class DiaryStore: ObservableObject {
         var entry = old ?? Entry(day: day)
         edit(&entry)
         entry.modified = Date()
-        entries[day] = entry.isBlank ? nil : entry
+        entries[day] = entry.text.isEmpty && entry.mood == nil && entry.tags.isEmpty ? nil : entry
         if let action { registerUndo(day, old: old, action: action) }
     }
 
@@ -373,7 +489,7 @@ final class DiaryStore: ObservableObject {
     // MARK: Export
 
     func exportAll() {
-        guard !entries.isEmpty else { return }
+        guard hasEntries else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -382,7 +498,7 @@ final class DiaryStore: ObservableObject {
         panel.message = "Choose where to put the Diary Export folder. Each entry becomes one Markdown file."
         guard panel.runModal() == .OK, let parent = panel.url else { return }
         do {
-            let folder = try Journal.export(Array(entries.values), into: parent, on: today, calendar: calendar)
+            let folder = try Journal.export(journal, into: parent, on: today, calendar: calendar)
             revealInFinder([folder])
         } catch {
             NSAlert(error: error).runModal()
