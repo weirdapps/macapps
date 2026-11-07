@@ -141,6 +141,9 @@ struct Element: Identifiable, Equatable {
         massIsIsotope ? "[\(Int(mass))]" : Format.number(mass, maxDecimals: 4)
     }
 
+    /// The unit beside the mass in the detail panel.
+    var massNote: String { massIsIsotope ? "mass number" : "u" }
+
     var configurationText: String { Format.superscripted(configuration) }
 
     var yearText: String { year.map(String.init) ?? "Ancient" }
@@ -377,7 +380,10 @@ enum Format {
 @MainActor
 final class TableModel: ObservableObject {
     @Published var selected: Int { didSet { persist() } }
-    @Published var mode: ColorMode { didSet { persist() } }
+    @Published var mode: ColorMode {
+        // A legend chip can vanish under the pointer when the mode changes, so its hover never ends: drop the highlight.
+        didSet { highlightedCategory = nil; highlightedPhase = nil; persist() }
+    }
     @Published var query = ""
     @Published var hovered: Int?
     @Published var highlightedCategory: Category?

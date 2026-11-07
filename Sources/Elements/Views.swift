@@ -296,7 +296,7 @@ struct DetailPanel: View {
                     Text(placement).font(.system(size: 11.5)).foregroundStyle(.secondary)
                     Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: h > 190 ? 10 : 6) {
                         GridRow {
-                            Fact(label: "Atomic mass", value: element.massText, note: element.massIsIsotope ? "most stable isotope" : "u")
+                            Fact(label: "Atomic mass", value: element.massText, note: element.massNote)
                             Fact(label: "Electronegativity", value: element.electronegativity.map { Format.number($0, minDecimals: 2, maxDecimals: 2) },
                                  note: element.electronegativity == nil ? nil : "Pauling")
                             Fact(label: "Density", value: element.densityText, note: nil)

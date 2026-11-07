@@ -102,6 +102,33 @@ enum SelfTest {
         check(Heat.isDark(1) && !Heat.isDark(0), "heat scale text contrast")
         check(ColorMode.mass.range.lowerBound == 1.008, "mass range starts at hydrogen")
 
+        // Model state.
+        MainActor.assumeIsolated {
+            let m = TableModel.demo
+            m.highlightedCategory = .halogen
+            m.highlightedPhase = .gas
+            m.mode = .state
+            check(m.highlightedCategory == nil && m.highlightedPhase == nil, "changing the colour mode clears a stuck legend highlight")
+            let before = UserDefaults.standard.object(forKey: "selected") as? Int
+            m.selected = 117
+            m.mode = .mass
+            check(UserDefaults.standard.object(forKey: "selected") as? Int == before, "the demo model never writes user settings")
+            m.query = "zz"
+            m.selectFirstResult()
+            check(m.selected == 117, "Return with no match keeps the selection")
+            m.query = "  au "
+            m.selectFirstResult()
+            check(m.selected == 79, "Return selects the best match (Au)")
+            m.query = ""
+            check(m.results.isEmpty && PeriodicTable.elements.allSatisfy(m.isLit), "an empty search lights every tile")
+        }
+        check(PeriodicTable.element(0) == nil && PeriodicTable.element(119) == nil && PeriodicTable.element(-3) == nil, "out of range numbers find nothing")
+        check(search("0").isEmpty && search("-1").isEmpty && search("999").isEmpty, "zero, negative and huge numbers match nothing")
+        check(search("\u{1F9EA}").isEmpty && search("\u{E9}").isEmpty, "emoji and accented queries match nothing without crashing")
+        check(PeriodicTable.element(36)?.densityText == "3.749 g/L" && PeriodicTable.element(54)?.densityText == "5.894 g/L", "krypton and xenon gas densities")
+        check(PeriodicTable.element(110)?.massNote == "mass number" && PeriodicTable.element(29)?.massNote == "u", "short mass note fits the detail panel")
+        check(all.filter { $0.phase == .unknown }.allSatisfy { $0.number >= 100 }, "only elements 100 and up have an unknown state")
+
         print("\(passed) passed, \(failed) failed")
         return failed == 0 ? 0 : 1
     }
