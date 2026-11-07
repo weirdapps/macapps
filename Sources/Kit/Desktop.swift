@@ -60,7 +60,12 @@ private final class SnapshotDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         self.window = window
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+        // Take focus back just before capturing, in case another app activated meanwhile.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.7) {
             Self.write(window: window, to: self.path)
             exit(0)
         }
