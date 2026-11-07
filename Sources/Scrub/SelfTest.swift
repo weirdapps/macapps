@@ -127,6 +127,8 @@ enum SelfTest {
                                              kCGImagePropertyExifExposureTime: 0.01, kCGImagePropertyExifCameraOwnerName: "Test Owner"],
             kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitude: 48.8584, kCGImagePropertyGPSLatitudeRef: "N",
                                             kCGImagePropertyGPSLongitude: 2.2945, kCGImagePropertyGPSLongitudeRef: "E"],
+            kCGImagePropertyIPTCDictionary: [kCGImagePropertyIPTCCity: "Paris", kCGImagePropertyIPTCCountryPrimaryLocationName: "France",
+                                             kCGImagePropertyIPTCKeywords: ["tower"]],
             kCGImageDestinationLossyCompressionQuality: 0.9,
         ]
         CGImageDestinationAddImage(dest, image, props as CFDictionary)
@@ -151,6 +153,8 @@ enum SelfTest {
         check(original.flags.isSuperset(of: [.location, .cameraSerial, .owner, .device, .dateTaken, .software]), "test JPEG flags read back")
         check(original.coordinate.map { abs($0.latitude - 48.8584) < 0.0001 && abs($0.longitude - 2.2945) < 0.0001 } == true, "test JPEG coordinate")
         check(original.orientation == 6, "test JPEG orientation")
+        let placeOnly = MetadataReader.report(from: [Keys.iptc: [kCGImagePropertyIPTCCity as String: "Paris"]], type: "public.jpeg")
+        check(placeOnly.flags.contains(.location), "an IPTC city alone counts as location")
 
         // Remove location only.
         let noLocation = Scrubber.outputURL(for: jpeg, suffix: "-noloc", folder: nil)
@@ -158,6 +162,12 @@ enum SelfTest {
             let r = try Scrubber.clean(jpeg, mode: .location, to: noLocation)
             check(r.lossless, "location removal is lossless for JPEG")
             check(!r.report.flags.contains(.location) && r.report.coordinate == nil, "location gone")
+            let iptc = (CGImageSourceCreateWithURL(noLocation as CFURL, nil).flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) }
+                        as? [String: Any])?[kCGImagePropertyIPTCDictionary as String] as? [String: Any] ?? [:]
+            check(iptc[kCGImagePropertyIPTCCity as String] == nil && iptc[kCGImagePropertyIPTCCountryPrimaryLocationName as String] == nil,
+                  "IPTC city and country gone when removing location (left: \(iptc.keys.sorted()))")
+            check(r.report.groups.first { $0.title == "Location" } == nil || r.report.groups.first { $0.title == "Location" }?.rows.isEmpty == true,
+                  "no place names left in the Location group")
             check(r.report.flags.isSuperset(of: [.device, .cameraSerial, .dateTaken]), "other metadata kept when removing location")
             check(r.report.orientation == 6, "orientation kept when removing location")
             check(pixels(noLocation) == pixels(jpeg), "pixels identical after removing location")

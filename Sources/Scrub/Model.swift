@@ -315,7 +315,10 @@ enum MetadataReader {
         }
         for (label, key) in [("City", kCGImagePropertyIPTCCity), ("Region", kCGImagePropertyIPTCProvinceState),
                              ("Country", kCGImagePropertyIPTCCountryPrimaryLocationName)] {
-            if let v = string(iptc[key as String]) { location.rows.append(MetaRow(label: label, value: v, sensitive: true)) }
+            if let v = string(iptc[key as String]) {
+                location.rows.append(MetaRow(label: label, value: v, sensitive: true))
+                r.flags.insert(.location)
+            }
         }
 
         // Software
@@ -480,13 +483,23 @@ enum Scrubber {
         return CleanResult(output: output, lossless: lossless, verification: v, report: MetadataReader.read(output) ?? PhotoReport(), mode: mode)
     }
 
+    /// IPTC place fields (IIM and their XMP twins) that Remove Location clears along with GPS.
+    static let placeIPTCKeys = [kCGImagePropertyIPTCCity, kCGImagePropertyIPTCProvinceState, kCGImagePropertyIPTCSubLocation,
+                                kCGImagePropertyIPTCCountryPrimaryLocationName, kCGImagePropertyIPTCCountryPrimaryLocationCode]
+        .map { $0 as String }
+    static let placeTagPaths = ["photoshop:City", "photoshop:State", "photoshop:Country", "Iptc4xmpCore:Location",
+                                "Iptc4xmpCore:CountryCode", "Iptc4xmpExt:LocationCreated", "Iptc4xmpExt:LocationShown"]
+
     private static func copyLossless(_ src: CGImageSource, type: CFString, mode: ScrubMode, orientation: Int, to output: URL) -> Bool {
         guard let dest = CGImageDestinationCreateWithURL(output as CFURL, type, CGImageSourceGetCount(src), nil) else { return false }
         var options: [CFString: Any] = [kCGImageMetadataShouldExcludeGPS: true, kCGImageDestinationMergeMetadata: false]
         switch mode {
         case .location:
             // Without metadata of its own the copy would drop everything; hand it the original minus GPS.
-            guard let meta = CGImageSourceCopyMetadataAtIndex(src, 0, nil) else { return false }
+            guard let original = CGImageSourceCopyMetadataAtIndex(src, 0, nil),
+                  let meta = CGImageMetadataCreateMutableCopy(original) else { return false }
+            // Place names written by the camera or an editor say where the photo was taken as plainly as GPS does.
+            for path in placeTagPaths { CGImageMetadataRemoveTagWithPath(meta, nil, path as CFString) }
             options[kCGImageDestinationMetadata] = meta
         case .all:
             // An XMP packet can repeat the date, the software and the place, so it goes too.
@@ -505,6 +518,13 @@ enum Scrubber {
         guard let dest = CGImageDestinationCreateWithURL(output as CFURL, type, 1, nil) else { return false }
         var props: [String: Any] = [kCGImageDestinationLossyCompressionQuality as String: 0.92,
                                     kCGImagePropertyGPSDictionary as String: kCFNull as Any]
+        if mode == .location {
+            let source = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [String: Any] ?? [:]
+            if var iptc = source[Keys.iptc] as? [String: Any] {
+                for key in placeIPTCKeys { iptc[key] = kCFNull }
+                props[Keys.iptc] = iptc
+            }
+        }
         if mode == .all {
             // Every metadata dictionary the source has, set to null, keeps only the pixels, the colour profile and the orientation.
             let source = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [String: Any] ?? [:]

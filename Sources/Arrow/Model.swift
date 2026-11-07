@@ -92,9 +92,15 @@ enum Kind: String {
 }
 
 enum RedactStyle: String, CaseIterable, Identifiable {
-    case pixelate, blur
+    case pixelate, blur, solid
     var id: String { rawValue }
-    var title: String { self == .pixelate ? "Pixelate" : "Blur" }
+    var title: String {
+        switch self {
+        case .pixelate: "Pixelate"
+        case .blur: "Blur"
+        case .solid: "Solid"
+        }
+    }
 }
 
 struct RGBA: Equatable, Hashable {

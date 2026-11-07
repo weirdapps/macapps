@@ -216,6 +216,8 @@ enum SelfTest {
                 check(sharp > 60 && spread(img) < 30, "pixelate wipes out detail")
                 b.annotations[0].style = .blur
                 check(b.rendered().map(spread).map { $0 < 30 } ?? false, "blur wipes out detail")
+                b.annotations[0].style = .solid
+                check(b.rendered().map(spread).map { $0 == 0 } ?? false, "solid redaction keeps nothing underneath")
                 check(pixel(img, 600, 450).r == 128 || abs(pixel(img, 600, 450).r - 128) < 3, "redaction stays inside its box")
             } else { check(false, "export renders a redaction") }
 

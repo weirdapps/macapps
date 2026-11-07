@@ -79,6 +79,12 @@ enum SelfTest {
         check(HTMLExporter.inline("**bold** and _it_ `a<b` [link](https://x.com/?a=1&b=2)")
               == "<strong>bold</strong> and <em>it</em> <code>a&lt;b</code> <a href=\"https://x.com/?a=1&amp;b=2\">link</a>",
               "inline HTML: strong, em, code, link, escaping")
+        check(!HTMLExporter.inline("[x](javascript:alert(1))").contains("href"), "javascript: links are dropped from HTML")
+        check(!HTMLExporter.inline("[x](JaVaScRiPt:alert(1))").contains("href"), "scheme check ignores case")
+        check(!HTMLExporter.inline("![x](data:text/html,hi)").contains("src"), "data: images are dropped from HTML")
+        check(HTMLExporter.inline("[x](mailto:a@b.c)").contains("href=\"mailto:a@b.c\""), "mailto links stay")
+        check(HTMLExporter.inline("[x](docs/a.md)").contains("href=\"docs/a.md\""), "relative links stay")
+        check(HTMLExporter.safeURL("img/a:b.png") == "img/a:b.png", "a colon after a slash is a relative path")
         let doc = HTMLExporter.body(MarkdownParser.parse("- [x] done\n\n```\n<tag>\n```"))
         check(doc.contains("<input type=\"checkbox\" disabled checked> done"), "task list HTML")
         check(doc.contains("<pre><code>&lt;tag&gt;\n</code></pre>"), "code HTML is escaped")

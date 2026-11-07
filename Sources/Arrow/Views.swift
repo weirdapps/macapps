@@ -369,7 +369,8 @@ struct StyleBar: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .controlSize(.small)
-                .frame(width: 140)
+                .frame(width: 200)
+                .help("Pixelate and Blur hide detail but can sometimes be reversed on small text. Solid covers it completely.")
             }
             Spacer(minLength: 8)
             Text(info).font(.system(size: 11.5)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)

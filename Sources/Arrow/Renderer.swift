@@ -84,7 +84,11 @@ enum Renderer {
             let box = a.box
             guard box.width > 0, box.height > 0 else { return }
             cg.clip(to: box)
-            if a.style == .pixelate {
+            if a.style == .solid {
+                // The only style that keeps nothing of what is underneath: the safe choice for passwords and numbers.
+                cg.setFillColor(NSColor(white: 0.08, alpha: 1).cgColor)
+                cg.fill(box)
+            } else if a.style == .pixelate {
                 drawPixelated(image, box: box, cg)
             } else if let source = effects.blurred {
                 drawImage(source, in: full, cg)

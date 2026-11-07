@@ -571,7 +571,8 @@ enum HTMLExporter {
             return "<hr>\n"
         case .image(let alt, let source, let title):
             let t = title.map { " title=\"\(escape($0))\"" } ?? ""
-            return "<p><img src=\"\(escape(source))\" alt=\"\(escape(alt))\"\(t)></p>\n"
+            guard let safe = safeURL(source) else { return "<p>\(escape(alt))</p>\n" }
+            return "<p><img src=\"\(escape(safe))\" alt=\"\(escape(alt))\"\(t)></p>\n"
         }
     }
 
@@ -583,7 +584,11 @@ enum HTMLExporter {
             for run in attr[range].runs {
                 let text = String(attr[run.range].characters)
                 if let image = run.imageURL {
-                    inner += "<img src=\"\(escape(image.relativeString))\" alt=\"\(escape(text))\">"
+                    if let safe = safeURL(image.relativeString) {
+                        inner += "<img src=\"\(escape(safe))\" alt=\"\(escape(text))\">"
+                    } else {
+                        inner += escape(text)
+                    }
                     continue
                 }
                 var piece = escape(text).replacingOccurrences(of: "\n", with: "<br>\n")
@@ -594,9 +599,21 @@ enum HTMLExporter {
                 if intent.contains(.stronglyEmphasized) { piece = "<strong>\(piece)</strong>" }
                 inner += piece
             }
-            out += link.map { "<a href=\"\(escape($0.relativeString))\">\(inner)</a>" } ?? inner
+            out += link.flatMap { safeURL($0.relativeString) }.map { "<a href=\"\(escape($0))\">\(inner)</a>" } ?? inner
         }
         return out
+    }
+
+    /// Links and images in exported HTML keep only web, mail and relative addresses, so a file opened in a browser
+    /// cannot run script through a javascript:, vbscript: or data: link.
+    static func safeURL(_ s: String) -> String? {
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowered = trimmed.lowercased().filter { !$0.isWhitespace && !$0.isNewline && $0 != "\u{0}" }
+        guard let colon = lowered.firstIndex(of: ":") else { return trimmed }
+        let scheme = lowered[..<colon]
+        // A colon after a slash, a question mark or a hash is part of a relative path, not a scheme.
+        if scheme.contains(where: { "/?#".contains($0) }) { return trimmed }
+        return ["http", "https", "mailto"].contains(String(scheme)) ? trimmed : nil
     }
 
     static func escape(_ s: String) -> String {
