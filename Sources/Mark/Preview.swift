@@ -40,7 +40,7 @@ struct PreviewView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ScrollView {
-                BlockStack(blocks: blocks)
+                BlockStack(blocks: blocks, lazy: !Desktop.isSnapshot)
                     .frame(maxWidth: 720, alignment: .leading)
                     .padding(.horizontal, 36)
                     .padding(.top, 28)
@@ -56,14 +56,24 @@ struct BlockStack: View {
     let blocks: [Block]
     var depth = 0
     var spacing: CGFloat = 14
+    /// The preview's top level builds blocks as they scroll into view, so a long document opens instantly.
+    var lazy = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: spacing) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
-                BlockView(block: block, depth: depth, isFirst: index == 0)
+        Group {
+            if lazy {
+                LazyVStack(alignment: .leading, spacing: spacing) { rows }
+            } else {
+                VStack(alignment: .leading, spacing: spacing) { rows }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var rows: some View {
+        ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
+            BlockView(block: block, depth: depth, isFirst: index == 0)
+        }
     }
 }
 

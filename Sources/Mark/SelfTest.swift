@@ -20,6 +20,7 @@ enum SelfTest {
         stats()
         editing()
         exports()
+        oddInput()
         print(failures == 0 ? "OK: \(checks) checks passed" : "\(failures) of \(checks) checks failed")
         return failures == 0 ? 0 : 1
     }
@@ -117,6 +118,61 @@ enum SelfTest {
         let font = { (i: Int) in storage.attribute(.font, at: i, effectiveRange: nil) as? NSFont }
         check(font(2) == Highlighter.bold && font(10) == Highlighter.bold, "headings and strong text are bold")
         check(font(30) == Highlighter.regular, "fenced code is not styled as Markdown")
+    }
+
+    /// Input people produce while typing, or that arrives in odd files: none of it may crash or hang the preview.
+    private static func oddInput() {
+        // Half-typed image titles used to trap on an inverted string range.
+        check(MarkdownParser.parse("![a](x \")") == [.image(alt: "a", source: "x \"", title: nil)], "half-typed image title does not crash")
+        check(MarkdownParser.parse("![a](x \"\")") == [.image(alt: "a", source: "x", title: "")], "empty image title")
+        check(MarkdownParser.parse("![](") == [.paragraph("![](")], "unfinished image is text")
+
+        // A selection covering the heading marks must stay inside the new text.
+        let source = "## Title"
+        let off = Formatting.heading(source, NSRange(location: 0, length: 8), level: 2)
+        let result = off.apply(to: source)
+        check(result == "Title" && off.selection == NSRange(location: 0, length: 5), "heading off keeps the selection in range (\(off.selection))")
+        let on = Formatting.heading("Title", NSRange(location: 0, length: 5), level: 1)
+        check(on.apply(to: "Title") == "# Title" && on.selection == NSRange(location: 2, length: 5), "heading on shifts the selection")
+        let empty = Formatting.heading("", NSRange(location: 0, length: 0), level: 3)
+        check(empty.apply(to: "") == "### " && empty.selection == NSRange(location: 4, length: 0), "heading on an empty document")
+
+        // Pathological nesting is capped instead of recursing until the stack runs out.
+        let deepQuote = String(repeating: ">", count: 5000) + " deep"
+        check(nesting(MarkdownParser.parse(deepQuote)) <= MarkdownParser.maxDepth + 1, "five thousand nested quotes are capped")
+        let deepList = (0..<400).map { String(repeating: "  ", count: $0) + "- item" }.joined(separator: "\n")
+        check(nesting(MarkdownParser.parse(deepList)) <= MarkdownParser.maxDepth + 1, "four hundred nested list levels are capped")
+        check(TextStats(source: deepQuote, blocks: MarkdownParser.parse(deepQuote)).words == 1, "the capped text is still counted")
+
+        check(MarkdownParser.parse("").isEmpty && MarkdownParser.parse("\n\n  \n\t").isEmpty, "empty and blank documents have no blocks")
+        check(MarkdownParser.parse("```").count == 1, "an unclosed fence is one code block")
+        check(MarkdownParser.parse("|\n|-|") != [], "a bare pipe table does not crash")
+        check(MarkdownParser.parse("1.") .count == 1 && MarkdownParser.parse("-").count == 1, "lone list markers")
+        let unicode = "# Καλημέρα 🌍\n\n日本語のテキスト and émigré café"
+        check(TextStats(source: unicode, blocks: MarkdownParser.parse(unicode)).words >= 5, "unicode words are counted")
+        check(HTMLExporter.inline("🌍 <b>").contains("&lt;b&gt;"), "raw HTML is escaped in the export")
+
+        // A long document parses quickly enough to reparse after each pause in typing.
+        let big = String(repeating: Demo.text + "\n", count: 400)
+        let start = Date()
+        let blocks = MarkdownParser.parse(big)
+        _ = TextStats(source: big, blocks: blocks)
+        let seconds = Date().timeIntervalSince(start)
+        check(blocks.count == 3200 && seconds < 3, "a 240 KB document parses and counts in \(String(format: "%.2f", seconds)) s")
+        let storage = NSTextStorage(string: big)
+        let hl = Date()
+        Highlighter.apply(storage)
+        check(Date().timeIntervalSince(hl) < 3, "a 240 KB document highlights in \(String(format: "%.2f", Date().timeIntervalSince(hl))) s")
+    }
+
+    private static func nesting(_ blocks: [Block]) -> Int {
+        blocks.map { block -> Int in
+            switch block {
+            case .quote(let inner): 1 + nesting(inner)
+            case .list(let list): 1 + (list.items.map { nesting($0.blocks) }.max() ?? 0)
+            default: 0
+            }
+        }.max() ?? 0
     }
 
     private static func exports() {

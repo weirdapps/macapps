@@ -27,6 +27,8 @@ enum Theme {
 /// Light syntax colouring for the source: structure in the accent, markup characters dimmed.
 enum Highlighter {
     static let size: CGFloat = 13.5
+    /// Documents shorter than this (in UTF-16 units) are recoloured on every keystroke.
+    static let liveLimit = 60_000
     static let regular = NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
     static let bold = NSFont.monospacedSystemFont(ofSize: size, weight: .bold)
     static let italic = withTraits(regular, .italic)
@@ -221,15 +223,16 @@ final class EditorSession: ObservableObject {
         pending?.cancel()
         pending = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(120))
-            guard !Task.isCancelled, let self else { return }
-            self.reparse()
+            guard !Task.isCancelled else { return }
+            // Parsing and counting a long document takes a while: do it off the main thread.
+            let result = await Task.detached(priority: .userInitiated) { () -> ([Block], TextStats) in
+                let blocks = MarkdownParser.parse(new)
+                return (blocks, TextStats(source: new, blocks: blocks))
+            }.value
+            guard !Task.isCancelled, let self, self.text == new else { return }
+            if result.0 != self.blocks { self.blocks = result.0 }
+            self.stats = result.1
         }
-    }
-
-    private func reparse() {
-        let blocks = MarkdownParser.parse(text)
-        if blocks != self.blocks { self.blocks = blocks }
-        stats = TextStats(source: text, blocks: blocks)
     }
 
     // MARK: Editing
@@ -388,12 +391,25 @@ struct MarkdownEditor: NSViewRepresentable {
         var parent: MarkdownEditor
         init(_ parent: MarkdownEditor) { self.parent = parent }
 
+        private var pendingHighlight: DispatchWorkItem?
+
         func textDidChange(_ notification: Notification) {
             guard let tv = notification.object as? NSTextView else { return }
-            // Leave text being composed (an accent dead key, an input method) alone until it is committed.
-            if !tv.hasMarkedText(), let storage = tv.textStorage { Highlighter.apply(storage) }
             tv.typingAttributes = Highlighter.base
             parent.text = tv.string
+            // Short documents recolour on every keystroke; long ones once typing pauses, so typing never lags.
+            pendingHighlight?.cancel()
+            let work = DispatchWorkItem { [weak tv] in
+                // Leave text being composed (an accent dead key, an input method) alone until it is committed.
+                guard let tv, !tv.hasMarkedText(), let storage = tv.textStorage else { return }
+                Highlighter.apply(storage)
+            }
+            if (tv.string as NSString).length < Highlighter.liveLimit {
+                work.perform()
+            } else {
+                pendingHighlight = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+            }
         }
     }
 }

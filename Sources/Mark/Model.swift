@@ -103,7 +103,14 @@ enum MarkdownParser {
         }
     }
 
-    static func parseLines(_ lines: [String]) -> [Block] {
+    /// Quotes and lists nest at most this deep; anything deeper is shown as text, so a line of a thousand `>` cannot exhaust the stack.
+    static let maxDepth = 16
+
+    static func parseLines(_ lines: [String], depth: Int = 0) -> [Block] {
+        if depth > maxDepth {
+            let text = lines.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            return text.isEmpty ? [] : [.paragraph(text.joined(separator: " "))]
+        }
         var blocks: [Block] = []
         var para: [String] = []
         var i = 0
@@ -185,13 +192,13 @@ enum MarkdownParser {
                     }
                     i += 1
                 }
-                blocks.append(.quote(parseLines(inner)))
+                blocks.append(.quote(parseLines(inner, depth: depth + 1)))
                 continue
             }
 
             if let marker = listMarker(line), marker.indent < 4, para.isEmpty || !marker.ordered || marker.number == 1 {
                 flush()
-                blocks.append(.list(parseList(lines, &i, first: marker)))
+                blocks.append(.list(parseList(lines, &i, first: marker, depth: depth + 1)))
                 continue
             }
 
@@ -257,7 +264,7 @@ enum MarkdownParser {
         return Marker(ordered: ordered, number: number, symbol: symbol, indent: indent, contentIndent: indent + markerLength + gap, rest: rest)
     }
 
-    private static func parseList(_ lines: [String], _ i: inout Int, first: Marker) -> MarkList {
+    private static func parseList(_ lines: [String], _ i: inout Int, first: Marker, depth: Int) -> MarkList {
         var items: [ListItem] = []
         var tight = true
         var marker: Marker? = first
@@ -290,7 +297,7 @@ enum MarkdownParser {
                 checked = head.prefix(3) != "[ ]"
                 body[0] = String(head.dropFirst(3).drop { $0 == " " })
             }
-            items.append(ListItem(checked: checked, taskIndex: nil, blocks: parseLines(body)))
+            items.append(ListItem(checked: checked, taskIndex: nil, blocks: parseLines(body, depth: depth)))
 
             marker = nil
             if i < lines.count, let next = listMarker(lines[i]), next.ordered == first.ordered, next.symbol == first.symbol,
@@ -427,7 +434,7 @@ enum MarkdownParser {
         guard !alt.contains("]") else { return nil }
         var target = String(t[close.upperBound..<t.index(before: t.endIndex)]).trimmingCharacters(in: .whitespaces)
         var title: String?
-        if let q = target.range(of: " \""), target.hasSuffix("\"") {
+        if target.hasSuffix("\""), let q = target.range(of: " \""), q.upperBound < target.endIndex {
             title = String(target[q.upperBound..<target.index(before: target.endIndex)])
             target = String(target[..<q.lowerBound])
         }
@@ -691,10 +698,14 @@ enum Formatting {
         }
         let target = current == level ? 0 : level
         let prefix = target == 0 ? "" : String(repeating: "#", count: target) + " "
-        let delta = (prefix as NSString).length - existing
-        let start = max(line.location, sel.location + delta)
+        let added = (prefix as NSString).length
+        // Points inside the old prefix land after the new one; points after it shift with the line.
+        func map(_ p: Int) -> Int {
+            p < line.location ? p : p < line.location + existing ? line.location + added : p + added - existing
+        }
+        let start = map(sel.location), end = max(start, map(sel.upperBound))
         return TextEdit(range: NSRange(location: line.location, length: existing), replacement: prefix,
-                        selection: NSRange(location: start, length: sel.length))
+                        selection: NSRange(location: start, length: end - start))
     }
 
     /// Ticks or unticks the `index`th task box of the document, skipping fenced code.
