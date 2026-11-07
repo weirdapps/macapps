@@ -66,7 +66,7 @@ enum KeyMap {
         (kVK_ANSI_A, "A"), (kVK_ANSI_W, "W"), (kVK_ANSI_S, "S"), (kVK_ANSI_E, "E"), (kVK_ANSI_D, "D"),
         (kVK_ANSI_F, "F"), (kVK_ANSI_T, "T"), (kVK_ANSI_G, "G"), (kVK_ANSI_Y, "Y"), (kVK_ANSI_H, "H"),
         (kVK_ANSI_U, "U"), (kVK_ANSI_J, "J"), (kVK_ANSI_K, "K"), (kVK_ANSI_O, "O"), (kVK_ANSI_L, "L"),
-        (kVK_ANSI_P, "P"), (kVK_ANSI_Semicolon, ";"), (kVK_ANSI_Quote, "'"),
+        (kVK_ANSI_P, "P"), (kVK_ANSI_Semicolon, ";"), (kVK_ANSI_Quote, "'"), (kVK_ANSI_RightBracket, "]"),
     ]
     static let octaveDown = UInt16(kVK_ANSI_Z)
     static let octaveUp = UInt16(kVK_ANSI_X)
@@ -161,6 +161,18 @@ struct Take: Codable, Equatable {
 
     var noteCount: Int { events.filter { $0.kind == .on }.count }
 
+    /// The take with times that cannot hurt playback or export: finite, not negative, in order, inside the duration.
+    /// A take file that was edited or damaged by hand still loads.
+    var sanitized: Take {
+        let limit = 24 * 3600.0
+        let kept = events.filter { $0.time.isFinite && $0.time >= 0 && $0.time <= limit }
+            .enumerated().sorted { $0.element.time != $1.element.time ? $0.element.time < $1.element.time : $0.offset < $1.offset }
+            .map(\.element)
+        let last = kept.last?.time ?? 0
+        let length = duration.isFinite && duration >= last ? min(duration, limit) : last
+        return Take(events: kept, duration: length, sound: sound)
+    }
+
     /// Notes as bars for the take overview: (note, start, end).
     var bars: [(note: Int, start: Double, end: Double)] {
         var open: [UInt8: [Double]] = [:]
@@ -209,7 +221,15 @@ enum MIDIFile {
         return bytes
     }
 
-    static func ticks(_ seconds: Double) -> UInt32 { UInt32(max(0, (seconds * ticksPerSecond).rounded())) }
+    /// The largest delta a variable-length quantity can carry, about 77 hours at 960 ticks a second.
+    static let maxTicks: UInt32 = 0x0FFF_FFFF
+
+    /// Seconds to ticks, clamped so negative, infinite or absurdly long times can never trap.
+    static func ticks(_ seconds: Double) -> UInt32 {
+        let t = seconds * ticksPerSecond
+        guard t.isFinite, t > 0 else { return t == .infinity ? maxTicks : 0 }
+        return UInt32(min(Double(maxTicks), t.rounded()))
+    }
 
     static func data(for take: Take, name: String = "Ivory") -> Data {
         var track: [UInt8] = []
@@ -295,7 +315,9 @@ final class PianoModel: ObservableObject {
         baseOctave = min(max(octave, Self.octaves.lowerBound), Self.octaves.upperBound)
         showNoteNames = persists ? d.object(forKey: "noteNames") as? Bool ?? true : true
         showKeyLabels = persists ? d.object(forKey: "keyLabels") as? Bool ?? true : true
-        if persists { take = Storage.load(Take.self, app: "Ivory", file: "take.json") }
+        if persists, let saved = Storage.load(Take.self, app: "Ivory", file: "take.json")?.sanitized, saved.noteCount > 0 {
+            take = saved
+        }
         synth?.setGain(Float(volume))
     }
 

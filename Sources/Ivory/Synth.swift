@@ -73,8 +73,12 @@ struct SynthCore {
         for i in voices.indices where voices[i].note == note { voices[i].held = false; startRelease(&voices[i], seconds: 0.06) }
         if voices.count >= Self.maxVoices {
             // Steal the quietest released voice, or else the oldest.
-            let victim = voices.indices.filter { voices[$0].released }.min { voices[$0].releaseGain < voices[$1].releaseGain }
-                ?? voices.indices.max { voices[$0].age < voices[$1].age }!
+            // A plain loop, because this runs on the audio thread and must not allocate.
+            var victim = 0
+            for i in voices.indices {
+                let a = voices[i], b = voices[victim]
+                if a.released != b.released ? a.released : (a.released ? a.releaseGain < b.releaseGain : a.age > b.age) { victim = i }
+            }
             voices.remove(at: victim)
         }
         voices.append(makeVoice(note, velocity: Float(velocity) / 127, sound: sound))
@@ -244,6 +248,37 @@ struct SynthCore {
     }
 }
 
+// MARK: - Command ring
+
+/// The queue between the main thread and the audio thread. A fixed ring that never allocates; the volume is kept
+/// apart and only its newest value counts, so dragging the slider can never fill the ring and drop a note.
+struct CommandRing {
+    private var slots: [SynthCore.Command]
+    private var head = 0, tail = 0
+    private var pendingGain: Float?
+
+    init(capacity: Int = 512) { slots = Array(repeating: .allOff, count: max(2, capacity)) }
+
+    /// Returns false when the ring is full and the command was dropped.
+    @discardableResult
+    mutating func push(_ command: SynthCore.Command) -> Bool {
+        if case .gain(let value) = command { pendingGain = value; return true }
+        let next = (tail + 1) % slots.count
+        guard next != head else { return false }
+        slots[tail] = command
+        tail = next
+        return true
+    }
+
+    mutating func drain(into core: inout SynthCore) {
+        if let gain = pendingGain { core.handle(.gain(gain)); pendingGain = nil }
+        while head != tail {
+            core.handle(slots[head])
+            head = (head + 1) % slots.count
+        }
+    }
+}
+
 // MARK: - Audio engine
 
 /// Plays `SynthCore` through AVAudioEngine. The main thread posts commands into a small ring; the render callback drains it.
@@ -252,8 +287,7 @@ final class Synth: @unchecked Sendable {
     private var source: AVAudioSourceNode?
     private var core: SynthCore
     private let lock: UnsafeMutablePointer<os_unfair_lock>
-    private var ring: [SynthCore.Command]
-    private var head = 0, tail = 0
+    private var ring = CommandRing()
     private var started = false
     private var observer: NSObjectProtocol?
 
@@ -262,7 +296,6 @@ final class Synth: @unchecked Sendable {
         core = SynthCore(sampleRate: rate > 0 ? rate : 48_000)
         lock = .allocate(capacity: 1)
         lock.initialize(to: os_unfair_lock())
-        ring = Array(repeating: .allOff, count: 512)
         observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine,
                                                           queue: .main) { [weak self] _ in
             guard let self, self.started else { return }
@@ -296,20 +329,13 @@ final class Synth: @unchecked Sendable {
 
     private func post(_ command: SynthCore.Command) {
         os_unfair_lock_lock(lock)
-        let next = (tail + 1) % ring.count
-        if next != head {
-            ring[tail] = command
-            tail = next
-        }
+        ring.push(command)
         os_unfair_lock_unlock(lock)
     }
 
     private func render(frames: Int, bufferList: UnsafeMutablePointer<AudioBufferList>) {
         os_unfair_lock_lock(lock)
-        while head != tail {
-            core.handle(ring[head])
-            head = (head + 1) % ring.count
-        }
+        ring.drain(into: &core)
         os_unfair_lock_unlock(lock)
         let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
         guard buffers.count >= 2, let l = buffers[0].mData?.assumingMemoryBound(to: Float.self),

@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import Kit
 import SwiftUI
 
@@ -368,7 +369,7 @@ struct HintBar: View {
     var body: some View {
         HStack(spacing: 20) {
             hint(["A", "S", "D", "…", "'"], "white keys")
-            hint(["W", "E", "T", "…", "P"], "black keys")
+            hint(["W", "E", "T", "…", "]"], "black keys")
             hint(["Z", "X"], "octave")
             hint(["Space"], "sustain")
             HStack(spacing: 5) {
@@ -588,7 +589,8 @@ final class KeyCatcherView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
-        guard isPlain(event), let model else { return super.keyDown(with: event) }
+        // Tab and Shift-Tab still move keyboard focus to the controls.
+        guard isPlain(event), event.keyCode != UInt16(kVK_Tab), let model else { return super.keyDown(with: event) }
         // Unused plain keys are swallowed too, so typing a wrong letter does not beep.
         model.keyDown(event.keyCode, isRepeat: event.isARepeat)
     }

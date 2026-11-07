@@ -78,6 +78,21 @@ enum SelfTest {
         check((try? Data(contentsOf: url)) == MIDIFile.data(for: take), "MIDI file writes and reads back")
         try? FileManager.default.removeItem(at: url)
         check(PianoModel.suggestedFileName(date: Date(timeIntervalSince1970: 0)).hasSuffix(".mid"), "export file name ends in .mid")
+
+        // Times that once trapped when converted to ticks.
+        check(MIDIFile.ticks(-3) == 0 && MIDIFile.ticks(.nan) == 0, "negative and invalid times become tick 0")
+        check(MIDIFile.ticks(1e12) == MIDIFile.maxTicks && MIDIFile.ticks(.infinity) == MIDIFile.maxTicks, "huge times clamp instead of trapping")
+        let huge = Take(events: [TakeEvent(time: 0, kind: .on, note: 60, velocity: 90), TakeEvent(time: 1e9, kind: .off, note: 60)],
+                        duration: 1e12, sound: .piano)
+        let hugeBytes = [UInt8](MIDIFile.data(for: huge))
+        check(Array(hugeBytes.suffix(3)) == [0xFF, 0x2F, 0x00] && parseNoteOns(hugeBytes) == 1, "an absurdly long take still writes a valid file")
+
+        // A take file damaged by hand: negative, out of order and past the end.
+        let damaged = Take(events: [TakeEvent(time: 2, kind: .off, note: 60), TakeEvent(time: -1, kind: .on, note: 62, velocity: 80),
+                                    TakeEvent(time: 1, kind: .on, note: 60, velocity: 80)], duration: 0.5, sound: .organ).sanitized
+        check(damaged.events.map(\.time) == [1, 2], "sanitising drops negative times and sorts the rest")
+        check(damaged.duration == 2, "sanitising stretches the duration to the last event")
+        check(Take.demo.sanitized == Take.demo, "a healthy take is unchanged by sanitising")
     }
 
     private static func contains(_ bytes: [UInt8], _ run: [UInt8]) -> Bool {
@@ -128,7 +143,9 @@ enum SelfTest {
         let whiteRow = [kVK_ANSI_A, kVK_ANSI_S, kVK_ANSI_D, kVK_ANSI_F, kVK_ANSI_G, kVK_ANSI_H, kVK_ANSI_J, kVK_ANSI_K,
                         kVK_ANSI_L, kVK_ANSI_Semicolon, kVK_ANSI_Quote]
         check(whiteRow.allSatisfy { !Note.isBlack(60 + KeyMap.offset(for: UInt16($0))!) }, "the A row only plays white keys")
-        let blackRow = [kVK_ANSI_W, kVK_ANSI_E, kVK_ANSI_T, kVK_ANSI_Y, kVK_ANSI_U, kVK_ANSI_O, kVK_ANSI_P]
+        check(KeyMap.offset(for: UInt16(kVK_ANSI_RightBracket)) == 18, "] plays the F sharp above it")
+        check(KeyMap.label(forOffset: 18) == "]" && KeyMap.label(forOffset: 19) == nil, "key labels stop after ]")
+        let blackRow = [kVK_ANSI_W, kVK_ANSI_E, kVK_ANSI_T, kVK_ANSI_Y, kVK_ANSI_U, kVK_ANSI_O, kVK_ANSI_P, kVK_ANSI_RightBracket]
         check(blackRow.allSatisfy { Note.isBlack(60 + KeyMap.offset(for: UInt16($0))!) }, "the W row only plays black keys")
         check(Set(KeyMap.rows.map(\.code)).count == KeyMap.rows.count, "no key is mapped twice")
         check(Note.fullName(60) == "C4" && Note.fullName(61) == "C♯4" && Note.fullName(21) == "A0", "note names")
@@ -267,5 +284,29 @@ enum SelfTest {
         quiet.handle(.gain(0))
         quiet.handle(.noteOn(60, 127, .piano))
         check(peak(&quiet) == 0, "volume zero is silent")
+
+        // The first note after a long slider drag used to be dropped because gain changes filled the ring.
+        var ring = CommandRing(capacity: 8)
+        for i in 0..<1_000 { ring.push(.gain(Float(i % 10) / 10)) }
+        ring.push(.gain(0.5))
+        check(ring.push(.noteOn(60, 100, .piano)), "a note still fits after a thousand volume changes")
+        var fed = SynthCore(sampleRate: rate)
+        ring.drain(into: &fed)
+        check(fed.voices.count == 1 && fed.gain == 0.5, "the ring delivers the note and only the newest volume")
+        for _ in 0..<7 { ring.push(.noteOff(60)) }
+        check(!ring.push(.noteOff(61)), "a full ring refuses instead of overwriting")
+
+        // Voice stealing prefers a voice that is already letting go over one still held.
+        var steal = SynthCore(sampleRate: rate)
+        for note in 40..<(40 + SynthCore.maxVoices) { steal.handle(.noteOn(note, 100, .organ)) }
+        steal.handle(.noteOff(50))
+        steal.handle(.noteOn(90, 100, .organ))
+        check(steal.voices.count == SynthCore.maxVoices && !steal.voices.contains { $0.note == 50 } && steal.voices.contains { $0.note == 40 },
+              "a released voice is stolen first, the oldest held one keeps playing")
+        var oldest = SynthCore(sampleRate: rate)
+        for note in 40..<(40 + SynthCore.maxVoices) { oldest.handle(.noteOn(note, 100, .organ)) }
+        _ = peak(&oldest)
+        oldest.handle(.noteOn(90, 100, .organ))
+        check(!oldest.voices.contains { $0.note == 40 } && oldest.voices.contains { $0.note == 90 }, "with every voice held, the oldest is stolen")
     }
 }
