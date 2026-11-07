@@ -38,7 +38,7 @@ struct GridView: View {
                 .inspectorColumnWidth(min: 240, ideal: 268, max: 380)
         }
         .frame(minWidth: 620, minHeight: 360)
-        .searchable(text: $model.query, placement: .toolbar, prompt: model.searchColumn.map { "Filter \(model.columns[$0])" } ?? "Filter rows")
+        .searchable(text: $model.query, placement: .toolbar, prompt: model.searchColumn.flatMap { model.columns[safe: $0] }.map { "Filter \($0)" } ?? "Filter rows")
         .modifier(SearchFocus(focused: $searchFocused))
         .onChange(of: model.findRequest) { searchFocused = true }
         .onChange(of: model.query) { model.refresh(debounce: true) }
@@ -79,7 +79,13 @@ struct GridView: View {
                 ZStack {
                     GridTable(model: model)
                     if model.visible.isEmpty && !model.busy {
-                        ContentUnavailableView.search(text: model.query).background(.background)
+                        if model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            ContentUnavailableView("No rows", systemImage: "tablecells",
+                                                   description: Text("\(model.name) has a header row and nothing below it."))
+                                .background(.background)
+                        } else {
+                            ContentUnavailableView.search(text: model.query).background(.background)
+                        }
                     }
                 }
             }
@@ -288,7 +294,7 @@ struct InspectorView: View {
             Tile(label: "Max", value: s.max ?? "None")
         }
         if let sum = s.sum {
-            Tile(label: "Sum", value: CSV.format(sum, integer: s.isInteger))
+            Tile(label: "Sum", value: CSV.format(sum, decimals: s.decimals))
         }
         if let most = s.top.first?.count, most < 2, s.count > 0 {
             Label("Every value is different", systemImage: "sparkles")

@@ -87,8 +87,9 @@ final class GridModel: ObservableObject {
     var byteCount: Int { data.count }
 
     func cell(_ row: Int, _ column: Int) -> String {
+        guard row >= 0, row < allRows.count else { return "" }
         let r = allRows[row]
-        return column < r.count ? r[column] : ""
+        return column >= 0 && column < r.count ? r[column] : ""
     }
 
     /// The row number as the file counts records, not counting a header.
@@ -131,7 +132,13 @@ final class GridModel: ObservableObject {
         }
     }
 
-    private func finishLoad(rows: [[String]], encoding: TextEncoding, delimiter: Delimiter, header: Bool, width: Int, numeric: [Bool]) {
+    func finishLoad(rows: [[String]], encoding: TextEncoding, delimiter: Delimiter, header: Bool, width: Int, numeric: [Bool]) {
+        // The rows on screen index the old records; a reload with another encoding or delimiter can have far fewer.
+        // Clear them first so the table never asks for a record that no longer exists.
+        visible = []
+        selection = []
+        stats = nil
+        generation += 1
         allRows = rows
         self.encoding = encoding
         self.delimiter = delimiter
@@ -231,19 +238,25 @@ final class GridModel: ObservableObject {
 
     var numericSet: Set<Int> { Set(numeric.indices.filter { numeric[$0] }) }
 
-    /// The selected rows as text. Plain Copy gives TSV without the header, which pastes into any spreadsheet;
-    /// the Copy As formats carry the header.
-    func text(for viewRows: IndexSet, format: CopyFormat, header: Bool) -> String {
-        let rows = viewRows.filter { $0 < visible.count }.map { allRows[visible[$0]] }
-        return CSV.serialize(header: header ? columns : nil, rows: rows, format: format, columns: columns.count, numeric: numericSet)
-    }
-
+    /// Copies rows on screen as text. Plain Copy gives TSV without the header, which pastes into any spreadsheet;
+    /// the Copy As formats carry the header. The text is built off the main thread: a Select All of a million rows
+    /// is hundreds of megabytes.
     func copy(_ viewRows: IndexSet? = nil, format: CopyFormat, header: Bool = true) {
         let rows = viewRows ?? selection
         guard !rows.isEmpty, !Desktop.isSnapshot else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text(for: rows, format: format, header: header), forType: .string)
-        say("Copied \(rows.count == 1 ? "1 row" : "\(CSV.format(rows.count)) rows") as \(format.label)")
+        let picked = rows.filter { $0 < visible.count }.map { visible[$0] }
+        let all = allRows, head: [String]? = header ? columns : nil, width = columns.count, numeric = numericSet
+        busy = true
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let text = CSV.serialize(header: head, rows: picked.map { all[$0] }, format: format, columns: width, numeric: numeric)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.busy = false
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+                self.say("Copied \(picked.count == 1 ? "1 row" : "\(CSV.format(picked.count)) rows") as \(format.label)")
+            }
+        }
     }
 
     var canCopy: Bool { phase == .ready && !selection.isEmpty }

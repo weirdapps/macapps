@@ -58,6 +58,8 @@ struct ColumnStats: Equatable, Sendable {
     var unique = 0
     var isNumeric = false
     var isInteger = false
+    /// The most decimal places any number in the column is written with, so min, max and sum read like the cells.
+    var decimals = 0
     var min: String?
     var max: String?
     var mean: Double?
@@ -99,15 +101,24 @@ enum CSV {
             let body = data.starts(with: [0xEF, 0xBB, 0xBF]) ? data.dropFirst(3) : data[...]
             return String(data: body, encoding: .utf8) ?? String(decoding: body, as: UTF8.self)
         case .utf16LE:
-            let body = data.starts(with: [0xFF, 0xFE]) ? data.dropFirst(2) : data[...]
-            return String(data: body.count % 2 == 0 ? body : body.dropLast(), encoding: .utf16LittleEndian) ?? ""
+            return utf16(data.starts(with: [0xFF, 0xFE]) ? data.dropFirst(2) : data[...], bigEndian: false)
         case .utf16BE:
-            let body = data.starts(with: [0xFE, 0xFF]) ? data.dropFirst(2) : data[...]
-            return String(data: body.count % 2 == 0 ? body : body.dropLast(), encoding: .utf16BigEndian) ?? ""
+            return utf16(data.starts(with: [0xFE, 0xFF]) ? data.dropFirst(2) : data[...], bigEndian: true)
         case .latin1:
             // Windows Latin 1 is what spreadsheets write; plain ISO Latin 1 decodes the few bytes it leaves undefined.
             return String(data: data, encoding: .windowsCP1252) ?? String(data: data, encoding: .isoLatin1) ?? ""
         }
+    }
+
+    /// UTF-16 without a BOM. A lone surrogate or an odd last byte becomes a replacement character instead of losing the whole file.
+    static func utf16(_ body: Data, bigEndian: Bool) -> String {
+        let even = body.count % 2 == 0 ? body : body.dropLast()
+        if let text = String(data: even, encoding: bigEndian ? .utf16BigEndian : .utf16LittleEndian) { return text }
+        let units = stride(from: even.startIndex, to: even.endIndex, by: 2).map { i -> UInt16 in
+            let a = UInt16(even[i]), b = UInt16(even[i + 1])
+            return bigEndian ? a << 8 | b : b << 8 | a
+        }
+        return String(decoding: units, as: UTF16.self)
     }
 
     // MARK: Parsing
@@ -177,7 +188,8 @@ enum CSV {
     /// The delimiter that splits the first lines into the most consistent number of fields above one.
     static func detectDelimiter(_ text: String, preferred: Delimiter? = nil) -> Delimiter {
         let sample = String(text.prefix(65_536))
-        let truncated = sample.count < text.count
+        // Byte counts, not characters: counting the characters of a 100 MB string takes a while.
+        let truncated = sample.utf8.count < text.utf8.count
         var best: (Delimiter, Double)?
         let order = [preferred].compactMap { $0 } + Delimiter.allCases.filter { $0 != preferred }
         for d in order {
@@ -382,7 +394,7 @@ enum CSV {
         var s = ColumnStats()
         s.rows = indices.count
         var counts: [String: Int] = [:]
-        var numericCount = 0, integers = true
+        var numericCount = 0, integers = true, places = 0
         var sum = 0.0, lo = Double.infinity, hi = -Double.infinity
         var textMin: String?, textMax: String?
         for (n, r) in indices.enumerated() {
@@ -397,6 +409,11 @@ enum CSV {
                 lo = Swift.min(lo, d)
                 hi = Swift.max(hi, d)
                 if d.rounded() != d || v.contains(decimalComma ? "," : ".") { integers = false }
+                let u = v.utf8
+                if let dot = u.lastIndex(of: decimalComma ? 44 : 46), !u.contains(101), !u.contains(69) {
+                    let trimmed = u.reversed().prefix { $0 == 32 }.count
+                    places = Swift.max(places, Swift.min(6, u.distance(from: dot, to: u.endIndex) - 1 - trimmed))
+                }
             } else {
                 if textMin == nil || naturalCompare(v, textMin!) == .orderedAscending { textMin = v }
                 if textMax == nil || naturalCompare(v, textMax!) == .orderedDescending { textMax = v }
@@ -406,10 +423,11 @@ enum CSV {
         s.isNumeric = s.count > 0 && Double(numericCount) >= Double(s.count) * 0.95
         if s.isNumeric {
             s.isInteger = integers
+            s.decimals = integers ? 0 : Swift.max(places, lo.rounded() != lo || hi.rounded() != hi ? 1 : 0)
             s.sum = sum
             s.mean = sum / Double(numericCount)
-            s.min = format(lo, integer: integers)
-            s.max = format(hi, integer: integers)
+            s.min = format(lo, decimals: s.decimals)
+            s.max = format(hi, decimals: s.decimals)
         } else {
             s.min = textMin
             s.max = textMax
@@ -434,6 +452,17 @@ enum CSV {
     }
 
     static func format(_ n: Int) -> String { format(Double(n), integer: true) }
+
+    /// A number with exactly `decimals` places, grouped the user's way.
+    static func format(_ v: Double, decimals: Int) -> String {
+        let f = NumberFormatter()
+        f.locale = locale
+        f.numberStyle = .decimal
+        f.usesGroupingSeparator = true
+        f.minimumFractionDigits = decimals
+        f.maximumFractionDigits = decimals
+        return f.string(from: NSNumber(value: v)) ?? String(v)
+    }
 
     // MARK: Writing
 
@@ -481,8 +510,28 @@ enum CSV {
     }
 
     /// Writes header and rows as UTF-8 CSV, in chunks, so a million rows never build one giant string.
+    /// It writes a temporary file and moves it into place only when complete, so a failure or a cancel
+    /// never leaves half a file behind, nor damages a file being replaced.
     static func export(header: [String]?, rows: [[String]], order: [Int], columns: Int, to url: URL,
                        isCancelled: () -> Bool = { false }) throws {
+        let fm = FileManager.default
+        let folder = url.deletingLastPathComponent()
+        let scratch = (try? fm.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: folder, create: true))
+            ?? fm.temporaryDirectory.appendingPathComponent("Grid-\(UUID().uuidString)")
+        try fm.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: scratch) }
+        let temp = scratch.appendingPathComponent(url.lastPathComponent)
+        try write(header: header, rows: rows, order: order, columns: columns, to: temp, isCancelled: isCancelled)
+        if isCancelled() { throw CancellationError() }
+        if fm.fileExists(atPath: url.path) {
+            _ = try fm.replaceItemAt(url, withItemAt: temp)
+        } else {
+            try fm.moveItem(at: temp, to: url)
+        }
+    }
+
+    private static func write(header: [String]?, rows: [[String]], order: [Int], columns: Int, to url: URL,
+                              isCancelled: () -> Bool) throws {
         FileManager.default.createFile(atPath: url.path, contents: nil)
         let handle = try FileHandle(forWritingTo: url)
         defer { try? handle.close() }

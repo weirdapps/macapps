@@ -83,6 +83,13 @@ enum SelfTest {
         let ts = CSV.stats(people, indices: [1, 2, 3, 4], column: 1)
         check("stats text", ts?.isNumeric == false && ts?.min == "Lisbon" && ts?.max == "Paris" && ts?.mean == nil)
 
+        let money = CSV.stats([["p"], ["41.65"], ["12768.00"], ["7.5"]], indices: [1, 2, 3], column: 0)
+        check("stats keep the cells' decimal places", money?.decimals == 2 && CSV.format(12768, decimals: 2).hasSuffix("68.00")
+            && CSV.format(41.65, decimals: 2).hasSuffix("65"))
+        check("integer stats have no decimals", s?.decimals == 0)
+        let sci = CSV.stats([["p"], ["1e3"], ["2.5e2"]], indices: [1, 2], column: 0)
+        check("exponent numbers do not count as decimal places", sci?.decimals == 0 && sci?.isNumeric == true)
+
         // Writers.
         let csv = CSV.serialize(header: ["a", "b"], rows: [["x,y", "say \"no\""], ["1"]], format: .csv, columns: 2)
         check("CSV quoting", csv == "a,b\r\n\"x,y\",\"say \"\"no\"\"\"\r\n1,")
@@ -117,6 +124,42 @@ enum SelfTest {
         check("large parse is fast", Date().timeIntervalSince(start) < 3)
         check("parse cancels", CSV.parse(big, delimiter: .comma) { _ in false } == nil)
         check("demo data parses", (CSV.parse(DemoData.csv, delimiter: .comma)?.count ?? 0) == 2401)
+
+        // Lossy UTF-16: one bad surrogate must not blank the whole file.
+        let badLE = Data([0xFF, 0xFE, 0x61, 0x00, 0x00, 0xD8, 0x62, 0x00])
+        let badText = CSV.decode(badLE, as: .utf16LE)
+        check("UTF-16 with a lone surrogate keeps the text", badText.hasPrefix("a") && badText.hasSuffix("b"))
+        check("UTF-16 odd byte count", CSV.decode(Data([0x61, 0x00, 0x62]), as: .utf16LE) == "a")
+        check("empty file decodes and parses", CSV.decode(Data()).text.isEmpty && CSV.parse("", delimiter: .comma) == [])
+        check("delimiter of empty text", CSV.detectDelimiter("") == .comma)
+        check("header of empty rows", !CSV.detectHeader([]))
+        check("stats of no rows", CSV.stats([], indices: [], column: 0)?.count == 0)
+
+        // Export never leaves a half-written file and never damages the file it would replace.
+        let dir2 = FileManager.default.temporaryDirectory.appendingPathComponent("grid-selftest-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir2, withIntermediateDirectories: true)
+        let existing = dir2.appendingPathComponent("keep.csv")
+        try? Data("original".utf8).write(to: existing)
+        let cancelled = (try? CSV.export(header: nil, rows: source, order: [1, 2], columns: 2, to: existing) { true }) == nil
+        check("cancelled export throws", cancelled)
+        check("cancelled export leaves the original", (try? String(contentsOf: existing, encoding: .utf8)) == "original")
+        let fresh = dir2.appendingPathComponent("new.csv")
+        _ = try? CSV.export(header: nil, rows: source, order: [1], columns: 2, to: fresh) { true }
+        check("cancelled export creates nothing", !FileManager.default.fileExists(atPath: fresh.path))
+        try? CSV.export(header: nil, rows: source, order: [2], columns: 2, to: existing)
+        check("export replaces a file on request", (try? String(contentsOf: existing, encoding: .utf8)) == "2,plain\r\n")
+        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: dir2.path)) ?? []
+        check("export leaves no temporary files", leftovers == ["keep.csv"])
+        try? FileManager.default.removeItem(at: dir2)
+
+        // Reloading with fewer records (another encoding or delimiter) must not leave stale rows on screen.
+        MainActor.assumeIsolated {
+            let m = GridModel.demo
+            m.finishLoad(rows: [["a"], ["b"]], encoding: .utf8, delimiter: .comma, header: false, width: 1, numeric: [false])
+            check("reload clears stale visible rows", m.visible.allSatisfy { $0 < m.allRows.count } && m.selection.isEmpty)
+            check("cell out of range is empty", m.cell(99_999, 0) == "" && m.cell(0, 5) == "" && m.cell(-1, 0) == "")
+            check("reload resets columns", m.columns == ["A"] && m.rowCount == 2)
+        }
 
         print("\(passed) passed, \(failed) failed")
         return failed == 0 ? 0 : 1
