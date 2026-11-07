@@ -98,6 +98,49 @@ enum SelfTest {
         let settingsBack = (try? JSONEncoder().encode(settings)).flatMap { try? JSONDecoder().decode(Settings.self, from: $0) }
         check(settingsBack == settings, "settings survive a JSON round trip")
 
+        check(History.streak([], now: now, calendar: cal) == 0, "no sessions is no streak")
+        let lapsed = [Session(date: day(4, 9), pattern: .box, seconds: 300, completed: true)]
+        check(History.streak(lapsed, now: now, calendar: cal) == 0, "a streak ends after a missed day")
+
+        // Settings from disk are pulled back into range.
+        let wild = Settings(pattern: .custom, minutes: 0, sound: .chime, volume: 7,
+                            custom: CustomRhythm(inhale: -3, holdFull: 50, exhale: 0.4, holdEmpty: -1)).sanitized()
+        check(wild.minutes == 1 && wild.volume == 1, "minutes and volume clamp into range")
+        check(wild.custom == CustomRhythm(inhale: 1, holdFull: 12, exhale: 1, holdEmpty: 0), "custom rhythm clamps into range")
+        check(Settings(minutes: 99).sanitized().minutes == 20, "a session is at most 20 minutes")
+        check(Settings().sanitized() == Settings(), "default settings are already in range")
+
+        // The session controller, driven with a simulated clock.
+        MainActor.assumeIsolated {
+            let model = ExhaleModel(persist: false)
+            model.settings.sound = .off
+            model.settings.pattern = .box
+            model.settings.minutes = 1
+            model.begin()
+            check(model.runState == .running && model.sessionTotal == 64, "a one minute box session runs 64 s")
+            model.simulate(elapsed: 64)
+            check(model.runState == .finished, "the session finishes at its planned length")
+            check(model.sessions.count == 1 && model.sessions[0].completed && model.sessions[0].seconds == 64,
+                  "a finished session is recorded as completed")
+            model.settings.pattern = .relax
+            check(model.runState == .idle && model.phases == Patterns.phases(.relax),
+                  "choosing a new pattern after a session shows the new plan")
+            model.begin()
+            model.simulate(elapsed: 20)
+            model.stop()
+            check(model.runState == .idle && model.sessions.count == 1, "a session stopped before 30 s is not saved")
+            model.begin()
+            model.simulate(elapsed: 45)
+            model.stop()
+            check(model.sessions.count == 2 && !model.sessions[0].completed && model.sessions[0].seconds == 45,
+                  "a session stopped early keeps the time breathed")
+            model.begin()
+            check(model.elapsed(at: Date()) < 1, "a new session starts from zero")
+            model.stop()
+            model.clearHistory()
+            check(model.sessions.isEmpty, "clear history empties the list")
+        }
+
         // Synthesised cues: real audio, never clipping, silent at the edges.
         for style in [SoundStyle.chime, .tone] {
             for cue in Chimes.Cue.allCases {

@@ -205,11 +205,11 @@ enum History {
     static func streak(_ sessions: [Session], now: Date, calendar: Calendar = .current) -> Int {
         let days = Set(sessions.map { calendar.startOfDay(for: $0.date) })
         var day = calendar.startOfDay(for: now)
-        if !days.contains(day) { day = calendar.date(byAdding: .day, value: -1, to: day)! }
+        if !days.contains(day), let yesterday = calendar.date(byAdding: .day, value: -1, to: day) { day = yesterday }
         var count = 0
-        while days.contains(day) {
+        while days.contains(day), let previous = calendar.date(byAdding: .day, value: -1, to: day) {
             count += 1
-            day = calendar.date(byAdding: .day, value: -1, to: day)!
+            day = previous
         }
         return count
     }
@@ -237,13 +237,35 @@ struct Settings: Codable, Equatable {
     var custom = CustomRhythm()
 
     static let minutesRange = 1...20
+
+    /// Settings read from disk may have been edited by hand or come from an older build: pull every value back in range.
+    func sanitized() -> Settings {
+        var s = self
+        s.minutes = min(Self.minutesRange.upperBound, max(Self.minutesRange.lowerBound, s.minutes))
+        s.volume = s.volume.isFinite ? min(1, max(0, s.volume)) : 0.6
+        let r = CustomRhythm.range
+        func clamp(_ v: Double, _ low: Double) -> Double { v.isFinite ? min(r.upperBound, max(low, v.rounded())) : low }
+        s.custom.inhale = clamp(s.custom.inhale, 1)
+        s.custom.holdFull = clamp(s.custom.holdFull, 0)
+        s.custom.exhale = clamp(s.custom.exhale, 1)
+        s.custom.holdEmpty = clamp(s.custom.holdEmpty, 0)
+        return s
+    }
 }
 
 @MainActor
 final class ExhaleModel: ObservableObject {
     enum RunState: Equatable { case idle, running, paused, finished }
 
-    @Published var settings: Settings { didSet { if settings != oldValue { saveSettings() } } }
+    @Published var settings: Settings {
+        didSet {
+            guard settings != oldValue else { return }
+            // A finished session stays on screen until the plan changes; then the stage shows the new plan.
+            if runState == .finished, settings.pattern != oldValue.pattern || settings.minutes != oldValue.minutes
+                || settings.custom != oldValue.custom { reset() }
+            saveSettings()
+        }
+    }
     @Published private(set) var sessions: [Session]
     @Published private(set) var runState: RunState = .idle
     @Published var showHistory = true
@@ -254,6 +276,7 @@ final class ExhaleModel: ObservableObject {
     private var lastPhase: (cycle: Int, index: Int)?
     private var timer: Timer?
     private var activity: NSObjectProtocol?
+    private var observers: [NSObjectProtocol] = []
     private let persist: Bool
     /// For the website screenshot: a moment frozen in time.
     private var frozen: Double?
@@ -264,8 +287,20 @@ final class ExhaleModel: ObservableObject {
 
     init(persist: Bool = true) {
         self.persist = persist
-        settings = persist ? (Storage.load(Settings.self, app: "Exhale", file: "settings.json") ?? Settings()) : Settings()
-        sessions = persist ? (Storage.load([Session].self, app: "Exhale", file: "history.json") ?? []) : []
+        settings = (persist ? Storage.load(Settings.self, app: "Exhale", file: "settings.json") ?? Settings() : Settings()).sanitized()
+        let saved = persist ? (Storage.load([Session].self, app: "Exhale", file: "history.json") ?? []) : []
+        sessions = saved.filter { $0.seconds.isFinite && $0.seconds > 0 }.sorted { $0.date > $1.date }
+        guard persist, !Desktop.isSnapshot else { return }
+        // The clock keeps running while the Mac sleeps; pause so a nap is not counted as breathing.
+        observers.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.pause() }
+            })
+        // Quitting mid-session still keeps the minutes breathed so far.
+        observers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.stop() }
+            })
     }
 
     static var demo: ExhaleModel {
@@ -322,6 +357,7 @@ final class ExhaleModel: ObservableObject {
         sessionPhases = Patterns.phases(settings.pattern, custom: settings.custom)
         sessionTotal = Breath.sessionLength(minutes: settings.minutes, phases: sessionPhases)
         banked = 0
+        frozen = nil
         lastPhase = nil
         withAnimation(.snappy) { runState = .running }
         resume()
@@ -384,6 +420,12 @@ final class ExhaleModel: ObservableObject {
         timer = nil
         if let activity { ProcessInfo.processInfo.endActivity(activity) }
         activity = nil
+    }
+
+    /// Self-test hook: jumps the session clock to `elapsed` seconds and runs one tick.
+    func simulate(elapsed: Double) {
+        frozen = elapsed
+        tick()
     }
 
     private func tick() {

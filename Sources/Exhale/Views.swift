@@ -422,20 +422,25 @@ struct HistoryPanel: View {
                     }
                 }
             }
-            .padding(16)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 16)
+            // The inspector runs up under the unified toolbar; line its first row up with the stage header.
+            .padding(.top, 66)
         }
+        .ignoresSafeArea(.container, edges: .top)
     }
 }
 
 struct SessionRow: View {
     let session: Session
     @State private var hovering = false
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: session.pattern.symbol)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.deep)
+                .foregroundStyle(scheme == .dark ? Theme.light : Theme.deep)
                 .frame(width: 24, height: 24)
                 .background(Circle().fill(Theme.light.opacity(0.25)))
             VStack(alignment: .leading, spacing: 1) {
