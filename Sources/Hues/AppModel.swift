@@ -43,7 +43,7 @@ final class HuesModel: ObservableObject {
     private var sample: Bitmap?
     private var maskBitmap: Bitmap?
     private var maskMap: Extraction?
-    private var masks: [Int: CGImage] = [:]
+    private var masks: [UUID: CGImage] = [:]
     private var job: Task<Void, Never>?
     let store: HistoryStore?
     weak var undoManager: UndoManager?
@@ -61,17 +61,13 @@ final class HuesModel: ObservableObject {
     var pickedCount: Int { swatches.filter(\.isPicked).count }
     var target: Swatch? { swatches.first { $0.id == selected } ?? swatches.first { $0.id == hovered } ?? swatches.first }
 
-    func index(of swatch: Swatch) -> Int? {
-        swatch.isPicked ? nil : swatches.filter { !$0.isPicked }.firstIndex { $0.id == swatch.id }
-    }
-
-    /// The dimming mask for the hovered extracted colour.
+    /// The dimming mask for the hovered extracted colour, looked up by id so removing another colour never shifts it.
     var hoverMask: CGImage? {
-        guard let id = hovered, let swatch = swatches.first(where: { $0.id == id }), let i = index(of: swatch),
-              let map = maskMap ?? extraction else { return nil }
-        if let cached = masks[i] { return cached }
+        guard let id = hovered, swatches.contains(where: { $0.id == id }), let map = maskMap ?? extraction,
+              let i = map.index(of: id) else { return nil }
+        if let cached = masks[id] { return cached }
         let mask = Extractor.mask(map, index: i)
-        masks[i] = mask
+        masks[id] = mask
         return mask
     }
 
@@ -87,6 +83,11 @@ final class HuesModel: ObservableObject {
     }
 
     func open(_ url: URL) {
+        // Only files on this Mac: a web link dropped from a browser would mean a silent download.
+        guard url.isFileURL else {
+            show("Drop an image file, not a link", symbol: "exclamationmark.triangle")
+            return
+        }
         isWorking = true
         Task.detached(priority: .userInitiated) {
             let image = ImageLoader.cgImage(url: url)
@@ -112,27 +113,34 @@ final class HuesModel: ObservableObject {
         }
     }
 
-    /// Analyses `image` off the main thread. With `id` and `keeping`, restores a palette from history.
-    func load(_ image: CGImage, name: String, id: UUID? = nil, keeping picks: [Swatch] = []) {
+    /// Analyses `image` off the main thread. With `id` and `saved`, restores a palette from history exactly as it was left.
+    func load(_ image: CGImage, name: String, id: UUID? = nil, saved: [Swatch]? = nil) {
         job?.cancel()
         isWorking = true
         let count = count
         let isNew = id == nil
         job = Task.detached(priority: .userInitiated) {
             guard let display = Bitmap(image, maxSide: 1600), let sample = Bitmap(display.image, maxSide: 220) else {
-                await MainActor.run { self.isWorking = false }
+                await MainActor.run {
+                    self.isWorking = false
+                    self.show("Could not read \(name)", symbol: "exclamationmark.triangle")
+                }
                 return
             }
-            let extraction = Extractor.extract(sample, count: count)
+            let extraction = saved.map { Extractor.fixed(sample, swatches: $0) } ?? Extractor.extract(sample, count: count)
             let maskBitmap = Bitmap(display.image, maxSide: 720)
             let map = maskBitmap.map { Extractor.assign($0, to: extraction) }
+            let transparent = display.hasTransparency
             await MainActor.run {
                 guard !Task.isCancelled else { return }
                 self.maskBitmap = maskBitmap
-                self.apply(display: display, sample: sample, extraction: extraction, map: map, name: name, picks: picks)
+                self.apply(display: display, sample: sample, extraction: extraction, map: map, name: name, picks: [])
+                if let saved { self.swatches = saved }
                 self.currentID = id ?? UUID()
                 self.historySelection = self.currentID
-                if isNew, let store = self.store, let currentID = self.currentID { store.saveImage(display.image, id: currentID) }
+                if isNew, let store = self.store, let currentID = self.currentID {
+                    store.saveImage(display.image, id: currentID, transparent: transparent)
+                }
                 self.record()
             }
         }
@@ -283,14 +291,13 @@ final class HuesModel: ObservableObject {
 
     func restore(_ id: UUID) {
         guard id != currentID, let item = history.first(where: { $0.id == id }) else { return }
-        let picks = item.swatches.filter(\.isPicked)
         if let image = store?.loadImage(id) {
             if count != item.count {
                 // Set without triggering a recompute of the image we are leaving.
                 sample = nil
                 count = item.count
             }
-            load(image, name: item.name, id: id, keeping: picks)
+            load(image, name: item.name, id: id, saved: item.swatches)
         } else {
             // The image is gone: show the saved colours on their own.
             job?.cancel()
@@ -310,6 +317,8 @@ final class HuesModel: ObservableObject {
         store?.removeImage(id)
         store?.save(history)
         if historySelection == id { historySelection = nil }
+        // The palette on screen stays, but further edits must not bring a deleted entry (now without its image) back.
+        if currentID == id { currentID = nil }
     }
 
     func clearHistory() {
@@ -317,6 +326,7 @@ final class HuesModel: ObservableObject {
         history = []
         store?.save([])
         historySelection = nil
+        currentID = nil
     }
 
     // MARK: Demo

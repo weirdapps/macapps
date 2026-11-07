@@ -28,7 +28,7 @@ enum SelfTest {
         return ctx.makeImage()!
     }
 
-    static func run() -> Int32 {
+    @MainActor static func run() -> Int32 {
         // Hex.
         check(RGB(0xE07A3F).hex == "#E07A3F", "hex formatting")
         check(RGB(hex: "#e07a3f") == RGB(0xE07A3F), "hex parsing lower case")
@@ -140,7 +140,76 @@ enum SelfTest {
         _ = HistoryStore.upsert(items[5], into: &again)
         check(again.count == items.count && again.first?.id == items[5].id, "upsert moves to the top")
 
+        regressions()
         return summary()
+    }
+
+    /// Bugs found in review, each pinned by a check.
+    @MainActor static func regressions() {
+        // Removing a colour must not shift the hover mask of the colours after it.
+        let model = HuesModel(store: nil)
+        model.count = 3
+        model.loadNow(blocks([(0xD03030, 50), (0x2050C0, 30), (0x30A050, 20)]), name: "Blocks.png")
+        check(model.swatches.count == 3, "model extracts three blocks")
+        if model.swatches.count == 3 {
+            let blue = model.swatches[1], green = model.swatches[2]
+            model.remove(blue.id)
+            model.hovered = green.id
+            let undimmed = model.hoverMask.map(clearFraction) ?? 0
+            check(near(undimmed, 0.2, 0.02), "hover mask follows the colour after a removal: \(undimmed)")
+        }
+
+        // A palette restored from history keeps its colours exactly, removed ones included.
+        guard let bmp = Bitmap(blocks([(0xD03030, 50), (0x2050C0, 30), (0x30A050, 20)]), maxSide: 220) else { return }
+        let full = Extractor.extract(bmp, count: 3).swatches
+        let kept = [full[0], full[2], Swatch(color: RGB(0x123456), share: nil, point: CGPoint(x: 0.1, y: 0.1))]
+        let restored = Extractor.fixed(bmp, swatches: kept)
+        check(restored.swatches.map(\.id) == [full[0].id, full[2].id], "restore keeps the saved extracted colours")
+        check(restored.assignment.count == bmp.width * bmp.height && !restored.assignment.contains(where: { $0 < 0 || $0 > 1 }),
+              "restore assigns every pixel to a saved colour")
+        check(restored.index(of: full[2].id) == 1 && restored.index(of: full[1].id) == nil, "lookup by swatch id")
+
+        // Deleting the open palette from history must not let the next edit bring it back.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("hues-selftest-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let stored = HuesModel(store: HistoryStore(directory: dir))
+        stored.loadNow(blocks([(0xD03030, 50), (0x2050C0, 50)]), name: "Two.png")
+        stored.addPick(atUnit: CGPoint(x: 0.1, y: 0.5))
+        check(stored.history.count == 1, "an edit records the palette")
+        if let id = stored.history.first?.id { stored.deleteHistory(id) }
+        stored.addPick(atUnit: CGPoint(x: 0.9, y: 0.5))
+        check(stored.history.isEmpty && HistoryStore(directory: dir).load().isEmpty, "deleted palette stays deleted")
+
+        // Transparent images are saved with alpha, so restoring them never invents a black colour.
+        let ctx = CGContext(data: nil, width: 20, height: 20, bitsPerComponent: 8, bytesPerRow: 80, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.setFillColor(CGColor(srgbRed: 1, green: 0.5, blue: 0, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: 10, height: 20))
+        let clear = Bitmap(ctx.makeImage()!, maxSide: 220)!
+        check(clear.hasTransparency && !bmp.hasTransparency, "transparency detected")
+        let store = HistoryStore(directory: dir)
+        let id = UUID()
+        store.saveImage(clear.image, id: id, transparent: true)
+        let back = store.loadImage(id).flatMap { Bitmap($0, maxSide: 220) }
+        check(back.map { Extractor.extract($0, count: 5).swatches.count } == 1, "transparent history image keeps its alpha")
+        store.saveImage(bmp.image, id: id)
+        check(!FileManager.default.fileExists(atPath: store.imageURL(id, ext: "png").path), "resaving replaces the other format")
+        store.removeImage(id)
+        check(store.loadImage(id) == nil, "both formats removed")
+
+        // Links are refused rather than fetched.
+        let linked = HuesModel(store: nil)
+        linked.open(URL(string: "https://example.com/a.png")!)
+        check(!linked.isWorking && linked.toast != nil, "web links refused")
+    }
+
+    /// The fraction of a mask's pixels left undimmed.
+    static func clearFraction(_ mask: CGImage) -> Double {
+        guard let data = mask.dataProvider?.data, let bytes = CFDataGetBytePtr(data) else { return 0 }
+        let n = mask.width * mask.height
+        var clear = 0
+        for i in 0..<n where bytes[i * 4 + 3] == 0 { clear += 1 }
+        return Double(clear) / Double(n)
     }
 
     static func summary() -> Int32 {

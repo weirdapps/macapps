@@ -400,7 +400,6 @@ struct SwatchRow: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text(swatch.color.hex)
                         .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                        .textSelection(.enabled)
                     Spacer(minLength: 4)
                     if swatch.isPicked {
                         Label("Picked", systemImage: "eyedropper")

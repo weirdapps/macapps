@@ -131,6 +131,9 @@ struct Bitmap: @unchecked Sendable {
         image = made
     }
 
+    /// True when any pixel is not fully opaque, so a saved copy must keep its alpha channel.
+    var hasTransparency: Bool { stride(from: 3, to: data.count, by: 4).contains { data[$0] < 255 } }
+
     /// The colour of the pixel at `x, y` (top-left origin), or nil when it is mostly transparent.
     func color(x: Int, y: Int) -> RGB? {
         guard x >= 0, y >= 0, x < width, y < height else { return nil }
@@ -162,6 +165,9 @@ struct Extraction: Sendable {
     var assignment: [Int16]
     var width: Int
     var height: Int
+
+    /// Where the swatch with `id` sits in `centres` and `assignment`, which stays right after other swatches are removed.
+    func index(of id: UUID) -> Int? { swatches.firstIndex { $0.id == id } }
 }
 
 /// A small deterministic generator (SplitMix64) so the same image always gives the same palette.
@@ -298,6 +304,14 @@ enum Extractor {
         }
         out.assignment = assignment
         return out
+    }
+
+    /// A palette restored from history: its own colours, unchanged, with every pixel of `bitmap` assigned to the nearest.
+    static func fixed(_ bitmap: Bitmap, swatches: [Swatch]) -> Extraction {
+        let extracted = swatches.filter { !$0.isPicked }
+        let e = Extraction(swatches: extracted, centres: extracted.map { ColorMath.lab($0.color) }, assignment: [],
+                           width: bitmap.width, height: bitmap.height)
+        return assign(bitmap, to: e)
     }
 
     /// A mask over the sample bitmap that dims every pixel not assigned to swatch `index`.
@@ -456,7 +470,7 @@ struct SavedPalette: Codable, Identifiable, Hashable {
     var swatches: [Swatch]
 }
 
-/// Recent palettes as JSON, with a downscaled JPEG of each source image beside it.
+/// Recent palettes as JSON, with a downscaled copy of each source image beside it: JPEG, or PNG when it has transparency.
 struct HistoryStore {
     let directory: URL
     static let limit = 30
@@ -466,7 +480,7 @@ struct HistoryStore {
     }
 
     var indexURL: URL { directory.appendingPathComponent("history.json") }
-    func imageURL(_ id: UUID) -> URL { directory.appendingPathComponent("\(id.uuidString).jpg") }
+    func imageURL(_ id: UUID, ext: String = "jpg") -> URL { directory.appendingPathComponent("\(id.uuidString).\(ext)") }
 
     func load() -> [SavedPalette] {
         guard let data = try? Data(contentsOf: indexURL) else { return [] }
@@ -483,18 +497,27 @@ struct HistoryStore {
         try? data.write(to: indexURL, options: .atomic)
     }
 
-    func saveImage(_ image: CGImage, id: UUID) {
+    func saveImage(_ image: CGImage, id: UUID, transparent: Bool = false) {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        removeImage(id)
         let rep = NSBitmapImageRep(cgImage: image)
-        try? rep.representation(using: .jpeg, properties: [.compressionFactor: 0.85])?.write(to: imageURL(id), options: .atomic)
+        // JPEG has no alpha: transparent areas would come back black and turn into a colour of their own.
+        let data = transparent ? rep.representation(using: .png, properties: [:])
+            : rep.representation(using: .jpeg, properties: [.compressionFactor: 0.85])
+        try? data?.write(to: imageURL(id, ext: transparent ? "png" : "jpg"), options: .atomic)
     }
 
     func loadImage(_ id: UUID) -> CGImage? {
-        guard let source = CGImageSourceCreateWithURL(imageURL(id) as CFURL, nil) else { return nil }
-        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+        for ext in ["png", "jpg"] {
+            if let source = CGImageSourceCreateWithURL(imageURL(id, ext: ext) as CFURL, nil),
+               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) { return image }
+        }
+        return nil
     }
 
-    func removeImage(_ id: UUID) { try? FileManager.default.removeItem(at: imageURL(id)) }
+    func removeImage(_ id: UUID) {
+        for ext in ["png", "jpg"] { try? FileManager.default.removeItem(at: imageURL(id, ext: ext)) }
+    }
 
     /// Puts `item` first, replacing an older copy with the same id, and trims to `limit`. Returns ids that fell off.
     static func upsert(_ item: SavedPalette, into items: inout [SavedPalette]) -> [UUID] {

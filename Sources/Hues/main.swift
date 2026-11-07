@@ -3,7 +3,7 @@ import Kit
 import SwiftUI
 
 IconKit.handleCommandLine(draw: appIcon)
-if CommandLine.arguments.contains("--selftest") { exit(SelfTest.run()) }
+if CommandLine.arguments.contains("--selftest") { exit(MainActor.assumeIsolated { SelfTest.run() }) }
 Desktop.handleSnapshot(title: "Hues", size: CGSize(width: 1040, height: 680)) { MainActor.assumeIsolated { ContentView(model: .demo) } }
 HuesApp.main()
 
@@ -102,7 +102,7 @@ func appIcon() -> NSBitmapImageRep {
         ctx.addLine(to: CGPoint(x: 418, y: 580))
         ctx.addLine(to: CGPoint(x: 398, y: 540))
         ctx.closePath()
-        ctx.setFillColor(NSColor.white.withAlphaComponent(0.85).cgColor)
+        ctx.setFillColor(NSColor.white.withAlphaComponent(0.95).cgColor)
         ctx.fillPath()
         ctx.restoreGState()
 
@@ -142,7 +142,7 @@ func appIcon() -> NSBitmapImageRep {
         let reach: CGFloat = 245
         for (i, a) in angles.enumerated() {
             let end = CGPoint(x: out.x + cos(a) * reach, y: out.y + sin(a) * reach)
-            let spread: CGFloat = 0.05
+            let spread: CGFloat = 0.07
             let e1 = CGPoint(x: out.x + cos(a + spread) * reach, y: out.y + sin(a + spread) * reach)
             let e2 = CGPoint(x: out.x + cos(a - spread) * reach, y: out.y + sin(a - spread) * reach)
             ctx.saveGState()
@@ -151,7 +151,7 @@ func appIcon() -> NSBitmapImageRep {
             ctx.addLine(to: e2)
             ctx.closePath()
             ctx.clip()
-            gradient([rgb(chips[i], 0.15), rgb(chips[i], 0.75)], from: out, to: end, in: ctx)
+            gradient([rgb(chips[i], 0.55), rgb(chips[i], 1)], from: out, to: end, in: ctx)
             ctx.restoreGState()
         }
 
