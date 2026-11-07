@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Kit
 import SwiftUI
 import UniformTypeIdentifiers
@@ -47,6 +48,7 @@ final class DatabaseModel: ObservableObject {
     @Published private(set) var sqlResult: ResultSet?
     @Published private(set) var sqlError: String?
     @Published private(set) var running = false
+    @Published private(set) var exporting = false
     @Published private(set) var history = QueryHistory()
     @Published var confirmingWrite = false
     @Published var notice: Notice?
@@ -56,15 +58,33 @@ final class DatabaseModel: ObservableObject {
     var editorSelection = ""
 
     let isDemo: Bool
-    private var db: Database?
+    private(set) var db: Database?
+    private var historyFeed: AnyCancellable?
     private var pageToken = 0
     private var schemaToken = 0
 
     init(demo: Bool = false) {
         isDemo = demo
         if !demo, !Desktop.isSnapshot {
-            history = Storage.load(QueryHistory.self, app: "Lite", file: "history.json") ?? QueryHistory()
+            history = Self.storedHistory
+            // Another window ran a query: show it in this window's history too.
+            historyFeed = NotificationCenter.default.publisher(for: Self.historyChanged).sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.history = Self.storedHistory }
+            }
         }
+    }
+
+    static let historyChanged = Notification.Name("LiteHistoryChanged")
+    private static var storedHistory: QueryHistory { Storage.load(QueryHistory.self, app: "Lite", file: "history.json") ?? QueryHistory() }
+
+    /// Changes the history every window shares, starting from what is on disk so no window's queries are lost.
+    private func changeHistory(_ change: (inout QueryHistory) -> Void) {
+        guard !isDemo, !Desktop.isSnapshot else { change(&history); return }
+        var stored = Self.storedHistory
+        change(&stored)
+        Storage.save(stored, app: "Lite", file: "history.json")
+        history = stored
+        NotificationCenter.default.post(name: Self.historyChanged, object: nil)
     }
 
     var fileName: String { url?.lastPathComponent ?? "Lite" }
@@ -83,7 +103,7 @@ final class DatabaseModel: ObservableObject {
     }
 
     var canExport: Bool {
-        guard isOpen else { return false }
+        guard isOpen, !exporting else { return false }
         switch mode {
         case .sql: return !(sqlResult?.columns.isEmpty ?? true)
         default: return selection != nil
@@ -109,19 +129,19 @@ final class DatabaseModel: ObservableObject {
         fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
         let path = url.path
         DispatchQueue.global(qos: .userInitiated).async {
-            let result: Result<Connection, Error>
+            let result: Result<Database, Error>
             if !SQL.looksLikeDatabase(URL(fileURLWithPath: path)) {
                 result = .failure(FileManager.default.fileExists(atPath: path)
                     ? LiteError.notDatabase : LiteError.sqlite("The file could not be found. It may have been moved or deleted."))
             } else {
-                result = Result { try Connection(path: path, readOnly: readOnly) }
+                result = Result { Database(try Connection(path: path, readOnly: readOnly), counter: try? Connection(path: path, readOnly: true)) }
             }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard self.url?.path == path else { return }
                     switch result {
-                    case .success(let connection):
-                        self.db = Database(connection)
+                    case .success(let database):
+                        self.db = database
                         self.readOnly = readOnly
                         self.phase = .open
                         self.loadObjects(select: previous)
@@ -134,14 +154,17 @@ final class DatabaseModel: ObservableObject {
     }
 
     /// Runs `work` on the database queue and hands the result back on the main actor. The demo runs inline.
-    private func perform<T>(_ work: @escaping (Connection) throws -> T, done: @escaping @MainActor (Result<T, Error>) -> Void) {
+    /// With `counting`, the work goes to the counting connection when there is one.
+    private func perform<T>(counting: Bool = false, _ work: @escaping (Connection) throws -> T,
+                            done: @escaping @MainActor (Result<T, Error>) -> Void) {
         guard let db else { return }
         if isDemo {
             done(Result { try work(db.connection) })
             return
         }
-        db.queue.async {
-            let result = Result { try work(db.connection) }
+        let (connection, queue) = counting && db.counter != nil ? (db.counter ?? db.connection, db.countQueue) : (db.connection, db.queue)
+        queue.async {
+            let result = Result { try work(connection) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard self.db === db else { return } // Reopened meanwhile.
@@ -175,7 +198,7 @@ final class DatabaseModel: ObservableObject {
     /// Counts rows table by table in the background, so a huge table never holds up the window.
     private func countRows(_ names: [String]) {
         for name in names {
-            perform({ try $0.count(name) }) { result in
+            perform(counting: true, { try $0.count(name) }) { result in
                 guard let i = self.objects.firstIndex(where: { $0.name == name }) else { return }
                 self.objects[i].rowCount = try? result.get()
             }
@@ -248,21 +271,22 @@ final class DatabaseModel: ObservableObject {
                 self.sqlResult = nil
                 self.sqlError = error.localizedDescription
             }
-            self.history.add(text, database: self.fileName)
-            if !self.isDemo, !Desktop.isSnapshot { Storage.save(self.history, app: "Lite", file: "history.json") }
+            let name = self.fileName
+            self.changeHistory { $0.add(text, database: name) }
         }
     }
 
+    /// Stops the running query or export.
     func stop() { db?.interrupt() }
 
     func useHistory(_ entry: HistoryEntry) {
         sql = entry.sql
+        editorSelection = ""
         mode = .sql
     }
 
     func clearHistory() {
-        history = QueryHistory()
-        if !isDemo, !Desktop.isSnapshot { Storage.save(history, app: "Lite", file: "history.json") }
+        changeHistory { $0 = QueryHistory() }
     }
 
     // MARK: Writing
@@ -302,11 +326,14 @@ final class DatabaseModel: ObservableObject {
     }
 
     private func exportQuery(_ query: String, to target: URL) {
-        notice = Notice(text: "Exporting…", url: nil)
+        notice = Notice(text: "Exporting to \(target.lastPathComponent)…", url: nil)
+        exporting = true
         perform({ try $0.exportCSV(query, to: target) }) { result in
+            self.exporting = false
             switch result {
             case .success(let n): self.notice = Notice(text: "Exported \(n.grouped) rows to \(target.lastPathComponent)", url: target)
-            case .failure(let error): self.notice = Notice(text: error.localizedDescription, url: nil)
+            case .failure(let error):
+                self.notice = Notice(text: (error as? LiteError) == .stopped ? "Export stopped." : error.localizedDescription, url: nil)
             }
         }
     }
@@ -450,7 +477,7 @@ final class Recents: ObservableObject {
     }
 
     func add(_ url: URL) {
-        guard !Desktop.isSnapshot, url.path.hasPrefix("/") else { return }
+        guard !Desktop.isSnapshot, !SelfTest.isRunning, url.path.hasPrefix("/") else { return }
         urls.removeAll { $0.path == url.path }
         urls.insert(url, at: 0)
         if urls.count > 10 { urls.removeLast(urls.count - 10) }

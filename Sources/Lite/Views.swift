@@ -50,8 +50,6 @@ struct DatabaseWindow: View {
         ContentView(model: model) { opened in
             if model.url == nil { url = opened; model.open(opened) } else { openWindow(value: opened) }
         }
-        .navigationTitle(model.url?.lastPathComponent ?? "Lite")
-        .navigationSubtitle(model.isOpen ? (model.readOnly ? "Read only" : "Writing allowed") : "")
         .focusedSceneObject(model)
         .onAppear {
             if let url, model.url == nil { model.open(url) }
@@ -88,6 +86,8 @@ struct ContentView: View {
         }
         .frame(minWidth: 780, minHeight: 480)
         .tint(Theme.accent)
+        .navigationTitle(model.url?.lastPathComponent ?? "Lite")
+        .navigationSubtitle(model.isOpen ? (model.readOnly ? "Read only" : "Writing allowed") : "")
         .dropDestination(for: URL.self) { urls, _ in
             guard let url = urls.first, !Desktop.isSnapshot else { return false }
             openURL(url)
@@ -590,11 +590,17 @@ struct NoticeBanner: View {
                 Image(systemName: notice.url == nil ? "info.circle.fill" : "checkmark.circle.fill")
                     .foregroundStyle(notice.url == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.green))
                 Text(notice.text).font(.system(size: 12.5)).lineLimit(2)
+                if model.exporting {
+                    ProgressView().controlSize(.small)
+                    Button("Stop") { model.stop() }.controlSize(.small).help("Stop the export (⌘.)")
+                }
                 if let url = notice.url {
                     Button("Show in Finder") { revealInFinder([url]) }.controlSize(.small)
                 }
-                Button { model.notice = nil } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)) }
-                    .buttonStyle(.borderless).foregroundStyle(.secondary).help("Dismiss")
+                if !model.exporting {
+                    Button { model.notice = nil } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)) }
+                        .buttonStyle(.borderless).foregroundStyle(.secondary).help("Dismiss")
+                }
             }
             .padding(.horizontal, 14).padding(.vertical, 9)
             .background(.regularMaterial, in: Capsule())

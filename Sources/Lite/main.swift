@@ -84,9 +84,9 @@ struct LiteCommands: Commands {
             Button("Run Query") { model?.run() }
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(!(model?.isOpen ?? false) || (model?.running ?? false))
-            Button("Stop Query") { model?.stop() }
+            Button(model?.exporting == true ? "Stop Export" : "Stop Query") { model?.stop() }
                 .keyboardShortcut(".")
-                .disabled(!(model?.running ?? false))
+                .disabled(!(model?.running ?? false) && !(model?.exporting ?? false))
             Menu("Recent Queries") {
                 if let model, !model.history.entries.isEmpty {
                     ForEach(model.history.entries.prefix(15)) { entry in

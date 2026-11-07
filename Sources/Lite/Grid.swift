@@ -298,6 +298,8 @@ struct SQLEditor: NSViewRepresentable {
         view.typingAttributes = Coordinator.base
         view.string = text
         context.coordinator.highlight(view)
+        // A new editor has no selection yet, whatever the last one had.
+        onSelection("")
         // Switching to the SQL editor puts the cursor in it, ready to type.
         DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
         scroll.borderType = .noBorder

@@ -116,6 +116,7 @@ enum LiteError: LocalizedError, Equatable {
     case readOnly
     case notDatabase
     case nothingToRun
+    case stopped
 
     var errorDescription: String? {
         switch self {
@@ -123,6 +124,7 @@ enum LiteError: LocalizedError, Equatable {
         case .readOnly: "This statement changes the database. Lite opened it read only; choose Database > Allow Writing to run it."
         case .notDatabase: "This file is not a SQLite database."
         case .nothingToRun: "There is no SQL to run."
+        case .stopped: "Stopped."
         }
     }
 }
@@ -204,27 +206,58 @@ enum CSV {
 final class Connection: @unchecked Sendable {
     let handle: OpaquePointer
     private(set) var readOnly: Bool
+    /// Opened with `immutable=1`, see `init`.
+    private(set) var immutable = false
 
     /// Opens an existing file. Read only uses SQLITE_OPEN_READONLY and `query_only`, so nothing can write.
+    /// A WAL database whose -wal and -shm files are missing (a copied or downloaded file) cannot be read that way,
+    /// because a read only connection may not create them; it is then read as immutable, which writes nothing either.
     init(path: String, readOnly: Bool, create: Bool = false) throws {
-        var db: OpaquePointer?
         var flags = readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE
         if create { flags |= SQLITE_OPEN_CREATE }
-        let rc = sqlite3_open_v2(path, &db, flags, nil)
-        guard rc == SQLITE_OK, let db else {
-            let message = db.map { String(cString: sqlite3_errmsg($0)) } ?? "Could not open the file."
-            sqlite3_close(db)
-            throw LiteError.sqlite(message)
+        var db = try Self.openHandle(path, flags: flags)
+        var rc = Self.probe(db)
+        var immutable = false
+        if rc == SQLITE_CANTOPEN, readOnly, !create, !FileManager.default.fileExists(atPath: path + "-wal") {
+            sqlite3_close_v2(db)
+            let escaped = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
+            db = try Self.openHandle("file:" + escaped + "?immutable=1", flags: SQLITE_OPEN_READONLY | SQLITE_OPEN_URI)
+            rc = Self.probe(db)
+            immutable = true
+        }
+        guard rc == SQLITE_OK else {
+            let message = String(cString: sqlite3_errmsg(db))
+            sqlite3_close_v2(db)
+            throw rc == SQLITE_NOTADB ? LiteError.notDatabase : LiteError.sqlite(message)
         }
         handle = db
         self.readOnly = readOnly
+        self.immutable = immutable
         sqlite3_busy_timeout(db, 3000)
         if readOnly { try exec("PRAGMA query_only = ON") }
-        do {
-            _ = try query("SELECT count(*) FROM sqlite_master")
-        } catch {
-            throw LiteError.notDatabase
+    }
+
+    private static func openHandle(_ path: String, flags: Int32) throws -> OpaquePointer {
+        var db: OpaquePointer?
+        let rc = sqlite3_open_v2(path, &db, flags, nil)
+        guard rc == SQLITE_OK, let db else {
+            let message = db.map { String(cString: sqlite3_errmsg($0)) } ?? "Could not open the file."
+            sqlite3_close_v2(db)
+            throw rc == SQLITE_NOTADB ? LiteError.notDatabase : LiteError.sqlite(message)
         }
+        return db
+    }
+
+    /// Reads the schema once, the first moment SQLite looks inside the file. Returns the result code.
+    private static func probe(_ db: OpaquePointer) -> Int32 {
+        var stmt: OpaquePointer?
+        var rc = sqlite3_prepare_v2(db, "SELECT count(*) FROM sqlite_master", -1, &stmt, nil)
+        if rc == SQLITE_OK {
+            rc = sqlite3_step(stmt)
+            if rc == SQLITE_ROW { rc = SQLITE_OK }
+        }
+        sqlite3_finalize(stmt)
+        return rc
     }
 
     deinit { sqlite3_close_v2(handle) }
@@ -239,7 +272,7 @@ final class Connection: @unchecked Sendable {
 
     private var lastError: LiteError {
         let code = sqlite3_errcode(handle)
-        if code == SQLITE_INTERRUPT { return .sqlite("Query stopped.") }
+        if code == SQLITE_INTERRUPT { return .stopped }
         if code == SQLITE_READONLY, readOnly { return .readOnly }
         return .sqlite(String(cString: sqlite3_errmsg(handle)))
     }
@@ -385,7 +418,12 @@ final class Connection: @unchecked Sendable {
         guard sqlite3_stmt_readonly(stmt) != 0 else { throw LiteError.readOnly }
         FileManager.default.createFile(atPath: url.path, contents: nil)
         let file = try FileHandle(forWritingTo: url)
-        defer { try? file.close() }
+        var finished = false
+        defer {
+            try? file.close()
+            // A stopped or failed export leaves no half written file behind.
+            if !finished { try? FileManager.default.removeItem(at: url) }
+        }
         let n = sqlite3_column_count(stmt)
         var buffer = CSV.line(columnNames(stmt))
         var rows = 0
@@ -407,16 +445,24 @@ final class Connection: @unchecked Sendable {
             }
         }
         try file.write(contentsOf: Data(buffer.utf8))
+        finished = true
         return rows
     }
 }
 
 /// A connection plus the serial queue it lives on.
+/// A second read only connection, on its own queue, counts rows, so counting a huge table never
+/// holds up the page, schema or query the user is waiting for.
 final class Database: @unchecked Sendable {
     let connection: Connection
     let queue = DispatchQueue(label: "com.weirdapps.lite.database", qos: .userInitiated)
+    let counter: Connection?
+    let countQueue = DispatchQueue(label: "com.weirdapps.lite.count", qos: .utility)
 
-    init(_ connection: Connection) { self.connection = connection }
+    init(_ connection: Connection, counter: Connection? = nil) {
+        self.connection = connection
+        self.counter = counter
+    }
 
     /// Stops the statement running on the queue, from any thread.
     func interrupt() { sqlite3_interrupt(connection.handle) }

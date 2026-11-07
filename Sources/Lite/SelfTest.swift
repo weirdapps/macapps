@@ -2,6 +2,9 @@ import Foundation
 
 /// `Lite --selftest`: builds a database in a temporary folder and checks the engine against it.
 enum SelfTest {
+    /// True while the self test runs, so it never adds to the user's Open Recent menu.
+    static let isRunning = CommandLine.arguments.contains("--selftest")
+
     static func run() -> Int32 {
         var passed = 0, failed = 0
         func check(_ name: String, _ ok: @autoclosure () throws -> Bool) {
@@ -144,6 +147,68 @@ enum SelfTest {
             check("history round trips as JSON", try JSONDecoder().decode(QueryHistory.self, from: data).entries == history.entries)
             check("history titles fit on one line", QueryHistory.title("SELECT *\n  FROM t") == "SELECT * FROM t")
 
+            // Files that read only must open without changing a byte or leaving anything next to them.
+            let walDir = dir.appendingPathComponent("wal")
+            try FileManager.default.createDirectory(at: walDir, withIntermediateDirectories: true)
+            let walPath = walDir.appendingPathComponent("live.db").path
+            do {
+                let w = try Connection(path: walPath, readOnly: false, create: true)
+                try w.exec("PRAGMA journal_mode = WAL; CREATE TABLE t (x); INSERT INTO t VALUES (1), (2), (3);")
+            }
+            check("a WAL database with its -wal file opens read only", try Connection(path: walPath, readOnly: true).count("t") == 3)
+            let copyDir = dir.appendingPathComponent("copied")
+            try FileManager.default.createDirectory(at: copyDir, withIntermediateDirectories: true)
+            let copied = copyDir.appendingPathComponent("copied.db")
+            try FileManager.default.copyItem(atPath: walPath, toPath: copied.path)
+            let copiedBytes = try Data(contentsOf: copied)
+            do {
+                let r = try Connection(path: copied.path, readOnly: true)
+                check("a copied WAL database without -wal and -shm still opens read only", try r.count("t") >= 0 && r.immutable)
+                check("read only refuses VACUUM INTO",
+                      throwsError({ _ = try r.run(script: "VACUUM INTO '\(copyDir.path)/out.db'", limit: 10) }, { ($0 as? LiteError) == .readOnly }))
+                check("read only ATTACH cannot create a file", throwsError({ _ = try r.run(script: "ATTACH '\(copyDir.path)/new.db' AS n", limit: 10) }))
+            }
+            check("reading a copied WAL database leaves the folder as it was",
+                  try FileManager.default.contentsOfDirectory(atPath: copyDir.path) == ["copied.db"] && Data(contentsOf: copied) == copiedBytes)
+            let empty = dir.appendingPathComponent("empty.db")
+            FileManager.default.createFile(atPath: empty.path, contents: Data())
+            check("an empty file opens as an empty database and stays empty",
+                  try Connection(path: empty.path, readOnly: true).objects().isEmpty && Data(contentsOf: empty).isEmpty)
+            check("a text file is reported as not a database",
+                  throwsError({ _ = try Connection(path: text.path, readOnly: true) }, { ($0 as? LiteError) == .notDatabase }))
+            let odd = dir.appendingPathComponent("odd ?#% näme.sqlite")
+            try FileManager.default.copyItem(atPath: copied.path, toPath: odd.path)
+            check("a file name with ?, # and % opens through the immutable fallback", try Connection(path: odd.path, readOnly: true).objects().count == 1)
+
+            // Stopping an export removes the half written file.
+            let endless = dir.appendingPathComponent("endless.csv")
+            let stopper = try Connection(path: path, readOnly: true)
+            let box = Database(stopper)
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { box.interrupt() }
+            check("stopping an export reports it and deletes the partial file",
+                  throwsError({ try stopper.exportCSV("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM c", to: endless) },
+                              { ($0 as? LiteError) == .stopped }) && !FileManager.default.fileExists(atPath: endless.path))
+
+            // A real window model: opens off the main thread, counts on its second connection, never writes.
+            let before = try Data(contentsOf: URL(fileURLWithPath: path))
+            MainActor.assumeIsolated {
+                let m = DatabaseModel()
+                m.open(URL(fileURLWithPath: path))
+                let deadline = Date().addingTimeInterval(10)
+                while Date() < deadline, !(m.isOpen && m.objects.count == 4 && m.objects.allSatisfy { $0.rowCount != nil } && m.pageResult != nil) {
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+                }
+                check("model opens a file read only with a counting connection", m.isOpen && m.readOnly && m.db?.counter != nil)
+                check("model fills row counts and selects the first table", m.selection == "odd \"name\"" && m.totalRows == 2 && m.pageResult?.rows.count == 2)
+                m.selection = "people"
+                let next = Date().addingTimeInterval(5)
+                while Date() < next, m.pageResult == nil { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+                check("model loads another table a page at a time", m.totalRows == 1235 && m.pageResult?.rows.count == DatabaseModel.pageSize)
+            }
+            check("browsing leaves the file unchanged", try Data(contentsOf: URL(fileURLWithPath: path)) == before)
+            check("errors read like sentences",
+                  LiteError.stopped.localizedDescription == "Stopped." && LiteError.sqlite("no such table: x").localizedDescription == "No such table: x")
+
             // Demo database used for the screenshot.
             let demo = try Demo.connection()
             check("demo database has its tables", try demo.count("tracks") == 3503 && demo.readOnly)
@@ -167,6 +232,10 @@ enum SelfTest {
                 m.run()
                 check("read only model refuses writes with a clear message", m.sqlError?.contains("read only") == true && m.sqlResult == nil)
                 check("history records what ran", m.history.entries.first?.sql == "DELETE FROM artists")
+                m.editorSelection = "SELECT 1"
+                if let entry = m.history.entries.last { m.useHistory(entry) }
+                check("picking a history entry replaces the SQL and forgets the old selection",
+                      m.editorSelection.isEmpty && m.sql == m.history.entries.last?.sql)
                 m.selection = "genres"
                 check("choosing a table returns to the data view", m.mode == .data && m.page == 0 && m.sort == nil && m.pageResult?.rows.count == 18)
                 check("schema follows the selection", m.schema?.name == "genres" && m.schema?.indexes.contains { $0.unique } == true)
