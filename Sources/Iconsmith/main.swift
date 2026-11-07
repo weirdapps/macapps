@@ -54,9 +54,9 @@ struct IconsmithApp: App {
 
 struct IconsmithCommands: Commands {
     @ObservedObject var model: IconModel
-    @AppStorage("showGrid") private var showGrid = false
-    @AppStorage("darkPreview") private var darkPreview = false
-    @AppStorage("showInspector") private var showInspector = true
+    @AppStorage("showGrid", store: Theme.defaults) private var showGrid = false
+    @AppStorage("darkPreview", store: Theme.defaults) private var darkPreview = false
+    @AppStorage("showInspector", store: Theme.defaults) private var showInspector = true
 
     /// True when a text field has focus, so the standard Copy and Paste keep working there.
     private var editingText: Bool { NSApp.keyWindow?.firstResponder is NSText }
@@ -77,6 +77,8 @@ struct IconsmithCommands: Commands {
                 .disabled(model.lastExport == nil)
         }
         CommandGroup(replacing: .pasteboard) {
+            Button("Cut") { NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: nil) }
+                .keyboardShortcut("x")
             Button("Copy Icon") {
                 if editingText { NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil) } else { model.copyIcon() }
             }
@@ -85,6 +87,8 @@ struct IconsmithCommands: Commands {
                 if editingText { NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil) } else { model.paste() }
             }
             .keyboardShortcut("v")
+            Button("Select All") { NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil) }
+                .keyboardShortcut("a")
         }
         CommandMenu("Icon") {
             Picker("Shape", selection: Binding(get: { model.options.shape }, set: { s in model.update("Change Shape") { $0.shape = s } })) {
@@ -158,13 +162,16 @@ func appIcon() -> NSBitmapImageRep {
         ctx.addPath(anvil)
         ctx.clip()
         gradient([rgb(0x8E95A3), rgb(0x5A606C), rgb(0x30333B)], from: CGPoint(x: 0, y: 400), to: CGPoint(x: 0, y: 190), in: ctx)
-        // The polished face catches the glow.
+        // The polished face catches the glow, with a gold seam under it that follows the horn.
         ctx.clip(to: CGRect(x: 0, y: 404, width: 1024, height: 40))
         gradient([rgb(0xFFE7AE), rgb(0xD9A441)], from: CGPoint(x: 0, y: 436), to: CGPoint(x: 0, y: 404), in: ctx)
         ctx.restoreGState()
-        // Gold seam under the face.
+        ctx.saveGState()
+        ctx.addPath(anvil)
+        ctx.clip()
         ctx.setFillColor(rgb(0xF5C451).cgColor)
-        ctx.fill(CGRect(x: 360, y: 400, width: 416, height: 6))
+        ctx.fill(CGRect(x: 0, y: 400, width: 1024, height: 6))
+        ctx.restoreGState()
 
         // The floating app tile, glowing gold, with a sheen and an inner bevel.
         let card = CGRect(x: 357, y: 478, width: 310, height: 310)

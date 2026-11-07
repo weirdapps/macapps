@@ -86,6 +86,8 @@ enum SelfTest {
         check(tile.width == 1024 && tile.height == 1024, "render is 1024 square")
         check(pixel(tile, 4, 4)[3] == 0, "tile corners are transparent")
         check(pixel(tile, 120, 120)[3] == 0, "rounded corner is cut away")
+        // A circular arc would already be a straight, opaque edge here; Apple's continuous corner is still curving.
+        check(pixel(tile, 275, 101)[3] < 128 && pixel(tile, 512, 101)[3] > 200, "tile corners are continuous, not circular")
         let mid = pixel(tile, 512, 512)
         check(mid[3] == 255 && mid[0] > 250 && mid[1] < 5, "tile centre shows the image")
         check(pixel(tile, 512, 960)[3] == 0, "no shadow below the tile when off")
@@ -176,6 +178,20 @@ enum SelfTest {
         }
         let fallback = temp.appendingPathComponent("Fallback.icns")
         check((try? IconExporter.writeICNSWithImageIO(all, to: fallback)) != nil && fm.fileExists(atPath: fallback.path), "ImageIO icns fallback writes")
+        check(CGImageSourceCreateWithURL(fallback as CFURL, nil).map(CGImageSourceGetCount) == 10, "ImageIO icns keeps all 10 slots, 1024 included")
+        // Reopening an .icns edits its largest picture, not the 16 px one stored first.
+        check(ImageLoader.load(icns)?.width == 1024, "an .icns opens at 1024 px")
+        check(ImageLoader.load(fallback)?.width == 1024, "an ImageIO .icns opens at 1024 px")
+        check((try? IconExporter.export(.icns, image: red, options: IconOptions(), to: icns)) != nil && pixelSize(icns) != nil,
+              "export replaces an existing .icns")
+
+        // Re-exporting a folder replaces it whole, leaving nothing stale behind.
+        try? Data("old".utf8).write(to: iconset.appendingPathComponent("stale.txt"))
+        try? IconExporter.export(.iconset, image: red, options: IconOptions(), to: iconset)
+        let after = (try? fm.contentsOfDirectory(atPath: iconset.path)) ?? []
+        check(after.count == 10 && !after.contains("stale.txt"), "re-export leaves no stale files")
+        let leftovers = ((try? fm.contentsOfDirectory(atPath: temp.path)) ?? []).filter { $0.hasPrefix("Iconsmith-out") }
+        check(leftovers.isEmpty, "export cleans up its staging folder")
 
         // Loading.
         let png = temp.appendingPathComponent("source.png")
@@ -208,6 +224,28 @@ enum SelfTest {
         model.update("Zoom") { $0.zoom = 6 }
         check(model.isLowResolution, "a deep zoom is flagged as soft")
         check(IconModel.demo.renders[1024] != nil, "demo model draws")
+
+        // Opening runs off the main thread and reports back.
+        func waitForLoad(_ m: IconModel) {
+            let deadline = Date().addingTimeInterval(10)
+            while m.isLoading && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+        }
+        let opener = IconModel(persist: false)
+        opener.open(junk)
+        check(opener.isLoading, "opening shows progress at once")
+        waitForLoad(opener)
+        check(!opener.isLoading && opener.errorMessage != nil && !opener.hasImage, "a bad file reports an error")
+        opener.errorMessage = nil
+        opener.open(png)
+        waitForLoad(opener)
+        check(opener.hasImage && opener.name == "source" && opener.sourceSize == CGSize(width: 320, height: 200), "a PNG opens in the background")
+        let empty = temp.appendingPathComponent("empty.jpg")
+        fm.createFile(atPath: empty.path, contents: Data())
+        opener.open(empty)
+        waitForLoad(opener)
+        check(opener.errorMessage != nil && opener.name == "source", "an empty file is refused and keeps the open image")
+
+        check(Theme.defaults === UserDefaults.standard, "the app reads the user's view settings outside the snapshot")
 
         print(failures == 0 ? "PASS: all \(checks) checks" : "\(failures) of \(checks) checks failed")
         return failures == 0 ? 0 : 1

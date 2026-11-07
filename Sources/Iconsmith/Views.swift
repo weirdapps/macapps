@@ -8,13 +8,18 @@ enum Theme {
     static let goldDeep = Color(red: 0.70, green: 0.47, blue: 0.08)
     static let accent = LinearGradient(colors: [goldLight, gold], startPoint: .top, endPoint: .bottom)
     static let inspectorWidth: CGFloat = 300
+
+    /// View settings. The snapshot reads an empty suite, so the website picture never depends on how the user left the window.
+    static var defaults: UserDefaults {
+        Desktop.isSnapshot ? UserDefaults(suiteName: "com.weirdapps.iconsmith.snapshot") ?? .standard : .standard
+    }
 }
 
 struct ContentView: View {
     @ObservedObject var model: IconModel
     @Environment(\.undoManager) private var undoManager
     @State private var dropTargeted = false
-    @AppStorage("showInspector") private var showInspector = true
+    @AppStorage("showInspector", store: Theme.defaults) private var showInspector = true
 
     var body: some View {
         Group {
@@ -32,6 +37,14 @@ struct ContentView: View {
                 DropZone(symbol: "photo.badge.plus", title: "Drop an image",
                          message: "PNG, JPEG, HEIC, TIFF, PDF or SVG, any size. You can crop it to a square and zoom in.",
                          button: "Open Image…", tint: Theme.gold, isTargeted: dropTargeted) { model.showOpenPanel() }
+            }
+        }
+        .overlay {
+            if model.isLoading {
+                ProgressView("Opening…")
+                    .controlSize(.large)
+                    .padding(24)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
         }
         .frame(minWidth: 900, minHeight: 600)
@@ -95,7 +108,7 @@ struct ContentView: View {
 
 struct EditorCanvas: View {
     @ObservedObject var model: IconModel
-    @AppStorage("showGrid") private var showGrid = false
+    @AppStorage("showGrid", store: Theme.defaults) private var showGrid = false
     @State private var dragStart: CGPoint?
     @State private var zoomStart: Double?
 
@@ -193,7 +206,7 @@ struct GridOverlay: View {
                     p.addLine(to: CGPoint(x: geo.size.width, y: geo.size.height / 2))
                 }
                 .stroke(Theme.gold.opacity(0.45), lineWidth: 0.5)
-                RoundedRectangle(cornerRadius: Geometry.tileRadius * k, style: .circular)
+                RoundedRectangle(cornerRadius: Geometry.tileRadius * k, style: .continuous)
                     .stroke(Theme.gold.opacity(0.8), style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
                     .frame(width: tile.width * k, height: tile.height * k)
                     .offset(x: tile.minX * k, y: tile.minY * k)
@@ -240,7 +253,7 @@ struct ExportBanner: View {
 
 struct PreviewStrip: View {
     @ObservedObject var model: IconModel
-    @AppStorage("darkPreview") private var dark = false
+    @AppStorage("darkPreview", store: Theme.defaults) private var dark = false
     static let maxDisplay: CGFloat = 96
 
     var body: some View {

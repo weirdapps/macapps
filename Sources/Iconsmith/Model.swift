@@ -2,6 +2,7 @@ import AppKit
 import CoreGraphics
 import ImageIO
 import Kit
+import SwiftUI
 import UniformTypeIdentifiers
 
 // MARK: - Options
@@ -103,9 +104,10 @@ enum Geometry {
         return shape.insetBy(dx: shape.width * p, dy: shape.height * p)
     }
 
+    /// The tile uses continuous corners, the squircle Apple draws its own icons with, not circular arcs.
     static func shapePath(_ options: IconOptions) -> CGPath {
         options.shape == .tile
-            ? CGPath(roundedRect: tileRect, cornerWidth: tileRadius, cornerHeight: tileRadius, transform: nil)
+            ? Path(roundedRect: tileRect, cornerRadius: tileRadius, style: .continuous).cgPath
             : CGPath(rect: shapeRect(options), transform: nil)
     }
 }
@@ -294,13 +296,14 @@ enum IconExporter {
     }
 
     static func writeICNSWithImageIO(_ images: [Int: CGImage], to url: URL, iconutilMessage: String = "") throws {
-        let sizes = [16, 32, 64, 128, 256, 512, 1024]
-        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.icns.identifier as CFString, sizes.count, nil) else {
+        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.icns.identifier as CFString, slots.count, nil) else {
             throw ExportError.iconutil(iconutilMessage.isEmpty ? "no icns writer available" : iconutilMessage)
         }
-        for s in sizes {
-            guard let image = images[s] else { throw ExportError.render }
-            CGImageDestinationAddImage(dest, image, nil)
+        // ImageIO keeps one picture per point size unless the @2x ones say 144 dpi; without it the 1024 slot is dropped.
+        for slot in slots {
+            guard let image = images[slot.pixels] else { throw ExportError.render }
+            let dpi = 72 * slot.scale
+            CGImageDestinationAddImage(dest, image, [kCGImagePropertyDPIWidth: dpi, kCGImagePropertyDPIHeight: dpi] as CFDictionary)
         }
         guard CGImageDestinationFinalize(dest) else { throw ExportError.iconutil(iconutilMessage) }
     }
@@ -310,7 +313,10 @@ enum IconExporter {
         let images = IconRenderer.renderAll(image, options: options)
         guard images.count == Geometry.sizes.count else { throw ExportError.render }
         let fm = FileManager.default
-        let staging = fm.temporaryDirectory.appendingPathComponent("Iconsmith-out-\(UUID().uuidString)", isDirectory: true)
+        // Stage on the destination volume so the final swap is a rename, and an old export survives a failed write.
+        let staging = (try? fm.url(for: .itemReplacementDirectory, in: .userDomainMask,
+                                   appropriateFor: url.deletingLastPathComponent(), create: true))
+            ?? fm.temporaryDirectory.appendingPathComponent("Iconsmith-out-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: staging, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: staging) }
         let staged = staging.appendingPathComponent(url.lastPathComponent)
@@ -319,8 +325,11 @@ enum IconExporter {
         case .iconset: try writePNGs(images, to: staged)
         case .appIconSet: try writeAppIconSet(images, to: staged)
         }
-        if fm.fileExists(atPath: url.path) { try fm.removeItem(at: url) }
-        do { try fm.moveItem(at: staged, to: url) } catch { throw ExportError.write(url.lastPathComponent) }
+        do {
+            if fm.fileExists(atPath: url.path) { _ = try fm.replaceItemAt(url, withItemAt: staged) } else { try fm.moveItem(at: staged, to: url) }
+        } catch {
+            throw ExportError.write(url.lastPathComponent)
+        }
     }
 }
 
@@ -334,21 +343,34 @@ enum ImageLoader {
     /// Decodes an image file the right way up (EXIF orientation applied). PDF and SVG go through NSImage.
     static func load(_ url: URL) -> CGImage? {
         if let src = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(src) > 0,
-           let image = thumbnail(src, maxPixels: maxPixels) {
+           let image = thumbnail(src, index: largestIndex(src), maxPixels: maxPixels) {
             return image
         }
         guard let ns = NSImage(contentsOf: url) else { return nil }
         return rasterize(ns, longestSide: CGFloat(previewPixels))
     }
 
-    static func thumbnail(_ src: CGImageSource, maxPixels: Int) -> CGImage? {
+    /// The biggest picture in the file. An .icns or .ico stores its 16 px size first, and that is not the one to edit.
+    static func largestIndex(_ src: CGImageSource) -> Int {
+        let count = CGImageSourceGetCount(src)
+        guard count > 1 else { return 0 }
+        var best = 0, bestArea = -1
+        for i in 0..<count {
+            guard let p = CGImageSourceCopyPropertiesAtIndex(src, i, nil) as? [CFString: Any],
+                  let w = p[kCGImagePropertyPixelWidth] as? Int, let h = p[kCGImagePropertyPixelHeight] as? Int else { continue }
+            if w * h > bestArea { best = i; bestArea = w * h }
+        }
+        return best
+    }
+
+    static func thumbnail(_ src: CGImageSource, index: Int = 0, maxPixels: Int) -> CGImage? {
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPixels,
             kCGImageSourceShouldCacheImmediately: true,
         ]
-        return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
+        return CGImageSourceCreateThumbnailAtIndex(src, index, opts as CFDictionary)
     }
 
     /// A smaller copy for live previews, same aspect ratio.
@@ -391,6 +413,7 @@ final class IconModel: ObservableObject {
     @Published private(set) var name = "Icon"
     @Published private(set) var renders: [Int: CGImage] = [:]
     @Published private(set) var isExporting = false
+    @Published private(set) var isLoading = false
     @Published private(set) var lastExport: URL?
     @Published var banner: String?
     @Published var errorMessage: String?
@@ -407,6 +430,7 @@ final class IconModel: ObservableObject {
     private var lastUndo: (label: String, time: Date)?
     private var saveWork: DispatchWorkItem?
     private var bannerWork: DispatchWorkItem?
+    private var loadGeneration = 0
 
     init(persist: Bool = !Desktop.isSnapshot) {
         self.persist = persist
@@ -422,17 +446,35 @@ final class IconModel: ObservableObject {
 
     // MARK: Opening
 
+    /// Decodes off the main thread, so a 100 megapixel photo never beachballs the window. The newest request wins.
     func open(_ url: URL) {
-        guard let image = ImageLoader.load(url) else {
+        loadGeneration += 1
+        let generation = loadGeneration
+        isLoading = true
+        Task.detached(priority: .userInitiated) {
+            let loaded = ImageLoader.load(url).map { SendableImage(image: $0) }
+            let preview = loaded.map { SendableImage(image: ImageLoader.downsampled($0.image, maxPixels: ImageLoader.previewPixels)) }
+            await self.finishOpen(url: url, image: loaded, preview: preview, generation: generation)
+        }
+    }
+
+    private func finishOpen(url: URL, image: SendableImage?, preview: SendableImage?, generation: Int) {
+        guard generation == loadGeneration else { return }
+        isLoading = false
+        guard let image, let preview else {
             errorMessage = "\(url.lastPathComponent) is not an image Iconsmith can read."
             return
         }
-        setImage(image, name: url.deletingPathExtension().lastPathComponent)
+        setImage(image.image, preview: preview.image, name: url.deletingPathExtension().lastPathComponent)
     }
 
     func setImage(_ image: CGImage, name: String) {
+        setImage(image, preview: ImageLoader.downsampled(image, maxPixels: ImageLoader.previewPixels), name: name)
+    }
+
+    private func setImage(_ image: CGImage, preview: CGImage, name: String) {
         source = image
-        preview = ImageLoader.downsampled(image, maxPixels: ImageLoader.previewPixels)
+        self.preview = preview
         self.name = name.isEmpty ? "Icon" : name
         undoManager?.removeAllActions()
         lastUndo = nil
@@ -454,18 +496,16 @@ final class IconModel: ObservableObject {
             open(url)
         } else if let ns = (pb.readObjects(forClasses: [NSImage.self]) as? [NSImage])?.first,
                   let image = ImageLoader.rasterize(ns, longestSide: CGFloat(ImageLoader.previewPixels)) {
+            loadGeneration += 1
+            isLoading = false
             setImage(image, name: "Pasted Image")
         } else {
             NSSound.beep()
         }
     }
 
-    var canPaste: Bool {
-        NSPasteboard.general.canReadObject(forClasses: [NSImage.self, NSURL.self], options: nil)
-    }
-
     func copyIcon() {
-        guard let image = renders[1024], let png = IconRenderer.pngData(image) else { return }
+        guard let image = renders[1024], let png = IconRenderer.pngData(image) else { NSSound.beep(); return }
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setData(png, forType: .png)
