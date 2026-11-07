@@ -24,6 +24,40 @@ enum Layout: String, CaseIterable, Identifiable {
     }
 }
 
+/// Which render of each simulation is the latest one asked for. A newer request for a mode supersedes
+/// older ones for that mode only, so changing the severity never cancels the dichromacy renders of a new image.
+struct RenderTokens {
+    private var latest: [Simulation: Int] = [:]
+    private var counter = 0
+
+    mutating func issue(_ modes: [Simulation]) -> Int {
+        counter += 1
+        for mode in modes { latest[mode] = counter }
+        return counter
+    }
+
+    func isCurrent(_ mode: Simulation, _ token: Int) -> Bool { latest[mode] == token }
+}
+
+/// The view settings Sight remembers between launches.
+enum Prefs {
+    static let layoutKey = "layout", modeKey = "mode", severityKey = "severity"
+
+    static func layout(_ d: UserDefaults) -> Layout { d.string(forKey: layoutKey).flatMap(Layout.init(rawValue:)) ?? .split }
+    static func mode(_ d: UserDefaults) -> Simulation { d.string(forKey: modeKey).flatMap(Simulation.init(rawValue:)) ?? .deuteranopia }
+    static func severity(_ d: UserDefaults) -> Double {
+        let v = d.double(forKey: severityKey)
+        return v.isFinite && v >= 0.1 && v <= 1 ? v : 0.6
+    }
+}
+
+/// The suggested export file name: the image, the simulation and, for anomalous modes, its severity.
+func exportFileName(_ name: String, _ mode: Simulation, severity: Double) -> String {
+    let base = name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+    let detail = mode.isAnomalous ? "\(mode.name) \(Int((severity * 100).rounded()))%" : mode.name
+    return "\(base.isEmpty ? "Image" : base) (\(detail)).png"
+}
+
 /// A CGImage that crosses into background tasks; CGImage is immutable.
 struct ImageBox: @unchecked Sendable { let image: CGImage }
 
@@ -36,17 +70,35 @@ final class SightModel: ObservableObject {
     @Published private(set) var pixelSize = CGSize.zero
     @Published private(set) var busy = false
     @Published private(set) var saved: URL?
-    @Published var mode: Simulation = .deuteranopia
-    @Published var layout: Layout = .split
+    @Published var mode: Simulation { didSet { remember(mode.rawValue, Prefs.modeKey) } }
+    @Published var layout: Layout { didSet { remember(layout.rawValue, Prefs.layoutKey) } }
     @Published var split: CGFloat = 0.5
-    @Published var severity: Double = 0.6 {
-        didSet { if severity != oldValue { renderPreviews(Simulation.allCases.filter(\.isAnomalous)) } }
+    @Published var severity: Double {
+        didSet {
+            guard severity != oldValue else { return }
+            remember(severity, Prefs.severityKey)
+            renderPreviews(Simulation.allCases.filter(\.isAnomalous))
+        }
     }
 
     private var full: CGImage?
     private var folder: URL?
     private var preview: Bitmap?
-    private var generation = 0
+    private var tokens = RenderTokens()
+    /// Export and copy can overlap; the spinner shows while any of them runs.
+    private var jobs = 0 { didSet { busy = jobs > 0 } }
+
+    init() {
+        // The snapshot shows fixed demo settings and never reads the user's own.
+        let d = UserDefaults.standard
+        mode = Desktop.isSnapshot ? .deuteranopia : Prefs.mode(d)
+        layout = Desktop.isSnapshot ? .split : Prefs.layout(d)
+        severity = Desktop.isSnapshot ? 0.6 : Prefs.severity(d)
+    }
+
+    private func remember(_ value: Any, _ key: String) {
+        if !Desktop.isSnapshot { UserDefaults.standard.set(value, forKey: key) }
+    }
 
     static let previewSide = 1600
 
@@ -76,15 +128,18 @@ final class SightModel: ObservableObject {
 
     /// Takes a new image: makes the preview copy and renders every simulation of it.
     func set(_ image: CGImage, name: String, synchronously: Bool = false) {
+        guard image.width > 0, image.height > 0, let bitmap = Bitmap(image, maxSide: Self.previewSide) else {
+            return fail("Sight could not read that image.")
+        }
         full = image
         self.name = name
         pixelSize = CGSize(width: image.width, height: image.height)
         saved = nil
-        guard let bitmap = Bitmap(image, maxSide: Self.previewSide) else { return fail("Sight could not read that image.") }
         preview = bitmap
         original = bitmap.cgImage
         previews = [:]
         if synchronously {
+            _ = tokens.issue(Simulation.allCases)
             for mode in Simulation.allCases {
                 previews[mode] = bitmap.simulated(mode.matrix(severity: severity)).cgImage
             }
@@ -95,15 +150,14 @@ final class SightModel: ObservableObject {
 
     private func renderPreviews(_ modes: [Simulation]) {
         guard let preview else { return }
-        generation += 1
-        let token = generation, severity = severity
+        let token = tokens.issue(modes), severity = severity
+        // The current mode first, so the visible image updates as soon as possible.
+        let ordered = modes.filter { $0 == mode } + modes.filter { $0 != mode }
         Task {
-            // The current mode first, so the visible image updates as soon as possible.
-            let ordered = modes.sorted { a, _ in a == mode }
-            for mode in ordered {
+            for mode in ordered where tokens.isCurrent(mode, token) {
                 let matrix = mode.matrix(severity: severity)
                 let result = await Task.detached(priority: .userInitiated) { preview.simulated(matrix) }.value
-                guard token == generation else { return }
+                guard tokens.isCurrent(mode, token) else { continue }
                 previews[mode] = result.cgImage
             }
         }
@@ -119,12 +173,6 @@ final class SightModel: ObservableObject {
             guard response == .OK, let url = panel.url else { return }
             Task { @MainActor in self.load(url) }
         }
-    }
-
-    var canPaste: Bool {
-        let pb = NSPasteboard.general
-        return pb.canReadObject(forClasses: [NSImage.self], options: nil)
-            || pb.canReadObject(forClasses: [NSURL.self], options: [.urlReadingContentsConformToTypes: [UTType.image.identifier]])
     }
 
     func paste() {
@@ -163,14 +211,14 @@ final class SightModel: ObservableObject {
 
     // MARK: Export, copy
 
-    var exportName: String { "\(name) (\(mode.name)).png" }
+    var exportName: String { exportFileName(name, mode, severity: severity) }
 
     /// The current simulation at full resolution, made off the main thread.
     private func fullSimulation() async -> ImageBox? {
         guard let full else { return nil }
         let matrix = mode.matrix(severity: severity), box = ImageBox(image: full)
-        busy = true
-        defer { busy = false }
+        jobs += 1
+        defer { jobs -= 1 }
         return await Task.detached(priority: .userInitiated) {
             Bitmap(box.image)?.simulated(matrix).cgImage.map(ImageBox.init)
         }.value

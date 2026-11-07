@@ -203,6 +203,8 @@ struct SingleView: View {
 
 struct SplitView: View {
     @ObservedObject var model: SightModel
+    /// Whether this view pushed the resize cursor, so enter and exit always pair up.
+    @State private var cursorPushed = false
 
     var body: some View {
         GeometryReader { geo in
@@ -225,7 +227,11 @@ struct SplitView: View {
             .gesture(DragGesture(minimumDistance: 0).onChanged { value in
                 model.split = min(max(value.location.x / max(size.width, 1), 0), 1)
             })
-            .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
+            .onHover { inside in
+                if inside, !cursorPushed { NSCursor.resizeLeftRight.push(); cursorPushed = true }
+                if !inside, cursorPushed { NSCursor.pop(); cursorPushed = false }
+            }
+            .onDisappear { if cursorPushed { NSCursor.pop(); cursorPushed = false } }
             .animation(.snappy(duration: 0.15), value: model.split > 0.12)
             .position(x: geo.size.width / 2, y: geo.size.height / 2)
         }

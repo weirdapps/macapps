@@ -96,6 +96,47 @@ enum SelfTest {
               "fitted keeps the aspect ratio")
         check(fitted(.zero, in: CGSize(width: 10, height: 10)) == .zero, "fitted handles an empty image")
 
+        // Render bookkeeping: a severity change must not cancel the other modes of a freshly loaded image.
+        var tokens = RenderTokens()
+        let all = tokens.issue(Simulation.allCases)
+        let anomalous = tokens.issue(Simulation.allCases.filter(\.isAnomalous))
+        check(tokens.isCurrent(.protanopia, all) && tokens.isCurrent(.achromatopsia, all),
+              "a severity change keeps the pending dichromacy renders")
+        check(!tokens.isCurrent(.protanomaly, all) && tokens.isCurrent(.protanomaly, anomalous),
+              "a severity change supersedes the old anomalous renders")
+        let reload = tokens.issue(Simulation.allCases)
+        check(Simulation.allCases.allSatisfy { !tokens.isCurrent($0, all) && !tokens.isCurrent($0, anomalous) && tokens.isCurrent($0, reload) },
+              "a new image supersedes every older render")
+
+        // Export names.
+        check(exportFileName("Dashboard", .deuteranopia, severity: 0.6) == "Dashboard (Deuteranopia).png", "export name for a dichromacy")
+        check(exportFileName("Login", .protanomaly, severity: 0.4) == "Login (Protanomaly 40%).png", "export name carries the severity")
+        check(exportFileName("", .tritanopia, severity: 1) == "Image (Tritanopia).png", "export name for a nameless image")
+        check(exportFileName("a/b:c", .achromatopsia, severity: 1) == "a-b-c (Achromatopsia).png", "export name has no path separators")
+
+        // Remembered settings, on a throwaway defaults domain.
+        let suite = "com.weirdapps.sight.selftest-\(UUID().uuidString)"
+        if let d = UserDefaults(suiteName: suite) {
+            check(Prefs.layout(d) == .split && Prefs.mode(d) == .deuteranopia && Prefs.severity(d) == 0.6, "defaults on first launch")
+            d.set(Layout.grid.rawValue, forKey: Prefs.layoutKey)
+            d.set(Simulation.tritanomaly.rawValue, forKey: Prefs.modeKey)
+            d.set(0.3, forKey: Prefs.severityKey)
+            check(Prefs.layout(d) == .grid && Prefs.mode(d) == .tritanomaly && Prefs.severity(d) == 0.3, "settings round trip")
+            d.set("bogus", forKey: Prefs.modeKey)
+            d.set(7.0, forKey: Prefs.severityKey)
+            check(Prefs.mode(d) == .deuteranopia && Prefs.severity(d) == 0.6, "corrupt settings fall back to defaults")
+            d.removePersistentDomain(forName: suite)
+        }
+
+        // Odd input: empty and non-image files do not decode.
+        let empty = FileManager.default.temporaryDirectory.appendingPathComponent("sight-empty-\(UUID().uuidString).png")
+        FileManager.default.createFile(atPath: empty.path, contents: Data())
+        check(ImageFile.load(empty) == nil, "an empty file is not an image")
+        try? FileManager.default.removeItem(at: empty)
+        check(ImageFile.load(data: Data("not an image".utf8)) == nil, "text is not an image")
+        let zero = Bitmap(width: 0, height: 0, pixels: [])
+        check(zero.simulated(Simulation.protanopia.matrix(severity: 1)).pixels.isEmpty, "an empty bitmap simulates to nothing")
+
         print("\(passed) passed, \(failed) failed")
         return failed == 0 ? 0 : 1
     }
