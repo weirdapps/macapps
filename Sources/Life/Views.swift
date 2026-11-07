@@ -27,10 +27,11 @@ struct ContentView: View {
                     .padding(.bottom, 4)
                 StatusBar(model: model)
             }
+            .frame(minWidth: 540)
             .background(Color(nsColor: .windowBackgroundColor))
             .toolbar { toolbar }
         }
-        .frame(minWidth: 780, minHeight: 500)
+        .frame(minWidth: 820, minHeight: 520)
         .onExitCommand { model.cancelPlacing() }
         .onAppear { model.undoManager = undoManager }
         .onChange(of: undoManager) { _, value in model.undoManager = value }
@@ -400,11 +401,14 @@ struct StatusBar: View {
     @Bindable var model: LifeModel
 
     var body: some View {
-        HStack(spacing: 22) {
+        HStack(spacing: 18) {
             stat("Generation", model.board.generation)
             stat("Population", model.population)
+            // Shrinks first when the window is narrow, so the controls on the right never clip.
             Sparkline(values: model.history)
-                .frame(width: 130, height: 28)
+                .frame(minWidth: 0, idealWidth: 130, maxWidth: 130)
+                .frame(height: 28)
+                .layoutPriority(-1)
                 .help("Population over the last \(model.history.count) generations")
             Spacer(minLength: 8)
             HStack(spacing: 7) {
@@ -412,7 +416,7 @@ struct StatusBar: View {
                 Slider(value: $model.speed, in: 1...60)
                     .controlSize(.small)
                     .tint(Theme.green)
-                    .frame(width: 110)
+                    .frame(minWidth: 70, idealWidth: 110, maxWidth: 110)
                 Image(systemName: "hare.fill").font(.system(size: 11)).foregroundStyle(.secondary)
                 Text("\(Int(model.speed))/s")
                     .font(.system(size: 11.5, weight: .semibold, design: .rounded))
@@ -450,7 +454,8 @@ struct StatusBar: View {
                 .monospacedDigit()
                 .contentTransition(.numericText())
         }
-        .frame(minWidth: 86, alignment: .leading)
+        .frame(minWidth: 78, alignment: .leading)
+        .fixedSize()
     }
 
     private func chip(_ symbol: String, _ text: String) -> some View {

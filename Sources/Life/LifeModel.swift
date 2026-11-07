@@ -219,8 +219,7 @@ final class LifeModel {
     /// Replaces the board with a pattern file, growing the grid if the pattern needs it.
     func open(_ url: URL) {
         do {
-            let text = try String(contentsOf: url, encoding: .utf8)
-            var pattern = try Pattern.parse(text)
+            var pattern = try Pattern.parse(Self.readPattern(url))
             if pattern.name == "Untitled" { pattern.name = url.deletingPathExtension().lastPathComponent }
             load(pattern)
         } catch {
@@ -228,11 +227,23 @@ final class LifeModel {
         }
     }
 
+    /// A pattern file's text. Refuses files too big to be a pattern, and survives old Latin-1 comments.
+    nonisolated static func readPattern(_ url: URL) throws -> String {
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard size <= 8_000_000 else { throw Pattern.ParseError.tooLarge }
+        let data = try Data(contentsOf: url)
+        return String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+    }
+
+    /// The board a pattern opens on: the current one if it fits, else the smallest that holds it, with a margin if possible.
+    nonisolated static func boardSize(for pattern: Pattern, current: GridSize) -> GridSize? {
+        if current.width >= pattern.width && current.height >= pattern.height { return current }
+        return GridSize.all.first { $0.width >= pattern.width + 4 && $0.height >= pattern.height + 4 }
+            ?? GridSize.all.first { $0.width >= pattern.width && $0.height >= pattern.height }
+    }
+
     func load(_ pattern: Pattern) {
-        let fits = GridSize.all.first { $0.width >= pattern.width + 4 && $0.height >= pattern.height + 4 }
-        let current = size
-        let target = current.width >= pattern.width && current.height >= pattern.height ? current : fits
-        guard let target else {
+        guard let target = Self.boardSize(for: pattern, current: size) else {
             show("\(pattern.name) is \(pattern.width) \u{00D7} \(pattern.height), larger than the biggest board.", isError: true)
             return
         }

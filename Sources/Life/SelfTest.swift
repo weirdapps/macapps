@@ -172,6 +172,51 @@ enum SelfTest {
         check(Renderer.palette[1] != Renderer.palette[200] && Renderer.palette[0] == 0, "age palette")
         check(Renderer.image(board)?.width == 8, "board renders to an image")
 
+        // Hostile or odd input: refused quickly, never parsed into millions of cells.
+        let flood = String(repeating: "99999o$", count: 5_000) + "!"
+        let floodStart = Date()
+        var floodError: Error?
+        do { _ = try Pattern.parse(flood) } catch { floodError = error }
+        check((floodError as? Pattern.ParseError) == .tooLarge && Date().timeIntervalSince(floodStart) < 0.5, "a flood of cells is refused quickly")
+        check((try? Pattern.parse("99999b99999b99999bo!")) == nil, "a cell far off the board is refused")
+        check((try? Pattern.parse(String(repeating: "99999$", count: 50) + "o!")) == nil, "a cell far below the board is refused")
+        check((try? Pattern.parse("")) == nil && (try? Pattern.parse("\n\n  \n")) == nil, "empty text is rejected")
+        check((try? Pattern.parse("x = 3, y = 3\nbo$2bo$3o\n!"))?.cells.count == 5, "a closing ! on its own line")
+        check((try? Pattern.parse("bo$2bo$3o!\u{00E9}\u{1F600}")) != nil, "text after the closing ! is ignored")
+        check((try? Pattern.parse("b\u{1F600}o!")) == nil, "emoji inside the cells are rejected")
+
+        // Opening files.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("LifeSelfTest-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let latin = dir.appendingPathComponent("latin.rle"), empty = dir.appendingPathComponent("empty.rle")
+        // "#O Jürgen" in Latin-1: the 0xFC byte is not valid UTF-8.
+        try? (Data("#O J".utf8) + Data([0xFC]) + Data("rgen\nx = 3, y = 3\nbo$2bo$3o!\n".utf8)).write(to: latin)
+        try? Data().write(to: empty)
+        check((try? Pattern.parse(LifeModel.readPattern(latin)))?.cells.count == 5, "a file with Latin-1 comments opens")
+        check((try? Pattern.parse(LifeModel.readPattern(empty))) == nil, "an empty file is rejected")
+        check((try? LifeModel.readPattern(dir.appendingPathComponent("missing.rle"))) == nil, "a missing file throws")
+
+        // Board sizes for opened patterns.
+        let small = GridSize.all[1], largest = GridSize.all.last!
+        check(LifeModel.boardSize(for: glider, current: small) == small, "a pattern that fits keeps the board size")
+        let wide = Pattern(name: "w", width: 398, height: 10, cells: [Cell(x: 0, y: 0), Cell(x: 397, y: 9)])
+        check(LifeModel.boardSize(for: wide, current: small) == largest, "a pattern 398 wide opens on the 400 board")
+        check(LifeModel.boardSize(for: lib("Gosper glider gun"), current: GridSize.all[0]) == GridSize.all[0], "the gun fits the smallest board")
+        let huge = Pattern(name: "h", width: 401, height: 3, cells: [Cell(x: 400, y: 0)])
+        check(LifeModel.boardSize(for: huge, current: small) == nil, "a pattern wider than 400 is refused")
+
+        // A whole frame at the top speed: step, age every cell and render the image.
+        var frameBoard = Board(width: 400, height: 300)
+        frameBoard.grid.randomize(density: 0.3, seed: 5)
+        let frameStart = Date()
+        for _ in 0..<60 {
+            frameBoard.step(rule: .conway, wrap: true)
+            _ = Renderer.image(frameBoard)
+        }
+        let frameTime = Date().timeIntervalSince(frameStart)
+        check(frameTime < 0.6, "60 full frames of 400 by 300 fit in a second (took \(String(format: "%.3f", frameTime)) s)")
+
         // Speed: the largest board at 60 generations a second has time to spare.
         var large = LifeGrid(width: 400, height: 300)
         large.randomize(density: 0.3, seed: 9)

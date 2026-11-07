@@ -317,14 +317,20 @@ struct Pattern: Equatable, Sendable {
         return Pattern(name: name, width: 0, height: 0, cells: shifted, rule: rule)
     }
 
+    /// Far past any board, with room to spare; beyond this a file is refused rather than parsed for minutes.
+    static let maxSide = 10_000
+    static let maxCells = 400 * 300
+
     enum ParseError: LocalizedError {
         case notAPattern
         case empty
+        case tooLarge
 
         var errorDescription: String? {
             switch self {
             case .notAPattern: "That is not an RLE or plain text Life pattern."
             case .empty: "That pattern has no live cells."
+            case .tooLarge: "That pattern is far larger than the biggest board."
             }
         }
     }
@@ -347,7 +353,9 @@ struct Pattern: Equatable, Sendable {
            !(body.count == 1 && body[0].allSatisfy { $0 == "o" }) {
             var cells: [Cell] = []
             for (y, line) in lines.filter({ !$0.hasPrefix("!") && !$0.hasPrefix("#") }).enumerated() {
+                guard y < maxSide, line.count < maxSide else { throw ParseError.tooLarge }
                 for (x, c) in line.enumerated() where c == "O" || c == "o" || c == "*" { cells.append(Cell(x: x, y: y)) }
+                guard cells.count <= maxCells else { throw ParseError.tooLarge }
             }
             guard let minX = cells.map(\.x).min(), let minY = cells.map(\.y).min() else { throw ParseError.empty }
             return Pattern(name: name, width: 0, height: 0, cells: cells.map { Cell(x: $0.x - minX, y: $0.y - minY) })
@@ -374,6 +382,8 @@ struct Pattern: Equatable, Sendable {
                 data += line
             }
         }
+        // Anything after the closing ! is free text by the RLE spec.
+        if let end = data.firstIndex(of: "!") { data = String(data[...end]) }
         let allowed = Set("0123456789bo$!.ABCDEFGHIJKLMNOPQRSTUVWXYZ \t")
         guard data.contains(where: { "bo$".contains($0) }) || sawHeader,
               data.allSatisfy({ allowed.contains($0) }) else { throw ParseError.notAPattern }
@@ -387,14 +397,18 @@ struct Pattern: Equatable, Sendable {
                 guard count < 100_000 else { throw ParseError.notAPattern }
             case "b", ".":
                 x += max(count, 1); count = 0
+                guard x <= maxSide else { throw ParseError.tooLarge }
             case "$":
                 y += max(count, 1); x = 0; count = 0
+                guard y < maxSide else { throw ParseError.tooLarge }
             case "!":
                 break loop
             case " ", "\t":
                 continue
             default: // o, or any multi-state letter: alive.
-                for _ in 0..<max(count, 1) { cells.append(Cell(x: x, y: y)); x += 1 }
+                let run = max(count, 1)
+                guard x + run <= maxSide, cells.count + run <= maxCells else { throw ParseError.tooLarge }
+                for _ in 0..<run { cells.append(Cell(x: x, y: y)); x += 1 }
                 count = 0
             }
         }
