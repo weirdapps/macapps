@@ -156,19 +156,23 @@ enum Solver {
 // MARK: - Grader
 
 /// Solves like a person, one technique tier at a time, and reports the hardest tier a puzzle needed:
-/// 1 singles, 2 locked candidates and pairs, 3 triples and X-Wing, 4 beyond these (needs chains or trial).
+/// 1 singles, 2 locked candidates and pairs, 3 triples, X-Wing, Swordfish and XY-Wing, 4 beyond these (chains or trial).
 enum Grader {
-    static func grade(_ puzzle: [Int]) -> Int {
+    static func grade(_ puzzle: [Int]) -> Int { logicalSolve(puzzle).level }
+
+    /// The grid as far as the techniques reach, and the hardest tier used (4 when they get stuck).
+    static func logicalSolve(_ puzzle: [Int]) -> (level: Int, grid: [Int]) {
+        guard puzzle.count == 81 else { return (4, puzzle) }
         var grid = puzzle
         var cands = (0..<81).map { Sudoku.candidates(puzzle, $0) }
         var level = 1
         while grid.contains(0) {
             if singles(&grid, &cands) { continue }
             if lockedCandidates(&cands) || subsets(&cands, size: 2) { level = max(level, 2); continue }
-            if subsets(&cands, size: 3) || xWing(&cands) { level = max(level, 3); continue }
-            return 4
+            if subsets(&cands, size: 3) || fish(&cands, size: 2) || fish(&cands, size: 3) || xyWing(&cands) { level = max(level, 3); continue }
+            return (4, grid)
         }
-        return level
+        return (level, grid)
     }
 
     private static func place(_ i: Int, _ d: Int, _ grid: inout [Int], _ cands: inout [UInt16]) {
@@ -243,24 +247,45 @@ enum Grader {
         return changed
     }
 
-    /// X-Wing on rows and on columns.
-    private static func xWing(_ cands: inout [UInt16]) -> Bool {
+    /// X-Wing (size 2) and Swordfish (size 3), on rows and on columns: when a digit sits in only `size`
+    /// positions across `size` lines, it can be removed from those positions in every other line.
+    private static func fish(_ cands: inout [UInt16], size: Int) -> Bool {
         var changed = false
         for d in 1...9 {
             let bit: UInt16 = 1 << d
             for byRow in [true, false] {
                 func cell(_ line: Int, _ k: Int) -> Int { byRow ? line * 9 + k : k * 9 + line }
                 let spots = (0..<9).map { line in (0..<9).filter { cands[cell(line, $0)] & bit != 0 } }
-                for a in 0..<9 where spots[a].count == 2 {
-                    for b in (a + 1)..<9 where spots[b] == spots[a] {
-                        for line in 0..<9 where line != a && line != b {
-                            for k in spots[a] where cands[cell(line, k)] & bit != 0 { cands[cell(line, k)] &= ~bit; changed = true }
-                        }
+                let lines = (0..<9).filter { (2...size).contains(spots[$0].count) }
+                for combo in combinations(lines, size) {
+                    let cover = Set(combo.flatMap { spots[$0] })
+                    guard cover.count == size else { continue }
+                    for line in 0..<9 where !combo.contains(line) {
+                        for k in cover where cands[cell(line, k)] & bit != 0 { cands[cell(line, k)] &= ~bit; changed = true }
                     }
                 }
             }
         }
         return changed
+    }
+
+    /// XY-Wing: a two-candidate pivot {a, b} sees pincers {a, c} and {b, c}; a cell that sees both pincers cannot be c.
+    private static func xyWing(_ cands: inout [UInt16]) -> Bool {
+        for pivot in 0..<81 where cands[pivot].nonzeroBitCount == 2 {
+            let pincers = Sudoku.peers[pivot].filter { p in
+                cands[p].nonzeroBitCount == 2 && cands[p] != cands[pivot] && (cands[p] & cands[pivot]).nonzeroBitCount == 1
+            }
+            for (n, p) in pincers.enumerated() {
+                for q in pincers[(n + 1)...] {
+                    let c = cands[p] & cands[q] & ~cands[pivot]
+                    guard c.nonzeroBitCount == 1, (cands[p] | cands[q] | cands[pivot]).nonzeroBitCount == 3 else { continue }
+                    var changed = false
+                    for j in Sudoku.peers[p] where j != q && Sudoku.isPeer(j, q) && cands[j] & c != 0 { cands[j] &= ~c; changed = true }
+                    if changed { return true }
+                }
+            }
+        }
+        return false
     }
 
     static func combinations<T>(_ items: [T], _ k: Int) -> [[T]] {
@@ -298,7 +323,7 @@ enum Difficulty: String, Codable, CaseIterable, Identifiable {
         case .easy: level == 1 && clues >= 36
         case .medium: level == 1 && clues <= 32
         case .hard: level == 2 && clues <= 28
-        case .expert: level >= 3 && clues <= 26
+        case .expert: level == 3 && clues <= 26
         }
     }
 
@@ -308,7 +333,7 @@ enum Difficulty: String, Codable, CaseIterable, Identifiable {
         case .easy: (level == 1 ? 100 : 0) + clues
         case .medium: (level == 1 ? 100 : 0) - clues
         case .hard: (level == 2 ? 200 : level == 3 ? 100 : 0) - clues
-        case .expert: level * 100 - clues
+        case .expert: (level == 3 ? 300 : level == 4 ? 200 : level * 50) - clues
         }
     }
 

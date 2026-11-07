@@ -7,6 +7,11 @@ enum SelfTest {
     /// Arto Inkala's "world's hardest", which logic alone cannot crack.
     static let inkala = "8..........36......7..9.2...5...7.......457.....1...3...1....68..85...1..9....4.."
 
+    private static func back(_ game: Game) -> Game? {
+        guard let data = try? JSONEncoder().encode(game) else { return nil }
+        return try? JSONDecoder().decode(Game.self, from: data)
+    }
+
     static func run() -> Int32 {
         var failures = 0
         var checks = 0
@@ -61,6 +66,7 @@ enum SelfTest {
                 check(Solver.countSolutions(p.givens) == 1, "\(level.title): unique solution")
                 check(Solver.solve(p.givens) == p.solution && Sudoku.isValidSolution(p.solution), "\(level.title): solution matches")
                 check(level.accepts(level: p.level, clues: p.clues), "\(level.title): graded \(p.level) with \(p.clues) clues")
+                check(Grader.logicalSolve(p.givens).grid == p.solution, "\(level.title): the grader's logic reaches the true answer")
                 check(time < level.budget + 1.5, "\(level.title): generated in \(String(format: "%.2f", time)) s")
                 print("  \(level.title): \(p.clues) clues, tier \(p.level), \(String(format: "%.2f", time)) s")
             }
@@ -100,6 +106,20 @@ enum SelfTest {
         } else {
             check(false, "save and load round trip")
         }
+        check(back(game)?.isIntact == true, "a sound save is accepted")
+        var damaged = game
+        damaged.notes = [0, 0, 0]
+        check(back(damaged)?.isIntact == false, "a save with missing notes is refused")
+        damaged = game
+        damaged.values[0] = 9
+        check(back(damaged)?.isIntact == false, "a save that changes a given is refused")
+        damaged = game
+        damaged.solution[0] = damaged.solution[1]
+        check(back(damaged)?.isIntact == false, "a save with a broken solution is refused")
+        damaged = game
+        damaged.elapsed = -5
+        check(back(damaged)?.isIntact == false, "a save with negative time is refused")
+        check((try? JSONDecoder().decode(Game.self, from: Data("{}".utf8))) == nil, "an empty save does not decode")
         var records = Records()
         check(records.add(.hard, time: 600) && !records.add(.hard, time: 700) && records.add(.hard, time: 500), "best times keep the fastest")
         check(records.solved["hard"] == 3 && records.best["hard"] == 500, "records count solves")

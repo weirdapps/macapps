@@ -378,7 +378,7 @@ struct SidePanel: View {
         let open = max(1, 81 - clues)
         return VStack(alignment: .leading, spacing: 6) {
             ProgressView(value: Double(filled - clues), total: Double(open))
-                .tint(Theme.bottom)
+                .tint(Theme.ink)
             HStack {
                 Text("\(81 - filled) cells to go").contentTransition(.numericText())
                 Spacer()

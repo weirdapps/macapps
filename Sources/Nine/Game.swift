@@ -38,6 +38,15 @@ struct Game: Codable, Equatable {
     }
 
     func isGiven(_ i: Int) -> Bool { givens[i] != 0 }
+
+    /// True when a decoded save has the right shape and agrees with itself, so a damaged file never reaches the board.
+    var isIntact: Bool {
+        guard givens.count == 81, solution.count == 81, values.count == 81, notes.count == 81,
+              Sudoku.isValidSolution(solution), elapsed.isFinite, elapsed >= 0, hints >= 0 else { return false }
+        return (0..<81).allSatisfy { i in
+            (0...9).contains(values[i]) && (givens[i] == 0 || (givens[i] == solution[i] && values[i] == givens[i]))
+        } && Solver.countSolutions(givens) == 1 && completed == (values == solution)
+    }
     var canUndo: Bool { !undoStack.isEmpty }
     var canRedo: Bool { !redoStack.isEmpty }
     var conflicts: Set<Int> { Sudoku.conflicts(values) }
@@ -194,7 +203,7 @@ final class NineModel: ObservableObject {
         if defaults.object(forKey: "showConflicts") != nil { showConflicts = defaults.bool(forKey: "showConflicts") }
         if let raw = defaults.string(forKey: "difficulty"), let d = Difficulty(rawValue: raw) { difficulty = d }
         records = Storage.load(Records.self, app: "Nine", file: "records.json") ?? Records()
-        if let saved = Storage.load(Game.self, app: "Nine", file: "game.json"), saved.values.count == 81 {
+        if let saved = Storage.load(Game.self, app: "Nine", file: "game.json"), saved.isIntact {
             game = saved
         } else {
             newGame(difficulty)
