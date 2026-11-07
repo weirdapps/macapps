@@ -181,7 +181,8 @@ struct HabitBadge: View {
             RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
                 .fill(habit.tint.color.gradient)
             if habit.iconIsSymbol {
-                Image(systemName: habit.icon)
+                // A symbol this macOS does not know (from a hand-edited file) falls back to the app's flame.
+                Image(systemName: NSImage(systemSymbolName: habit.icon, accessibilityDescription: nil) == nil ? "flame.fill" : habit.icon)
                     .font(.system(size: size * 0.48, weight: .semibold))
                     .foregroundStyle(.white)
             } else {
@@ -366,7 +367,8 @@ struct WeekCard: View {
         case .daily:
             let elapsed = model.today.n - start.n + 1
             return "\(stats.thisWeek) of \(elapsed) \(elapsed == 1 ? "day" : "days") so far"
-        case .weekly(let n):
+        case .weekly:
+            let n = habit.target.perWeek
             return stats.thisWeek >= n ? "Goal met: \(stats.thisWeek) of \(n)" : "\(stats.thisWeek) of \(n) this week"
         }
     }
@@ -427,6 +429,7 @@ struct DayCard: View {
     @State private var text = ""
     /// The habit and day the text field holds, so switching either never writes one day's note onto another.
     @State private var loaded: NoteKey?
+    @FocusState private var focused: Bool
 
     struct NoteKey: Equatable {
         let id: Habit.ID
@@ -450,6 +453,7 @@ struct DayCard: View {
                 }
                 TextField("Add a note for this day", text: $text, axis: .vertical)
                     .textFieldStyle(.plain)
+                    .focused($focused)
                     .font(.system(size: 12))
                     .lineLimit(2...3)
                     .padding(8)
@@ -463,6 +467,12 @@ struct DayCard: View {
         .onChange(of: text) {
             if let loaded { model.setNote(text, id: loaded.id, on: loaded.day) }
         }
+        // Undo or another window can change the stored note; show it unless the user is typing.
+        .onChange(of: habit.note(day)) { _, stored in
+            if !focused && stored != text { text = stored }
+        }
+        .onChange(of: focused) { model.editingNote = focused }
+        .onDisappear { model.editingNote = false }
     }
 }
 

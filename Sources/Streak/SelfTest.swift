@@ -135,6 +135,43 @@ enum SelfTest {
               created: today).iconIsSymbol, "Blank notes are dropped and icons are told apart")
         check(String(data: data ?? Data(), encoding: .utf8)?.contains("\"2026-03-01\"") == true, "Days are stored as ISO dates")
 
+        // Odd and damaged files.
+        let lenient = #"[{"name":"Walk","icon":"","tint":"mauve","target":{"weekly":{"_0":99}},"created":"2026-13-01","#
+            + #""done":["2026-02-30","2026-03-03","nope"],"notes":{"bad":"x","2026-03-03":"ok","2026-03-04":"  "}}]"#
+        let odd = try? JSONDecoder().decode([Habit].self, from: Data(lenient.utf8))
+        check(odd?.count == 1 && odd?[0].done == [d(2026, 3, 3)] && odd?[0].tint == .orange && odd?[0].icon == "flame.fill",
+              "One bad value in a habit costs that value, not the habit")
+        check(odd?[0].created == d(2026, 3, 3) && odd?[0].notes == ["2026-03-03": "ok"],
+              "A broken start date falls back to the first check-in and bad notes are dropped")
+        check(Target.weekly(0).perWeek == 1 && Target.weekly(99).perWeek == 7 && Target.weekly(99).label == "7 times a week",
+              "Weekly goals out of range are clamped to 1...7")
+        let clamped = Habit(name: "x", icon: "x", tint: .red, target: .weekly(0), created: d(2026, 1, 1))
+        check(Streaks.stats(clamped, today: d(2026, 1, 3), firstWeekday: 2).current == 0, "A goal of zero never counts empty weeks")
+
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("streak-selftest-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appendingPathComponent("habits.json")
+        let missing = HabitStore.load(file)
+        check(missing.habits == [] && missing.quarantined == nil, "No file yet starts empty")
+        try? Data("  \n".utf8).write(to: file)
+        check(HabitStore.load(file).habits == [], "An empty file starts empty")
+        try? Data("{ not json".utf8).write(to: file)
+        let unreadable = HabitStore.load(file)
+        let kept = unreadable.quarantined.flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+        check(unreadable.habits == [] && kept == "{ not json" && !FileManager.default.fileExists(atPath: file.path),
+              "An unreadable file is moved aside intact, so a later save cannot overwrite it")
+        try? data?.write(to: file)
+        check(HabitStore.load(file).habits == [habit], "A good file loads through the store")
+
+        // Backfilling a day before the habit began.
+        var floss = Habit(name: "Floss", icon: "sparkles", tint: .teal, target: .daily, created: d(2026, 3, 10))
+        floss.toggle(d(2026, 3, 8))
+        check(floss.created == d(2026, 3, 8), "Ticking a day before the start moves the start back")
+        floss.toggle(d(2026, 3, 8))
+        floss.toggle(d(2026, 3, 12))
+        check(floss.created == d(2026, 3, 8) && floss.done == [d(2026, 3, 12)], "Unticking keeps the start and later ticks leave it")
+
         print(failures == 0 ? "All \(checks) checks passed." : "\(failures) of \(checks) checks failed.")
         return failures == 0 ? 0 : 1
     }

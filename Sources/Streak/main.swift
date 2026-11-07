@@ -50,7 +50,7 @@ struct StreakCommands: Commands {
                 .disabled(model.selected == nil)
             Button("Delete Habit…") { model.confirmingDelete = true }
                 .keyboardShortcut(.delete)
-                .disabled(model.selected == nil)
+                .disabled(model.selected == nil || model.editingNote)
         }
         CommandGroup(before: .sidebar) {
             Button("Past 12 Months") { model.range = .pastYear }.keyboardShortcut("0")

@@ -96,15 +96,14 @@ enum Target: Codable, Hashable, Sendable {
     var perWeek: Int {
         switch self {
         case .daily: 7
-        case .weekly(let n): n
+        case .weekly(let n): min(7, max(1, n))
         }
     }
 
     var label: String {
         switch self {
         case .daily: "Every day"
-        case .weekly(1): "Once a week"
-        case .weekly(let n): "\(n) times a week"
+        case .weekly: perWeek == 1 ? "Once a week" : "\(perWeek) times a week"
         }
     }
 
@@ -166,8 +165,59 @@ struct Habit: Identifiable, Codable, Equatable, Sendable {
         notes[day.iso] = trimmed.isEmpty ? nil : text
     }
 
+    /// Ticking a day before the habit began backfills its history, so the start moves back to that day.
     mutating func toggle(_ day: Day) {
-        if done.contains(day) { done.remove(day) } else { done.insert(day) }
+        if done.contains(day) {
+            done.remove(day)
+        } else {
+            done.insert(day)
+            created = min(created, day)
+        }
+    }
+
+    init(name: String, icon: String, tint: Tint, target: Target, created: Day) {
+        self.name = name
+        self.icon = icon
+        self.tint = tint
+        self.target = target
+        self.created = created
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, name, icon, tint, target, created, done, notes }
+
+    /// Lenient on purpose: one odd value in a hand-edited or older file costs that value, not every habit.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        name = (try? c.decode(String.self, forKey: .name)) ?? "Habit"
+        let icon = (try? c.decode(String.self, forKey: .icon)) ?? ""
+        self.icon = icon.isEmpty ? "flame.fill" : icon
+        tint = (try? c.decode(Tint.self, forKey: .tint)) ?? .orange
+        target = (try? c.decode(Target.self, forKey: .target)) ?? .daily
+        let days = ((try? c.decode([String].self, forKey: .done)) ?? []).compactMap { Day(iso: $0) }
+        done = Set(days)
+        let start = (try? c.decode(String.self, forKey: .created)).flatMap { Day(iso: $0) }
+        let fallback = start ?? days.min() ?? Day(Date(), calendar: .current)
+        created = days.min().map { min($0, fallback) } ?? fallback
+        let raw = (try? c.decode([String: String].self, forKey: .notes)) ?? [:]
+        notes = raw.filter { Day(iso: $0.key) != nil && !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+}
+
+// MARK: - Persistence
+
+enum HabitStore {
+    /// Reads the habits file. A file that exists but cannot be read is moved aside, so a later save never
+    /// destroys it, and the new name is returned. `nil` habits means the file is unreadable and still in place.
+    static func load(_ url: URL) -> (habits: [Habit]?, quarantined: URL?) {
+        guard let data = try? Data(contentsOf: url) else { return ([], nil) }
+        if data.allSatisfy({ [0x20, 0x0A, 0x0D, 0x09].contains($0) }) { return ([], nil) }
+        if let habits = try? JSONDecoder().decode([Habit].self, from: data) { return (habits, nil) }
+        let stamp = Int(Date().timeIntervalSince1970)
+        let aside = url.deletingLastPathComponent()
+            .appendingPathComponent(url.deletingPathExtension().lastPathComponent + " (unreadable \(stamp)).json")
+        guard (try? FileManager.default.moveItem(at: url, to: aside)) != nil else { return (nil, nil) }
+        return ([], aside)
     }
 }
 
@@ -188,7 +238,7 @@ enum Streaks {
         let (current, longest): (Int, Int)
         switch habit.target {
         case .daily: (current, longest) = daily(done, today: today)
-        case .weekly(let n): (current, longest) = weekly(done, perWeek: n, today: today, firstWeekday: firstWeekday)
+        case .weekly: (current, longest) = weekly(done, perWeek: habit.target.perWeek, today: today, firstWeekday: firstWeekday)
         }
         let start = today.weekStart(firstWeekday: firstWeekday)
         let thisWeek = done.filter { $0 >= start && $0 <= today }.count
@@ -306,6 +356,8 @@ final class StreakModel: ObservableObject {
     @Published var range: HeatRange = .pastYear
     @Published var editing: EditorState?
     @Published var confirmingDelete = false
+    /// True while the day note field has focus, so ⌘⌫ deletes text there instead of asking to delete the habit.
+    @Published var editingNote = false
     @Published private(set) var today: Day
 
     let calendar: Calendar
@@ -315,11 +367,13 @@ final class StreakModel: ObservableObject {
 
     init() {
         calendar = .autoupdatingCurrent
-        persists = !Desktop.isSnapshot
         let today = Day(Date(), calendar: .autoupdatingCurrent)
         self.today = today
         selectedDay = today
-        habits = Storage.load([Habit].self, app: "Streak", file: "habits.json") ?? []
+        let loaded = HabitStore.load(Storage.url(app: "Streak", file: "habits.json"))
+        habits = loaded.habits ?? []
+        // A file that could not be read or moved aside is never written over.
+        persists = !Desktop.isSnapshot && loaded.habits != nil
         selection = habits.first?.id
         // Midnight, a clock change or a new time zone can each move "today".
         for name in [Notification.Name.NSCalendarDayChanged, .NSSystemClockDidChange, .NSSystemTimeZoneDidChange] {
@@ -469,9 +523,9 @@ struct EditorState: Identifiable {
         name = habit.name
         icon = habit.icon
         tint = habit.tint
-        if case .weekly(let n) = habit.target {
+        if case .weekly = habit.target {
             weekly = true
-            perWeek = n
+            perWeek = min(6, habit.target.perWeek)
         }
     }
 }
