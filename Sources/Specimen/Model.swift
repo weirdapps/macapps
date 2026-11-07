@@ -177,10 +177,18 @@ enum FontCatalog {
         return .system(size: size)
     }
 
-    static func familyFont(_ family: String, size: CGFloat) -> Font {
-        if let ns = NSFontManager.shared.font(withFamily: family, traits: [], weight: 5, size: size) { return Font(ns as CTFont) }
-        if let first = styles(of: family).first { return font(first.postScriptName, size: size) }
-        return .system(size: size)
+    /// The family in its own face for a sidebar row, shrunk when its line is far taller than its size (Zapfino and other
+    /// swash fonts) so every row keeps a sensible height.
+    static func sidebarFont(_ family: String, size: CGFloat = 14, maxLine: CGFloat = 21) -> (font: Font, size: CGFloat) {
+        guard let ns = NSFontManager.shared.font(withFamily: family, traits: [], weight: 5, size: size)
+            ?? styles(of: family).first.flatMap({ NSFont(name: $0.postScriptName, size: size) }) else {
+            return (.system(size: size - 1), size - 1)
+        }
+        let line = ns.ascender - ns.descender
+        guard line > maxLine, line > 0 else { return (Font(ns as CTFont), size) }
+        let fitted = max(10, (size * maxLine / line).rounded(.down))
+        let scaled = NSFont(descriptor: ns.fontDescriptor, size: fitted) ?? ns
+        return (Font(scaled as CTFont), fitted)
     }
 
     static let glyphRanges: [ClosedRange<UInt32>] = [
@@ -230,6 +238,30 @@ struct SpecimenPrefs: Codable, Equatable {
     var darkSample = false
     var favourites: [String] = []
     var pinned: [String] = []
+
+    init(sampleText: String = FontCatalog.defaultSample, size: Double = 36, darkSample: Bool = false,
+         favourites: [String] = [], pinned: [String] = []) {
+        self.sampleText = sampleText
+        self.size = size
+        self.darkSample = darkSample
+        self.favourites = favourites
+        self.pinned = pinned
+    }
+
+    /// Tolerant decoding: a missing or damaged key keeps its default instead of throwing away every preference,
+    /// and values from a hand-edited or older file are brought back into range.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = SpecimenPrefs()
+        sampleText = (try? c.decodeIfPresent(String.self, forKey: .sampleText)) ?? defaults.sampleText
+        let raw = (try? c.decodeIfPresent(Double.self, forKey: .size)) ?? defaults.size
+        size = raw.isFinite ? FontCatalog.clampSize(raw) : defaults.size
+        darkSample = (try? c.decodeIfPresent(Bool.self, forKey: .darkSample)) ?? defaults.darkSample
+        favourites = (try? c.decodeIfPresent([String].self, forKey: .favourites)) ?? []
+        var seen = Set<String>()
+        pinned = Array(((try? c.decodeIfPresent([String].self, forKey: .pinned)) ?? []).filter { seen.insert($0).inserted }
+            .prefix(FontCatalog.maxPinned))
+    }
 }
 
 // MARK: - Model
@@ -252,6 +284,7 @@ final class FontModel: ObservableObject {
 
     private let persists: Bool
     private var styleCache: [String: [FontStyle]] = [:]
+    private var glyphCache: [String: [Unicode.Scalar]] = [:]
     private var toastTask: Task<Void, Never>?
 
     init(prefs: SpecimenPrefs, families: [FontFamily], persists: Bool) {
@@ -307,6 +340,14 @@ final class FontModel: ObservableObject {
         let styles = FontCatalog.styles(of: family)
         styleCache[family] = styles
         return styles
+    }
+
+    /// Covered characters for a style, worked out once per font so dragging the size slider stays smooth.
+    func glyphs(of postScriptName: String) -> [Unicode.Scalar] {
+        if let cached = glyphCache[postScriptName] { return cached }
+        let scalars = NSFont(name: postScriptName, size: 24).map { FontCatalog.glyphScalars(for: $0 as CTFont) } ?? []
+        glyphCache[postScriptName] = scalars
+        return scalars
     }
 
     /// The style the waterfall and glyph views use: the one picked, else Regular.

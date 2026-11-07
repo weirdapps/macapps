@@ -74,6 +74,18 @@ enum SelfTest {
         let decoded = (try? JSONEncoder().encode(prefs)).flatMap { try? JSONDecoder().decode(SpecimenPrefs.self, from: $0) }
         check("prefs round trip", decoded == prefs)
 
+        // Damaged or older preference files keep what they can instead of resetting everything.
+        func decode(_ json: String) -> SpecimenPrefs? { try? JSONDecoder().decode(SpecimenPrefs.self, from: Data(json.utf8)) }
+        let partial = decode(#"{"favourites":["Didot"]}"#)
+        check("prefs with missing keys decode", partial?.favourites == ["Didot"] && partial?.size == SpecimenPrefs().size
+              && partial?.sampleText == FontCatalog.defaultSample)
+        check("prefs with a wrong type keep the rest", decode(#"{"size":"big","darkSample":true}"#).map { $0.darkSample && $0.size == 36 } == true)
+        check("prefs size clamps high", decode(#"{"size":900}"#)?.size == FontCatalog.sizeRange.upperBound)
+        check("prefs size clamps low", decode(#"{"size":-4}"#)?.size == FontCatalog.sizeRange.lowerBound)
+        check("prefs pins deduped and capped",
+              decode(#"{"pinned":["A","A","B","C","D","E"]}"#)?.pinned == ["A", "B", "C", "D"])
+        check("empty prefs object decodes", decode("{}") == SpecimenPrefs())
+
         // Real fonts on this Mac.
         let installed = FontCatalog.installedFamilies()
         check("installed families found", installed.count > 20)
@@ -94,6 +106,13 @@ enum SelfTest {
         check("glyph grid covers Latin", glyphs.contains("A") && glyphs.contains("z") && glyphs.count > 150)
         check("glyph grid skips spaces and controls", !glyphs.contains(" ") && !glyphs.contains("\u{7}") && !glyphs.contains("\u{A0}"))
         check("glyph grid respects limit", FontCatalog.glyphScalars(for: helvetica, limit: 50).count == 50)
+        let cached = model.glyphs(of: "Helvetica")
+        check("glyph cache matches a fresh scan", cached == glyphs && model.glyphs(of: "Helvetica") == cached)
+        check("unknown font has no glyphs", model.glyphs(of: "No-Such-Font-PS").isEmpty)
+        check("plain font keeps its sidebar size", FontCatalog.sidebarFont("Helvetica").size == 14)
+        if installed.contains("Zapfino"), let z = NSFont(name: "Zapfino", size: FontCatalog.sidebarFont("Zapfino").size) {
+            check("swash font shrinks for the sidebar", z.pointSize < 14 && z.pointSize >= 10)
+        }
         check("code label", FontCatalog.codeLabel("A") == "U+0041" && FontCatalog.codeLabel("\u{1F600}") == "U+1F600")
 
         print("\(passed) passed, \(failed) failed")

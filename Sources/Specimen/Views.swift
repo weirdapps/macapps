@@ -94,8 +94,9 @@ struct FamilyRow: View {
     var body: some View {
         HStack(spacing: 6) {
             Text(family.name)
-                .font(family.canPreviewName ? FontCatalog.familyFont(family.name, size: 14) : .system(size: 13))
+                .font(family.canPreviewName ? FontCatalog.sidebarFont(family.name).font : .system(size: 13))
                 .lineLimit(1)
+                .frame(height: 22)
             Spacer(minLength: 4)
             if pinned {
                 Image(systemName: "pin.fill").font(.system(size: 9)).foregroundStyle(.secondary)
@@ -165,14 +166,14 @@ struct DetailToolbar: ToolbarContent {
             } label: {
                 Label("Favourite", systemImage: name.map { model.favourites.contains($0) } == true ? "star.fill" : "star")
             }
-            .help("Add to favourites (⌘D)")
+            .help(name.map { model.favourites.contains($0) } == true ? "Remove from favourites (⌘D)" : "Add to favourites (⌘D)")
             .disabled(name == nil)
             Button {
                 if let name { model.togglePin(name) }
             } label: {
                 Label("Pin", systemImage: name.map { model.pinned.contains($0) } == true ? "pin.fill" : "pin")
             }
-            .help("Pin for comparison, up to four (⇧⌘P)")
+            .help(name.map { model.pinned.contains($0) } == true ? "Unpin from comparison (⇧⌘P)" : "Pin for comparison, up to four (⇧⌘P)")
             .disabled(name == nil)
             Button {
                 withAnimation(.snappy) { model.darkSample.toggle() }
@@ -206,7 +207,7 @@ struct Header: View {
             } else if let name = model.selection {
                 let family = model.family(named: name)
                 Text(name)
-                    .font(family?.canPreviewName == true ? FontCatalog.familyFont(name, size: 28) : .system(size: 26, weight: .bold, design: .rounded))
+                    .font(family?.canPreviewName == true ? FontCatalog.sidebarFont(name, size: 28, maxLine: 40).font : .system(size: 26, weight: .bold, design: .rounded))
                     .lineLimit(1)
                     .truncationMode(.tail)
                 HStack(spacing: 6) {
@@ -264,7 +265,7 @@ struct ControlBar: View {
             if model.mode != .waterfall {
                 HStack(spacing: 8) {
                     Image(systemName: "textformat.size.smaller").foregroundStyle(.secondary)
-                    Slider(value: $model.size, in: FontCatalog.sizeRange)
+                    Slider(value: Binding(get: { model.size }, set: { model.size = $0.rounded() }), in: FontCatalog.sizeRange)
                         .frame(width: 150)
                         .help("Sample size")
                     Image(systemName: "textformat.size.larger").foregroundStyle(.secondary)
@@ -390,7 +391,7 @@ struct GlyphGrid: View {
     var body: some View {
         let style = model.currentStyle(of: family)
         let ps = style?.postScriptName ?? family
-        let scalars = (NSFont(name: ps, size: 24)).map { FontCatalog.glyphScalars(for: $0 as CTFont) } ?? []
+        let scalars = model.glyphs(of: ps)
         let glyphSize = min(max(model.size, 18), 72)
         let cell = glyphSize * 1.6 + 8
         if scalars.isEmpty {
@@ -485,7 +486,7 @@ struct CompareColumn: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(family).font(.system(size: 13, weight: .semibold)).foregroundStyle(ink).lineLimit(1)
-                    Text(model.family(named: family)?.category.title ?? "")
+                    Text(model.family(named: family).map { $0.isMonospaced ? "Monospaced" : $0.category.title } ?? "")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 4)
@@ -535,7 +536,17 @@ struct SearchFocus: ViewModifier {
                 .searchFocused($focused)
                 .onChange(of: token) { focused = true }
         } else {
-            content
+            // macOS 14 has no searchFocused: find the sidebar's search field and give it focus directly.
+            content.onChange(of: token) {
+                guard let window = NSApp.keyWindow ?? NSApp.mainWindow, let root = window.contentView?.superview else { return }
+                if let field = Self.searchField(in: root) { window.makeFirstResponder(field) }
+            }
         }
+    }
+
+    private static func searchField(in view: NSView) -> NSSearchField? {
+        if let field = view as? NSSearchField { return field }
+        for sub in view.subviews { if let found = searchField(in: sub) { return found } }
+        return nil
     }
 }
