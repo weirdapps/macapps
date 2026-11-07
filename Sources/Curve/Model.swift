@@ -12,6 +12,8 @@ struct Viewport: Codable, Equatable {
 
     static let minScale = 1e-9
     static let maxScale = 1e7
+    /// How far from the origin the centre may go, so labels and samples keep their precision.
+    static let maxCenter = 1e9
 
     func worldX(_ sx: Double, width: Double) -> Double { centerX + (sx - width / 2) * scale }
     func worldY(_ sy: Double, height: Double) -> Double { centerY + (height / 2 - sy) * scale }
@@ -21,14 +23,24 @@ struct Viewport: Codable, Equatable {
     /// Zooms by `factor` (above 1 zooms in) keeping the world point under `anchor` fixed.
     mutating func zoom(by factor: Double, at anchor: CGPoint, in size: CGSize) {
         let wx = worldX(anchor.x, width: size.width), wy = worldY(anchor.y, height: size.height)
+        guard factor.isFinite, factor > 0 else { return }
         scale = min(max(scale / factor, Viewport.minScale), Viewport.maxScale)
         centerX = wx - (anchor.x - size.width / 2) * scale
         centerY = wy - (size.height / 2 - anchor.y) * scale
+        self = sanitized
     }
 
     mutating func pan(by delta: CGSize) {
         centerX -= delta.width * scale
         centerY += delta.height * scale
+        self = sanitized
+    }
+
+    /// A usable copy of a viewport that may come from a damaged file: finite, positive scale, centre in range.
+    var sanitized: Viewport {
+        func center(_ v: Double) -> Double { v.isFinite ? min(max(v, -Viewport.maxCenter), Viewport.maxCenter) : 0 }
+        let s = scale.isFinite && scale > 0 ? min(max(scale, Viewport.minScale), Viewport.maxScale) : Viewport().scale
+        return Viewport(centerX: center(centerX), centerY: center(centerY), scale: s)
     }
 
     /// The default view: the origin in the middle and x from -10 to 10.
@@ -232,6 +244,15 @@ enum Format {
     /// Typographic minus for negative numbers.
     static func minus(_ s: String) -> String { s.replacingOccurrences(of: "-", with: "\u{2212}") }
 
+    /// The multiples of `step` between `lo` and `hi`, computed from integers so a long run never stalls on rounding.
+    /// Empty when there would be more than `limit` of them.
+    static func multiples(of step: Double, from lo: Double, to hi: Double, limit: Int = 1000) -> [Double] {
+        guard step > 0, step.isFinite, lo.isFinite, hi.isFinite, hi >= lo else { return [] }
+        let first = (lo / step).rounded(.up), last = (hi / step).rounded(.down)
+        guard last >= first, last - first < Double(limit) else { return [] }
+        return (0...Int(last - first)).map { (first + Double($0)) * step }
+    }
+
     /// Grid spacing in world units: 1, 2 or 5 times a power of ten, at least `minPoints` apart on screen.
     static func gridStep(scale: Double, minPoints: Double) -> Double {
         let raw = scale * minPoints
@@ -303,7 +324,7 @@ final class CurveModel: ObservableObject {
         ]
         if let saved {
             for p in Parameter.allCases { parameters[p] = saved.parameters[p.rawValue] ?? 1 }
-            viewport = saved.viewport
+            viewport = saved.viewport.sanitized
             showGrid = saved.showGrid
             showPoints = saved.showPoints
         }
@@ -449,7 +470,10 @@ final class CurveModel: ObservableObject {
     func keyPoints(for curves: [Curve]) -> [KeyPoint] {
         guard showPoints, !curves.isEmpty else { return [] }
         let lo = viewport.worldX(0, width: canvasSize.width), hi = viewport.worldX(canvasSize.width, width: canvasSize.width)
+        // Analysis numbers curves by their place among the plotted ones; report them by function index instead,
+        // which is what Curve.index holds, so a hidden function above does not shift colours.
         return Analysis.keyPoints(curves.map(\.node), vars: variables, from: lo, to: hi, tolerance: viewport.scale * 0.5)
+            .map { p in KeyPoint(kind: p.kind, x: p.x, y: p.y, curves: p.curves.map { curves[$0].index }) }
     }
 
     // MARK: Export

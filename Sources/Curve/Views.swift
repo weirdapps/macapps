@@ -235,25 +235,25 @@ struct GraphPane: View {
                 }
                 if let p = highlighted {
                     PointLabel(point: p, functions: model.functions)
-                        .position(x: model.viewport.screenX(p.x, width: size.width),
-                                  y: model.viewport.screenY(p.y, height: size.height) - 24)
+                        .position(x: min(max(model.viewport.screenX(p.x, width: size.width), 90), size.width - 90),
+                                  y: max(model.viewport.screenY(p.y, height: size.height) - 24, 16))
+                        .allowsHitTesting(false)
+                }
+                if !curves.isEmpty {
+                    // Uses the points already found for this frame rather than searching again.
+                    Text(summary(points))
+                        .font(.system(size: 11, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(.regularMaterial, in: Capsule())
+                        .padding(12)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                         .allowsHitTesting(false)
                 }
             }
             .onAppear { model.canvasSize = size }
             .onChange(of: size) { _, value in model.canvasSize = value }
-        }
-        .overlay(alignment: .bottomLeading) {
-            if !model.curves.isEmpty {
-                Text(summary)
-                    .font(.system(size: 11, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(.regularMaterial, in: Capsule())
-                    .padding(12)
-                    .allowsHitTesting(false)
-            }
         }
         .overlay(alignment: .bottom) {
             if let url = model.exported {
@@ -289,8 +289,7 @@ struct GraphPane: View {
         }
     }
 
-    private var summary: String {
-        let points = model.keyPoints(for: model.curves)
+    private func summary(_ points: [KeyPoint]) -> String {
         guard model.showPoints else { return "Drag to pan, scroll or pinch to zoom" }
         let roots = points.filter { $0.kind == .root }.count
         let hits = points.count - roots
@@ -396,19 +395,15 @@ struct GraphCanvas: View {
 
             func lines(every s: Double, color: Color) {
                 var path = Path()
-                var x = (x0 / s).rounded(.down) * s
-                while x <= x1 {
+                for x in Format.multiples(of: s, from: x0, to: x1) {
                     let sx = v.screenX(x, width: w).rounded() + 0.5
                     path.move(to: CGPoint(x: sx, y: 0))
                     path.addLine(to: CGPoint(x: sx, y: h))
-                    x += s
                 }
-                var y = (y0 / s).rounded(.down) * s
-                while y <= y1 {
+                for y in Format.multiples(of: s, from: y0, to: y1) {
                     let sy = v.screenY(y, height: h).rounded() + 0.5
                     path.move(to: CGPoint(x: 0, y: sy))
                     path.addLine(to: CGPoint(x: w, y: sy))
-                    y += s
                 }
                 ctx.stroke(path, with: .color(color), lineWidth: 1)
             }
@@ -433,8 +428,7 @@ struct GraphCanvas: View {
             let labelColor = ink.opacity(0.5)
             let font = Font.system(size: 10.5, weight: .medium).monospacedDigit()
             let labelY = min(max(axisY + 5, 4), h - 18)
-            var x = (x0 / step).rounded(.up) * step
-            while x <= x1 {
+            for x in Format.multiples(of: step, from: x0, to: x1) {
                 if abs(x) > step * 1e-6 {
                     let sx = v.screenX(x, width: w)
                     if sx > 14 && sx < w - 14 {
@@ -442,11 +436,9 @@ struct GraphCanvas: View {
                                  at: CGPoint(x: sx, y: labelY), anchor: .top)
                     }
                 }
-                x += step
             }
             let labelX = min(max(axisX - 6, 34), w - 4)
-            var y = (y0 / step).rounded(.up) * step
-            while y <= y1 {
+            for y in Format.multiples(of: step, from: y0, to: y1) {
                 if abs(y) > step * 1e-6 {
                     let sy = v.screenY(y, height: h)
                     if sy > 10 && sy < h - 10 {
@@ -454,7 +446,6 @@ struct GraphCanvas: View {
                                  at: CGPoint(x: labelX, y: sy), anchor: .trailing)
                     }
                 }
-                y += step
             }
             if axisX > 10 && axisX < w - 10 && axisY > 4 && axisY < h - 18 {
                 ctx.draw(Text("0").font(font).foregroundColor(labelColor), at: CGPoint(x: axisX - 6, y: axisY + 5),

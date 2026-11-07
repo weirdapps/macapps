@@ -115,6 +115,38 @@ enum SelfTest {
         check("saved state round trip", decoded?.functions == state.functions && decoded?.viewport == v
               && decoded?.parameters["a"] == 0.5 && decoded?.showGrid == false)
 
+        // Regressions found in review.
+        check("(-8)^(2/3) is 4", near("(-8)^(2/3)", 4) && near("(-32)^0.2", -2))
+        check("even roots of negatives stay undefined", calc("(-4)^(1/2)")?.isNaN == true && calc("(-4)^0.25")?.isNaN == true)
+        check("tiny exponent of a negative does not trap", calc("(-2)^(0.00000000000000000001)")?.isFinite == true)
+        let deep = String(repeating: "(", count: 20000) + "x" + String(repeating: ")", count: 20000)
+        check("very deep nesting is refused, not a crash", rejects(deep) && rejects(String(repeating: "-", count: 50000) + "x"))
+        check("a long but sane expression still parses", near(Array(repeating: "x", count: 150).joined(separator: "+"), 150, x: 1))
+        check("2.3.4 is a bad number", rejects("2.3.4") && near("1.5", 1.5))
+        check("multiples of a step", Format.multiples(of: 1, from: -2.5, to: 2.5) == [-2, -1, 0, 1, 2]
+              && Format.multiples(of: 0.5, from: 0, to: 1) == [0, 0.5, 1])
+        check("multiples never stall far from the origin",
+              Format.multiples(of: 1e-7, from: 1e12, to: 1e12 + 1).isEmpty
+              && Format.multiples(of: 1e-7, from: 1e12, to: 1e12 + 1e-5).count <= 1000)
+        check("multiples of a bad step are empty", Format.multiples(of: 0, from: 0, to: 1).isEmpty
+              && Format.multiples(of: .nan, from: 0, to: 1).isEmpty && Format.multiples(of: 1, from: .nan, to: 1).isEmpty)
+        let broken = Viewport(centerX: .nan, centerY: .infinity, scale: 0).sanitized
+        check("a damaged saved viewport is repaired", broken.centerX == 0 && broken.centerY == 0 && broken.scale > 0)
+        var far = Viewport()
+        far.pan(by: CGSize(width: 1e15, height: -1e15))
+        check("panning stops at the edge of precision", abs(far.centerX) <= Viewport.maxCenter && abs(far.centerY) <= Viewport.maxCenter)
+        var unchanged = Viewport()
+        unchanged.zoom(by: 0, at: .zero, in: CGSize(width: 100, height: 100))
+        unchanged.zoom(by: -2, at: .zero, in: CGSize(width: 100, height: 100))
+        check("zoom ignores a zero or negative factor", unchanged == Viewport())
+        MainActor.assumeIsolated {
+            let model = CurveModel(functions: [GraphFunction(expression: "x", color: 0, isVisible: false),
+                                               GraphFunction(expression: "x - 1", color: 1)], persists: false)
+            let points = model.keyPoints(for: model.curves)
+            check("key points name the function, not its place among visible curves",
+                  points.count == 1 && points[0].curves == [1] && abs(points[0].x - 1) < 1e-9)
+        }
+
         print("\(passed) passed, \(failed) failed")
         return failed == 0 ? 0 : 1
     }

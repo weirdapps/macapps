@@ -68,13 +68,15 @@ indirect enum Node: Equatable {
         }
     }
 
-    /// `pow`, plus real odd roots of negative numbers: (-8)^(1/3) is -2, as on a graphing calculator.
+    /// `pow`, plus real values for negative bases raised to fractions with an odd denominator, as on a graphing
+    /// calculator: (-8)^(1/3) is -2 and (-8)^(2/3) is 4.
     static func power(_ base: Double, _ exponent: Double) -> Double {
-        if base < 0, exponent.rounded() != exponent, exponent.isFinite {
-            let inverse = 1 / exponent
-            let odd = inverse.rounded()
-            if Swift.abs(inverse - odd) < 1e-9, Int(odd) % 2 != 0 {
-                return -Foundation.pow(-base, exponent)
+        if base < 0, exponent.isFinite, exponent.rounded() != exponent {
+            for q in stride(from: 3, through: 99, by: 2) {
+                let p = exponent * Double(q)
+                guard Swift.abs(p - p.rounded()) < 1e-9 else { continue }
+                let magnitude = Foundation.pow(-base, exponent)
+                return p.rounded().truncatingRemainder(dividingBy: 2) == 0 ? magnitude : -magnitude
             }
         }
         return Foundation.pow(base, exponent)
@@ -102,6 +104,7 @@ enum Token: Equatable {
 }
 
 enum Parser {
+    static let maxTokens = 400
     static let constants: [String: Double] = ["pi": .pi, "π": .pi, "e": M_E]
 
     /// Every name the lexer knows, longest first, so "asin" wins over "a" then "sin" and "exp" over "e" then "x".
@@ -117,6 +120,8 @@ enum Parser {
         }
         let tokens = try tokenize(text)
         guard !tokens.isEmpty else { throw ParseError(message: "Type a function of x") }
+        // Deeply nested input would overflow the stack of the recursive parser and evaluator.
+        guard tokens.count <= maxTokens else { throw ParseError(message: "This expression is too long") }
         var parser = TokenStream(tokens: tokens)
         let node = try parser.expression()
         if let extra = parser.peek {
@@ -139,7 +144,10 @@ enum Parser {
                     if chars[j] == "." { seenDot = true }
                     j += 1
                 }
-                guard let value = Double(String(chars[i..<j])) else { throw ParseError(message: "Bad number") }
+                // A second decimal point, as in 2.3.4, is a typo rather than 2.3 times 0.4.
+                guard let value = Double(String(chars[i..<j])), j >= chars.count || chars[j] != "." else {
+                    throw ParseError(message: "Bad number")
+                }
                 tokens.append(.number(value))
                 i = j
                 continue
