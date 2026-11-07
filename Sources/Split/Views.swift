@@ -37,6 +37,7 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 820, minHeight: 500)
+        .tint(Theme.teal)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button { model.sheet = .newExpense } label: { Label("Add Expense", systemImage: "plus") }
@@ -540,8 +541,17 @@ struct GroupEditor: View {
         _members = State(initialValue: group?.members ?? [])
     }
 
-    private var cleanMembers: [Member] {
-        members.map { Member(id: $0.id, name: $0.name.trimmingCharacters(in: .whitespaces)) }.filter { !$0.name.isEmpty }
+    /// The members to save. A blank name drops a new or uninvolved person, but someone who is part of expenses
+    /// or payments keeps their old name, so clearing the field can never orphan their share of the books.
+    private var cleanMembers: [Member] { Self.clean(members, original: original) }
+
+    static func clean(_ members: [Member], original: SplitGroup?) -> [Member] {
+        members.compactMap { m in
+            let name = m.name.trimmingCharacters(in: .whitespaces)
+            if !name.isEmpty { return Member(id: m.id, name: name) }
+            if let old = original?.member(m.id), original?.isInvolved(m.id) == true { return old }
+            return nil
+        }
     }
     private var valid: Bool { !name.trimmingCharacters(in: .whitespaces).isEmpty && cleanMembers.count >= 2 }
     private var codes: [String] { Self.currencies.contains(currency) ? Self.currencies : [currency] + Self.currencies }

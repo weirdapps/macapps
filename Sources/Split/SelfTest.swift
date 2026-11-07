@@ -33,7 +33,14 @@ enum SelfTest {
         check(Ledger.parseAmount("1,234.56") == Decimal(string: "1234.56"), "parse 1,234.56")
         check(Ledger.parseAmount("1.234,56") == Decimal(string: "1234.56"), "parse 1.234,56")
         check(Ledger.parseAmount("€ 7") == 7, "parse with a currency symbol")
-        check(Ledger.parseAmount("1,500") == 1500, "parse a thousands comma")
+        let us = Locale(identifier: "en_US"), gr = Locale(identifier: "el_GR")
+        check(Ledger.parseAmount("1,500", locale: us) == 1500, "parse a thousands comma in the US")
+        check(Ledger.parseAmount("1,500", locale: gr) == Decimal(string: "1.5"), "a Greek 1,500 is one and a half")
+        check(Ledger.parseAmount("1.500", locale: gr) == 1500, "a Greek 1.500 is fifteen hundred")
+        check(Ledger.parseAmount("1.500", locale: us) == Decimal(string: "1.5"), "a US 1.500 is one and a half")
+        check(Ledger.parseAmount(",500", locale: us) == Decimal(string: "0.5"), "a leading separator is a decimal point")
+        check(Ledger.parseAmount("99999999999999999999999") == nil, "absurdly large amounts are rejected")
+        check(Ledger.parseAmount("١٢") == nil, "non-ASCII digits are not misread")
         check(Ledger.parseAmount("") == nil && Ledger.parseAmount("abc") == nil && Ledger.parseAmount("-3") == nil,
               "reject empty, junk and negative amounts")
 
@@ -68,6 +75,28 @@ enum SelfTest {
         check(Ledger.shares(of: stale, digits: 2).values.reduce(0, +) == 9000, "exact amounts that no longer add up keep the total")
         let yen = Expense(title: "Ramen", amount: 1000, payer: a, date: .now, portions: [a, b, c].map { Portion(member: $0, value: 1) })
         check(Ledger.shares(of: yen, digits: 0).values.sorted() == [333, 333, 334], "yen have no cents")
+
+        // Stored portions that cannot cover the amount still balance the books.
+        let zeroExact = Expense(title: "Odd", amount: 30, payer: a, date: .now, mode: .exact,
+                                portions: [Portion(member: b, value: 0), Portion(member: c, value: 0)])
+        check(Ledger.shares(of: zeroExact, digits: 2) == [b: 1500, c: 1500], "exact amounts of zero fall back to an equal split")
+        let zeroShares = Expense(title: "Odd", amount: 10, payer: a, date: .now, mode: .shares,
+                                 portions: [Portion(member: b, value: 0), Portion(member: c, value: 0)])
+        check(Ledger.shares(of: zeroShares, digits: 2).values.reduce(0, +) == 1000, "zero shares everywhere still cost the amount")
+        let nobody = Expense(title: "Odd", amount: 10, payer: a, date: .now, portions: [])
+        check(Ledger.shares(of: nobody, digits: 2) == [a: 1000], "an expense with nobody sharing falls on the payer")
+        var oddGroup = SplitGroup(name: "Odd", currency: "EUR", members: [Member(id: a, name: "A"), Member(id: b, name: "B"),
+                                                                           Member(id: c, name: "C")])
+        oddGroup.expenses = [zeroExact, zeroShares, nobody]
+        check(Ledger.balances(oddGroup).values.reduce(0, +) == 0, "odd stored expenses keep balances at zero sum")
+
+        // Clearing an involved member's name in the group editor must not drop them.
+        let involved = Demo.groups[0]
+        let blanked = involved.members.map { Member(id: $0.id, name: $0.id == a ? "  " : $0.name) }
+        let kept = GroupEditor.clean(blanked, original: involved)
+        check(kept.count == involved.members.count && kept.first?.name == "Anna", "a blank name keeps an involved member")
+        let fresh = GroupEditor.clean([Member(name: "Zoe"), Member(name: " ")], original: nil)
+        check(fresh.map(\.name) == ["Zoe"], "a blank new member is dropped")
 
         // Balances and settling.
         let demo = Demo.groups[0]
@@ -122,11 +151,31 @@ enum SelfTest {
             check(false, "persistence: \(error)")
         }
 
+        // A file that cannot be read is kept aside, never overwritten.
+        do {
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("split-selftest-\(UUID())")
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let file = dir.appendingPathComponent("groups.json")
+            check(SplitModel.loadSaved(at: file).isEmpty, "no saved file loads as no groups")
+            try JSONEncoder().encode([demo]).write(to: file)
+            check(SplitModel.loadSaved(at: file) == [demo], "a saved file loads back")
+            try Data("{ not json".utf8).write(to: file)
+            check(SplitModel.loadSaved(at: file).isEmpty, "a damaged file loads as empty")
+            let left = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            check(!left.contains("groups.json") && left.contains { $0.hasPrefix("groups.unreadable-") },
+                  "a damaged file is moved aside so it is never overwritten")
+        } catch {
+            check(false, "damaged file: \(error)")
+        }
+
         // Export.
         check(Export.csvField("Dinner, \"big\" fish") == "\"Dinner, \"\"big\"\" fish\"", "CSV quoting")
         let csv = Export.csv(demo).split(separator: "\n")
         check(csv.count == 1 + demo.expenses.count + demo.payments.count, "CSV has a row per expense and payment")
         check(csv.first == "Date,Type,Description,Paid by,Amount,Currency,Split,Anna,Ben,Chloe,Dev", "CSV header")
+        check(csv.contains { $0.hasPrefix("2026-10-03,Expense,Apartment in Alfama,Anna,612.00,EUR,") }, "CSV amounts keep the currency's digits")
+        check(Export.fileName("Rent 10/2026: flat") == "Rent 10-2026- flat" && Export.fileName("  ") == "Split", "export file names are safe")
         let text = Export.text(demo)
         check(text.contains("Settle up") && text.contains(" pays ") && text.contains("Lisbon trip"), "text summary")
         check(Export.text(settled).contains("Everyone is settled up."), "text summary when settled")

@@ -140,7 +140,10 @@ struct SplitGroup: Identifiable, Codable, Hashable {
     func member(_ id: UUID) -> Member? { members.first { $0.id == id } }
     func name(_ id: UUID) -> String { member(id)?.name ?? "Someone" }
     func colorIndex(_ id: UUID) -> Int { members.firstIndex { $0.id == id } ?? 0 }
-    var totalMinor: Int { expenses.reduce(0) { $0 + Ledger.minor($1.amount, digits: digits) } }
+    var totalMinor: Int {
+        let d = digits
+        return expenses.reduce(0) { $0 + Ledger.minor($1.amount, digits: d) }
+    }
 
     /// True when the member appears in any expense or payment, so removing them would break the books.
     func isInvolved(_ id: UUID) -> Bool {
@@ -245,28 +248,39 @@ enum Ledger {
         let seed = e.id.uuidString
         switch e.mode {
         case .equal:
-            return allocate(total: total, weights: e.portions.map { ($0.member, 1) }, seed: seed)
+            return balanced(allocate(total: total, weights: e.portions.map { ($0.member, 1) }, seed: seed), e, total)
         case .shares:
-            return allocate(total: total, weights: e.portions.map { ($0.member, $0.value) }, seed: seed)
+            return balanced(allocate(total: total, weights: e.portions.map { ($0.member, $0.value) }, seed: seed), e, total)
         case .exact:
             let exact = e.portions.map { ($0.member, minor($0.value, digits: digits)) }
             if exact.reduce(0, { $0 + $1.1 }) == total {
                 return Dictionary(exact, uniquingKeysWith: +)
             }
             // Amounts that no longer add up (an edited total): keep their proportions so the books still balance.
-            return allocate(total: total, weights: exact.map { ($0.0, Decimal($0.1)) }, seed: seed)
+            return balanced(allocate(total: total, weights: exact.map { ($0.0, Decimal($0.1)) }, seed: seed), e, total)
         }
+    }
+
+    /// Whatever the stored portions say, an expense must cost its participants exactly its amount, or the books
+    /// stop summing to zero. With no usable weights it falls back to an equal split, and with nobody at all the
+    /// payer carries it alone.
+    private static func balanced(_ parts: [UUID: Int], _ e: Expense, _ total: Int) -> [UUID: Int] {
+        if parts.values.reduce(0, +) == total { return parts }
+        let ids = e.portions.map(\.member)
+        if ids.isEmpty { return total == 0 ? [:] : [e.payer: total] }
+        return allocate(total: total, weights: ids.map { ($0, 1) }, seed: e.id.uuidString)
     }
 
     /// Net balance per member in minor units: positive gets money back, negative owes. Sums to zero.
     static func balances(_ g: SplitGroup) -> [UUID: Int] {
+        let digits = g.digits
         var net = Dictionary(g.members.map { ($0.id, 0) }, uniquingKeysWith: +)
         for e in g.expenses {
-            net[e.payer, default: 0] += minor(e.amount, digits: g.digits)
-            for (id, owed) in shares(of: e, digits: g.digits) { net[id, default: 0] -= owed }
+            net[e.payer, default: 0] += minor(e.amount, digits: digits)
+            for (id, owed) in shares(of: e, digits: digits) { net[id, default: 0] -= owed }
         }
         for p in g.payments {
-            let m = minor(p.amount, digits: g.digits)
+            let m = minor(p.amount, digits: digits)
             net[p.from, default: 0] += m
             net[p.to, default: 0] -= m
         }
@@ -298,9 +312,15 @@ enum Ledger {
         settle(balances(g), order: g.members.map(\.id))
     }
 
-    /// Lenient amount entry: "12.50", "12,50", "1,234.56", "1.234,56", "€ 7". Nil for empty, negative or junk.
-    static func parseAmount(_ text: String) -> Decimal? {
-        var s = text.filter { $0.isNumber || $0 == "." || $0 == "," || $0 == "-" }
+    /// The largest amount accepted, in major units, so minor-unit sums can never overflow.
+    static let maxAmount: Decimal = 1_000_000_000_000
+
+    /// Lenient amount entry: "12.50", "12,50", "1,234.56", "1.234,56", "€ 7". A lone separator followed by exactly
+    /// three digits ("1,500", "1.500") is read as grouping only when it is the locale's grouping separator, so a
+    /// Greek or German "1,500" is one and a half and an American "1,500" is fifteen hundred. Nil for empty,
+    /// negative, junk or absurdly large amounts.
+    static func parseAmount(_ text: String, locale: Locale = .current) -> Decimal? {
+        var s = text.filter { $0.isASCII && ($0.isNumber || $0 == "." || $0 == "," || $0 == "-") }
         guard !s.isEmpty, !s.contains("-") else { return nil }
         let dots = s.filter { $0 == "." }.count, commas = s.filter { $0 == "," }.count
         if dots > 0 && commas > 0 {
@@ -309,11 +329,15 @@ enum Ledger {
             s = s.replacingOccurrences(of: ",", with: ".")
         } else if commas > 1 || dots > 1 {
             s = s.filter(\.isNumber)
-        } else if commas == 1 {
-            let after = s.split(separator: ",", omittingEmptySubsequences: false).last?.count ?? 0
-            s = after == 3 ? s.replacingOccurrences(of: ",", with: "") : s.replacingOccurrences(of: ",", with: ".")
+        } else if commas == 1 || dots == 1 {
+            let sep: Character = commas == 1 ? "," : "."
+            let after = s.split(separator: sep, omittingEmptySubsequences: false).last?.count ?? 0
+            let grouping = locale.groupingSeparator ?? ","
+            let thousands = after == 3 && grouping == String(sep) && s.first != sep
+            s = thousands ? s.filter(\.isNumber) : s.replacingOccurrences(of: ",", with: ".")
         }
-        guard s.contains(where: \.isNumber), let d = Decimal(string: s, locale: Locale(identifier: "en_US_POSIX")) else { return nil }
+        guard s.contains(where: \.isNumber), let d = Decimal(string: s, locale: Locale(identifier: "en_US_POSIX")),
+              d <= maxAmount else { return nil }
         return d
     }
 
@@ -347,6 +371,12 @@ enum Export {
             ? "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\"" : s
     }
 
+    /// A group name made safe for a file name: no slashes or colons, never empty.
+    static func fileName(_ name: String) -> String {
+        let s = String(name.map { "/:\\".contains($0) ? "-" : $0 }).trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.isEmpty ? "Split" : s
+    }
+
     static func day(_ d: Date) -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
@@ -357,13 +387,13 @@ enum Export {
     /// One row per expense and payment, with a column per member holding their share (payments: + sent, - received).
     static func csv(_ g: SplitGroup) -> String {
         let digits = g.digits
-        func plain(_ m: Int) -> String { "\(Ledger.major(m, digits: digits))" }
+        func plain(_ m: Int) -> String { Ledger.plain(Ledger.major(m, digits: digits), digits: digits) }
         var rows = [(["Date", "Type", "Description", "Paid by", "Amount", "Currency", "Split"] + g.members.map(\.name))
             .map(csvField).joined(separator: ",")]
         var items: [(Date, [String])] = []
         for e in g.expenses {
             let shares = Ledger.shares(of: e, digits: digits)
-            items.append((e.date, [day(e.date), "Expense", e.title, g.name(e.payer), plain(Ledger.minor(e.amount, digits: digits)),
+            items.append((e.date, [day(e.date), "Expense", e.title.isEmpty ? "Expense" : e.title, g.name(e.payer), plain(Ledger.minor(e.amount, digits: digits)),
                                    g.currency, e.mode.label] + g.members.map { shares[$0.id].map(plain) ?? "" }))
         }
         for p in g.payments {
@@ -394,7 +424,7 @@ enum Export {
         if !g.expenses.isEmpty {
             out += "\nExpenses\n"
             for e in g.expenses.sorted(by: { $0.date < $1.date }) {
-                out += "  \(day(e.date))  \(e.title), \(Ledger.format(e.amount, g.currency)), paid by \(g.name(e.payer))\n"
+                out += "  \(day(e.date))  \(e.title.isEmpty ? "Expense" : e.title), \(Ledger.format(e.amount, g.currency)), paid by \(g.name(e.payer))\n"
             }
         }
         if !g.payments.isEmpty {
@@ -430,8 +460,19 @@ final class SplitModel: ObservableObject {
 
     init(groups: [SplitGroup]? = nil) {
         persists = groups == nil && !Desktop.isSnapshot
-        self.groups = groups ?? (Desktop.isSnapshot ? [] : Storage.load([SplitGroup].self, app: "Split", file: "groups.json") ?? [])
+        self.groups = groups ?? (Desktop.isSnapshot ? [] : Self.loadSaved())
         selection = self.groups.first?.id
+    }
+
+    /// Reads the saved books. A file that exists but cannot be read is moved aside first, so the next save
+    /// never overwrites the only copy of someone's expenses.
+    nonisolated static func loadSaved(at url: URL = Storage.url(app: "Split", file: "groups.json")) -> [SplitGroup] {
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return [] }
+        if let groups = try? JSONDecoder().decode([SplitGroup].self, from: data) { return groups }
+        let aside = url.deletingPathExtension()
+            .appendingPathExtension("unreadable-\(Int(Date.now.timeIntervalSince1970)).json")
+        try? FileManager.default.moveItem(at: url, to: aside)
+        return []
     }
 
     private func save() {
@@ -526,7 +567,7 @@ final class SplitModel: ObservableObject {
         guard let g = current else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [csv ? .commaSeparatedText : .plainText]
-        panel.nameFieldStringValue = g.name + (csv ? ".csv" : ".txt")
+        panel.nameFieldStringValue = Export.fileName(g.name) + (csv ? ".csv" : ".txt")
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
