@@ -300,10 +300,9 @@ struct DataGrid: View {
                     if c > 0 {
                         Circle().fill(colors[(c - 1) % colors.count]).frame(width: 8, height: 8)
                     }
-                    TextField(c == 0 ? "Labels" : "Series", text: cellBinding(header: c))
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 12, weight: .semibold))
-                        .multilineTextAlignment(c == 0 ? .leading : .trailing)
+                    HeaderField(placeholder: c == 0 ? "Labels" : "Series", text: cellBinding(header: c), isLabel: c == 0) { old, new in
+                        model.registerCellEdit(id, row: nil, column: c, from: old, to: new)
+                    }
                 }
                 .padding(.horizontal, 8)
                 .frame(width: width(c), height: Theme.rowHeight)
@@ -332,7 +331,9 @@ struct DataGrid: View {
                     .foregroundStyle(.tertiary)
                     .frame(width: Theme.gutter, height: Theme.rowHeight)
                 ForEach(0..<table.columnCount, id: \.self) { c in
-                    GridCell(text: cellBinding(row: r, column: c), isLabel: c == 0, width: width(c))
+                    GridCell(text: cellBinding(row: r, column: c), isLabel: c == 0, width: width(c)) { old, new in
+                        model.registerCellEdit(id, row: r, column: c, from: old, to: new)
+                    }
                 }
             }
             .background(r % 2 == 1 ? Color(nsColor: .alternatingContentBackgroundColors.last ?? .clear).opacity(0.6) : .clear)
@@ -360,11 +361,35 @@ struct DataGrid: View {
     }
 }
 
+/// A header cell: the series name, committed as one undo step when it loses focus.
+struct HeaderField: View {
+    let placeholder: String
+    @Binding var text: String
+    let isLabel: Bool
+    let commit: (String, String) -> Void
+    @FocusState private var focused: Bool
+    @State private var start = ""
+
+    var body: some View {
+        TextField(placeholder, text: $text)
+            .textFieldStyle(.plain)
+            .font(.system(size: 12, weight: .semibold))
+            .multilineTextAlignment(isLabel ? .leading : .trailing)
+            .focused($focused)
+            .onChange(of: focused) { _, now in
+                if now { start = text } else { commit(start, text) }
+            }
+    }
+}
+
 struct GridCell: View {
     @Binding var text: String
     let isLabel: Bool
     let width: CGFloat
+    /// Called with the text before and after, when the cell loses focus.
+    let commit: (String, String) -> Void
     @FocusState private var focused: Bool
+    @State private var start = ""
 
     var body: some View {
         let invalid = !isLabel && !text.trimmingCharacters(in: .whitespaces).isEmpty && Number.parse(text) == nil
@@ -374,6 +399,9 @@ struct GridCell: View {
             .foregroundStyle(invalid ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
             .multilineTextAlignment(isLabel ? .leading : .trailing)
             .focused($focused)
+            .onChange(of: focused) { _, now in
+                if now { start = text } else { commit(start, text) }
+            }
             .padding(.horizontal, 8)
             .frame(width: width, height: Theme.rowHeight)
             .background(focused ? Theme.bottom.opacity(0.08) : .clear)

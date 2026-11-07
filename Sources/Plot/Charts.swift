@@ -128,6 +128,21 @@ struct CategoryChart: View {
             }
         }
         .chartXScale(domain: chart.table.labels)
+        .chartXAxis {
+            let shown = chart.table.axisLabels()
+            if shown.count < chart.table.labels.count {
+                // Every nth label, at its natural width: a band this narrow would truncate it to nothing.
+                AxisMarks(values: shown) { value in
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel(collisionResolution: .greedy) {
+                        if let label = value.as(String.self) { Text(label).fixedSize() }
+                    }
+                }
+            } else {
+                AxisMarks()
+            }
+        }
         .chartYAxis { AxisMarks(position: .leading) }
         .chartXAxisLabel(chart.xLabel, alignment: .center)
         .chartYAxisLabel(chart.yLabel, position: .leading, alignment: .center)

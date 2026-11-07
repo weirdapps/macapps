@@ -92,7 +92,17 @@ struct DataTable: Codable, Hashable {
         normalize()
     }
 
+    /// Decoding goes through `init`, so a hand edited or damaged file with ragged rows is padded, never indexed past its end.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(headers: (try? c.decode([String].self, forKey: .headers)) ?? [],
+                  rows: (try? c.decode([[String]].self, forKey: .rows)) ?? [])
+    }
+
     static let blank = DataTable(headers: ["Label", "Series 1"], rows: [])
+
+    /// Pasted or imported tables keep this many rows; a chart of more is unreadable and slow to draw.
+    static let maxRows = 5000
 
     var columnCount: Int { headers.count }
 
@@ -136,27 +146,44 @@ struct DataTable: Codable, Hashable {
 
     /// Row labels from the first column: blanks get their row number, duplicates a suffix, so each one is unique.
     var labels: [String] {
-        var seen: [String: Int] = [:]
-        return filledRows.enumerated().map { i, row in
-            var label = row[0].trimmingCharacters(in: .whitespaces)
-            if label.isEmpty { label = "\(i + 1)" }
-            let n = (seen[label] ?? 0) + 1
-            seen[label] = n
-            return n == 1 ? label : "\(label) (\(n))"
+        DataTable.unique(filledRows.enumerated().map { i, row in
+            let label = row[0].trimmingCharacters(in: .whitespaces)
+            return label.isEmpty ? "\(i + 1)" : label
+        })
+    }
+
+    /// Makes names unique with a (2), (3) suffix, also when a suffixed name is itself already taken.
+    static func unique(_ names: [String]) -> [String] {
+        var used = Set<String>()
+        return names.map { name in
+            var candidate = name, n = 1
+            while used.contains(candidate) {
+                n += 1
+                candidate = "\(name) (\(n))"
+            }
+            used.insert(candidate)
+            return candidate
         }
+    }
+
+    /// The categories to label on the x axis: all of them up to `fit`, otherwise every nth, about `target` in all.
+    func axisLabels(fit: Int = 16, target: Int = 10) -> [String] {
+        let all = labels
+        guard all.count > fit else { return all }
+        let step = Int((Double(all.count) / Double(target)).rounded(.up))
+        return stride(from: 0, to: all.count, by: step).map { all[$0] }
     }
 
     /// One series per column after the first, named by its header (made unique).
     var series: [Series] {
         let filled = filledRows
-        var seen: [String: Int] = [:]
-        return (1..<max(columnCount, 1)).map { c in
-            var name = headers[c].trimmingCharacters(in: .whitespaces)
-            if name.isEmpty { name = "Series \(c)" }
-            let n = (seen[name] ?? 0) + 1
-            seen[name] = n
-            if n > 1 { name += " (\(n))" }
-            return Series(id: c, name: name, values: filled.map { Number.parse($0[c]) })
+        let columns = Array(1..<max(columnCount, 1))
+        let names = DataTable.unique(columns.map { c in
+            let name = headers[c].trimmingCharacters(in: .whitespaces)
+            return name.isEmpty ? "Series \(c)" : name
+        })
+        return zip(columns, names).map { c, name in
+            Series(id: c, name: name, values: filled.map { Number.parse($0[c]) })
         }
     }
 
@@ -187,7 +214,12 @@ struct DataTable: Codable, Hashable {
 
     /// Parses CSV, TSV or semicolon separated text, as copied from Numbers, Excel or a file.
     /// A first row whose series cells are not numbers is the header; a single column of numbers gets row labels.
-    static func parse(_ text: String) -> DataTable? {
+    static func parse(_ text: String) -> DataTable? { read(text)?.table }
+
+    /// Like `parse`, and also says how many rows past `maxRows` were left out.
+    static func read(_ text: String) -> (table: DataTable, dropped: Int)? {
+        var text = text
+        if text.unicodeScalars.first == "\u{FEFF}" { text = String(text.unicodeScalars.dropFirst()) }
         let normalized = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
         var grid = split(normalized, by: delimiter(for: normalized))
             .map { $0.map { $0.trimmingCharacters(in: .whitespaces) } }
@@ -202,17 +234,21 @@ struct DataTable: Codable, Hashable {
             var header = "Value"
             if Number.parse(grid[0][0]) == nil { header = grid.removeFirst()[0] }
             guard !grid.isEmpty, grid.contains(where: { Number.parse($0[0]) != nil }) else { return nil }
-            return DataTable(headers: ["Item", header], rows: grid.enumerated().map { ["\($0.offset + 1)", $0.element[0]] })
+            let dropped = max(grid.count - maxRows, 0)
+            let rows = grid.prefix(maxRows).enumerated().map { ["\($0.offset + 1)", $0.element[0]] }
+            return (DataTable(headers: ["Item", header], rows: rows), dropped)
         }
 
         let first = grid[0]
         // A header has text over the series, or nothing but years there (Quarter, 2024, 2025), or a blank corner cell.
         let seriesCells = first.dropFirst().filter { !$0.isEmpty }
         let isYear = { (s: String) in s.count == 4 && Int(s).map { (1800...2200).contains($0) } == true }
+        // Years over the series only make a header when the values below them are not years too.
+        let restAreYears = grid.dropFirst().allSatisfy { $0.dropFirst().allSatisfy { $0.isEmpty || isYear($0) } }
         let isHeader = grid.count > 1 && (seriesCells.isEmpty
             || seriesCells.contains { Number.parse($0) == nil }
             || first[0].isEmpty
-            || (Number.parse(first[0]) == nil && seriesCells.allSatisfy(isYear)))
+            || (Number.parse(first[0]) == nil && seriesCells.allSatisfy(isYear) && !restAreYears))
         var headers: [String]
         if isHeader {
             headers = grid.removeFirst()
@@ -221,7 +257,31 @@ struct DataTable: Codable, Hashable {
             headers = ["Label"] + (1..<width).map { "Series \($0)" }
         }
         guard grid.contains(where: { $0.dropFirst().contains { Number.parse($0) != nil } }) else { return nil }
-        return DataTable(headers: headers, rows: grid)
+        let dropped = max(grid.count - maxRows, 0)
+        return (DataTable(headers: headers, rows: Array(grid.prefix(maxRows))), dropped)
+    }
+
+    /// Text from a file: UTF-16 with a byte order mark (Excel's Unicode Text), UTF-8, or Windows Latin.
+    static func decode(_ data: Data) -> String? {
+        if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF]) { return String(data: data, encoding: .utf16) }
+        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .windowsCP1252)
+    }
+
+    /// Files larger than this are refused rather than read into a chart nobody could read.
+    static let maxFileBytes = 20_000_000
+
+    enum LoadResult: Sendable {
+        case table(DataTable, dropped: Int)
+        case tooLarge, unreadable
+    }
+
+    /// Reads and parses one file. Runs off the main thread.
+    static func load(_ url: URL) -> LoadResult {
+        let access = url.startAccessingSecurityScopedResource()
+        defer { if access { url.stopAccessingSecurityScopedResource() } }
+        if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > maxFileBytes { return .tooLarge }
+        guard let data = try? Data(contentsOf: url), let text = decode(data), let result = read(text) else { return .unreadable }
+        return .table(result.table, dropped: result.dropped)
     }
 
     /// Tab when the text has tabs, then semicolon or comma when it splits most lines into the same number of columns.
@@ -301,7 +361,9 @@ enum Number {
         } else if hasDot, s.range(of: #"^[-+]?\d{1,3}(\.\d{3}){2,}$"#, options: .regularExpression) != nil {
             s = s.replacingOccurrences(of: ".", with: "")
         }
-        guard s.first?.isLetter != true, let value = Double(s), value.isFinite else { return nil }
+        // Double() also reads hex (0x1F) and words (inf, nan); only plain decimals count as numbers here.
+        guard s.unicodeScalars.allSatisfy({ "0123456789+-.eE".unicodeScalars.contains($0) }),
+              let value = Double(s), value.isFinite else { return nil }
         return negative ? -value : value
     }
 
@@ -335,6 +397,23 @@ struct PlotChart: Codable, Identifiable, Hashable {
     }
 }
 
+extension PlotChart {
+    /// Missing or unknown fields fall back to defaults, so charts saved by another version still open.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(title: (try? c.decode(String.self, forKey: .title)) ?? "Untitled Chart",
+                  table: (try? c.decode(DataTable.self, forKey: .table)) ?? .blank)
+        id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        kind = (try? c.decode(ChartKind.self, forKey: .kind)) ?? .bar
+        palette = (try? c.decode(PaletteName.self, forKey: .palette)) ?? .plot
+        xLabel = (try? c.decode(String.self, forKey: .xLabel)) ?? ""
+        yLabel = (try? c.decode(String.self, forKey: .yLabel)) ?? ""
+        showLegend = (try? c.decode(Bool.self, forKey: .showLegend)) ?? true
+        showValues = (try? c.decode(Bool.self, forKey: .showValues)) ?? false
+        modified = (try? c.decode(Date.self, forKey: .modified)) ?? Date()
+    }
+}
+
 struct Toast: Equatable {
     var message: String
     var url: URL?
@@ -361,9 +440,18 @@ final class PlotModel: ObservableObject {
         } else if self.persisting, let saved = Storage.load([PlotChart].self, app: "Plot", file: "charts.json") {
             self.charts = saved
         } else {
+            if self.persisting { PlotModel.setAsideUnreadableStore() }
             self.charts = [Demo.revenue, Demo.visitors]
         }
         selection = self.charts.first?.id
+    }
+
+    /// A charts file that exists but cannot be read is renamed, not overwritten by the starter charts.
+    nonisolated static func setAsideUnreadableStore() {
+        let url = Storage.url(app: "Plot", file: "charts.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let stamp = Int(Date().timeIntervalSince1970)
+        try? FileManager.default.moveItem(at: url, to: url.deletingLastPathComponent().appendingPathComponent("charts-unreadable-\(stamp).json"))
     }
 
     static var demo: PlotModel {
@@ -455,7 +543,7 @@ final class PlotModel: ObservableObject {
     /// Replaces the selected chart's data with a table from text, or starts a new chart when none is selected.
     @discardableResult
     func paste(_ text: String?) -> Bool {
-        guard let text, let table = DataTable.parse(text) else {
+        guard let text, let (table, dropped) = DataTable.read(text) else {
             show(Toast(message: "The clipboard holds no numbers to plot."))
             return false
         }
@@ -464,26 +552,62 @@ final class PlotModel: ObservableObject {
         } else {
             newChart(table: table)
         }
+        if dropped > 0 { show(Toast(message: PlotModel.droppedMessage(dropped))) }
         return true
     }
 
     func pasteFromClipboard() { paste(NSPasteboard.general.string(forType: .string)) }
 
     /// New charts from CSV or TSV files, titled after the file.
+    /// Files are read and parsed off the main thread, so a large CSV never stalls the window.
     func importFiles(_ urls: [URL]) {
-        var failed: [String] = []
-        for url in urls {
-            let access = url.startAccessingSecurityScopedResource()
-            defer { if access { url.stopAccessingSecurityScopedResource() } }
-            guard let data = try? Data(contentsOf: url),
-                  let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1),
-                  let table = DataTable.parse(text) else {
-                failed.append(url.lastPathComponent)
-                continue
+        guard !urls.isEmpty else { return }
+        Task {
+            var failed: [String] = [], tooLarge: [String] = [], dropped = 0
+            for url in urls {
+                switch await Task.detached(priority: .userInitiated, operation: { DataTable.load(url) }).value {
+                case let .table(table, cut):
+                    dropped += cut
+                    newChart(table: table, title: url.deletingPathExtension().lastPathComponent)
+                case .tooLarge: tooLarge.append(url.lastPathComponent)
+                case .unreadable: failed.append(url.lastPathComponent)
+                }
             }
-            newChart(table: table, title: url.deletingPathExtension().lastPathComponent)
+            if !tooLarge.isEmpty {
+                show(Toast(message: "Too large to chart (20 MB at most): \(tooLarge.joined(separator: ", "))."))
+            } else if !failed.isEmpty {
+                show(Toast(message: "No numbers found in \(failed.joined(separator: ", "))."))
+            } else if dropped > 0 {
+                show(Toast(message: PlotModel.droppedMessage(dropped)))
+            }
         }
-        if !failed.isEmpty { show(Toast(message: "No numbers found in \(failed.joined(separator: ", ")).")) }
+    }
+
+    static func droppedMessage(_ dropped: Int) -> String {
+        "Charted the first \(DataTable.maxRows.formatted()) rows; \(dropped.formatted()) more were left out."
+    }
+
+    /// Records one finished cell edit as a single undo step (the field undoes its own keystrokes while it has focus).
+    /// `row` nil means the header cell.
+    func registerCellEdit(_ id: PlotChart.ID, row: Int?, column: Int, from old: String, to new: String) {
+        guard old != new, let undoManager else { return }
+        undoManager.registerUndo(withTarget: self) { model in
+            MainActor.assumeIsolated {
+                model.setCell(id, row: row, column: column, to: old)
+                model.registerCellEdit(id, row: row, column: column, from: new, to: old)
+            }
+        }
+        undoManager.setActionName("Typing")
+    }
+
+    func setCell(_ id: PlotChart.ID, row: Int?, column: Int, to value: String) {
+        update(id) { chart in
+            if let row {
+                chart.table.set(row: row, column: column, to: value)
+            } else if column < chart.table.headers.count {
+                chart.table.headers[column] = value
+            }
+        }
     }
 
     func show(_ toast: Toast) {

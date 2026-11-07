@@ -108,6 +108,55 @@ enum SelfTest {
         try? FileManager.default.removeItem(at: pdfURL)
         check(Exporter.fileName(PlotChart(title: "a/b: c", table: .blank)) == "a-b- c", "export file names are safe")
 
+        // Review fixes: odd input that used to slip through.
+        check(Number.parse("0x1F") == nil && Number.parse("-inf") == nil && Number.parse("1_000") == nil, "hex and words are not numbers")
+        let bom = DataTable.parse("\u{FEFF}1,2\n3,4")
+        check(bom?.labelsAreNumeric == true && bom?.xValues == [1, 3], "UTF-8 byte order mark is stripped")
+        let bomColumn = DataTable.parse("\u{FEFF}5\n8")
+        check(bomColumn?.series.first?.values == [5, 8], "byte order mark does not turn a number into a header")
+        var utf16 = Data([0xFF, 0xFE])
+        utf16.append("Item\tCount\r\nA\t3".data(using: .utf16LittleEndian)!)
+        check(DataTable.decode(utf16).flatMap(DataTable.parse)?.series.first?.values == [3], "UTF-16 text from Excel")
+        check(DataTable.decode(Data([0x80, 0x2C, 0x35]))?.hasPrefix("\u{20AC}") == true, "Windows Latin fallback keeps the euro sign")
+        check(DataTable.unique(["Jan", "Jan", "Jan (2)"]).count == Set(DataTable.unique(["Jan", "Jan", "Jan (2)"])).count, "suffixed names stay unique")
+        let clash = DataTable(headers: ["L", "A", "A", "A (2)"], rows: [["x", "1", "2", "3"]])
+        check(Set(clash.series.map(\.name)).count == 3, "series names never collide")
+        check(DataTable.parse("Jan,2024,2025\nFeb,2031,2040")?.rows.count == 2, "a first row of years is data when the rest are years too")
+        let raggedJSON = Data(#"{"headers":["L","S"],"rows":[["a"],["b","2","9"],[]]}"#.utf8)
+        let decodedTable = try? JSONDecoder().decode(DataTable.self, from: raggedJSON)
+        check(decodedTable?.rows.allSatisfy { $0.count == decodedTable?.columnCount } == true && decodedTable?.series.count == 2, "damaged saved tables are padded on load")
+        let old = Data(#"[{"title":"Old","table":{"headers":["L","S"],"rows":[["a","1"]]},"kind":"donut"}]"#.utf8)
+        let oldCharts = try? JSONDecoder().decode([PlotChart].self, from: old)
+        check(oldCharts?.first?.title == "Old" && oldCharts?.first?.kind == .bar && oldCharts?.first?.showLegend == true, "charts with missing or unknown fields still load")
+        let big = (0..<(DataTable.maxRows + 250)).map { "r\($0),\($0)" }.joined(separator: "\n")
+        let bigRead = DataTable.read("Row,Value\n" + big)
+        check(bigRead?.table.rows.count == DataTable.maxRows && bigRead?.dropped == 250, "huge pastes are capped and the cut is reported")
+        let started = Date()
+        let bigChart = PlotChart(title: "Big", table: bigRead!.table)
+        check(bigChart.points.count == DataTable.maxRows && bigChart.table.axisLabels().count <= 10 && Date().timeIntervalSince(started) < 2, "a capped table plots quickly with a thinned axis")
+        check(Demo.visitors.table.axisLabels() == Demo.visitors.table.labels, "short tables label every category")
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("plot-selftest-\(UUID().uuidString).csv")
+        try? Data("\u{FEFF}Month,Sales\nJan,5\nFeb,7".utf8).write(to: tmp)
+        if case let .table(table, dropped) = DataTable.load(tmp) {
+            check(table.headers == ["Month", "Sales"] && dropped == 0, "CSV file loads")
+        } else {
+            check(false, "CSV file loads")
+        }
+        try? FileManager.default.removeItem(at: tmp)
+        let model = PlotModel(persisting: false, charts: [Demo.revenue])
+        let undo = UndoManager()
+        undo.groupsByEvent = false
+        model.undoManager = undo
+        undo.beginUndoGrouping()
+        model.setCell(Demo.revenue.id, row: 0, column: 1, to: "999")
+        model.registerCellEdit(Demo.revenue.id, row: 0, column: 1, from: "182", to: "999")
+        undo.endUndoGrouping()
+        check(model.charts[0].table.rows[0][1] == "999" && undo.undoActionName == "Typing", "cell edits are one undo step")
+        undo.undo()
+        check(model.charts[0].table.rows[0][1] == "182", "undo restores the cell")
+        undo.redo()
+        check(model.charts[0].table.rows[0][1] == "999", "redo puts the edit back")
+
         print(failures == 0 ? "All \(checks) checks passed" : "\(failures) of \(checks) checks failed")
         return failures == 0 ? 0 : 1
     }
