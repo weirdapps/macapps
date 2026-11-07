@@ -112,6 +112,56 @@ enum SelfTest {
               (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode(Ledger.self, from: $0) } == ledger)
         try? FileManager.default.removeItem(at: file)
 
+        // Loading: a file that cannot be read is kept aside, never overwritten by the next save.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("hours-selftest-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let saved = dir.appendingPathComponent("ledger.json")
+        check("missing ledger loads empty", Ledger.load(from: saved) == Ledger())
+        try? data?.write(to: saved)
+        check("saved ledger loads", Ledger.load(from: saved) == ledger)
+        try? Data("{\"projects\": [ broken".utf8).write(to: saved)
+        let fromBroken = Ledger.load(from: saved)
+        let kept = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        check("unreadable ledger loads empty", fromBroken == Ledger())
+        check("unreadable ledger is moved aside, not lost",
+              !FileManager.default.fileExists(atPath: saved.path) && kept.contains { $0.hasPrefix("ledger.unreadable-") })
+        try? Data().write(to: saved)
+        check("empty ledger file loads empty", Ledger.load(from: saved) == Ledger())
+        try? FileManager.default.removeItem(at: dir)
+
+        // A stale editor on a running timer must not restart it or leave two running.
+        let editing = HoursModel(ledger: Ledger(projects: [a, b]), persists: false, currency: "EUR")
+        editing.start(a.id)
+        var stale = editing.running!
+        editing.stop()
+        stale.note = "Edited later"
+        editing.saveEntry(stale)
+        check("saving a stale running entry keeps it stopped", editing.running == nil && editing.entries.first?.note == "Edited later")
+        editing.start(a.id)
+        let first = editing.running!
+        editing.start(b.id)
+        editing.saveEntry(first)
+        check("saving never leaves two timers running", editing.entries.filter(\.isRunning).count <= 1)
+        editing.saveEntry(Entry(projectID: a.id, start: date(3, 9), end: nil))
+        check("a new entry without an end is not a second timer", editing.entries.filter(\.isRunning).count <= 1)
+
+        // Hourly rates typed by hand.
+        check("rate 85", Timesheet.parseRate("85") == 85)
+        check("rate with a decimal point", Timesheet.parseRate(" 72.50 ") == 72.5)
+        check("rate with a decimal comma", Timesheet.parseRate("85,5") == 85.5)
+        check("rate with grouping", Timesheet.parseRate("1,250.00") == 1250 && Timesheet.parseRate("1.250,00") == 1250
+              && Timesheet.parseRate("1.250") == 1250)
+        check("rate rejects text and negatives", Timesheet.parseRate("abc") == nil && Timesheet.parseRate("-5") == nil
+              && Timesheet.parseRate("") == nil && Timesheet.parseRate(",") == nil)
+
+        // Day buckets used by the charts agree with summing each day.
+        let byDay = Timesheet.secondsByDay([day, other, late, running], in: week, now: date(6, 0, 30), calendar: cal)
+        let agree = Timesheet.days(in: week, calendar: cal).allSatisfy { d in
+            let direct = Timesheet.secondsByProject([day, other, late, running], in: Timesheet.day(d, calendar: cal), now: date(6, 0, 30))
+            return (byDay[d] ?? [:]).filter { $0.value > 0 } == direct
+        }
+        check("day buckets match per day totals", agree && byDay[date(4, 0)]?[a.id] == 5400 && byDay[date(6, 0)]?[b.id] == 1800)
+
         let demo = HoursModel.demo
         check("demo has a running timer", demo.running != nil)
         check("demo week has time on five days",

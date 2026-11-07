@@ -27,6 +27,17 @@ struct Entry: Identifiable, Codable, Hashable {
 struct Ledger: Codable, Equatable {
     var projects: [Project] = []
     var entries: [Entry] = []
+
+    /// Reads the saved ledger. A file that exists but cannot be read is moved aside first, so the next save
+    /// never overwrites the only copy of someone's hours.
+    static func load(from url: URL) -> Ledger {
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return Ledger() }
+        if let ledger = try? JSONDecoder().decode(Ledger.self, from: data) { return ledger }
+        let stamp = Int(Date().timeIntervalSince1970)
+        let backup = url.deletingPathExtension().appendingPathExtension("unreadable-\(stamp).json")
+        try? FileManager.default.moveItem(at: url, to: backup)
+        return Ledger()
+    }
 }
 
 enum Period: String, CaseIterable, Identifiable {
@@ -92,6 +103,43 @@ enum Timesheet {
             if s > 0 { out[e.projectID, default: 0] += s }
         }
         return out
+    }
+
+    /// Seconds per day start and project inside `interval`, in one pass over the entries' midnight pieces.
+    /// Charts use this instead of summing every entry for every day, which crawls on a long custom range.
+    static func secondsByDay(_ entries: [Entry], in interval: DateInterval, now: Date, calendar: Calendar) -> [Date: [UUID: TimeInterval]] {
+        var out: [Date: [UUID: TimeInterval]] = [:]
+        for e in entries where e.start < interval.end && (e.end ?? now) > interval.start {
+            for piece in pieces(of: e, now: now, calendar: calendar) {
+                guard let clipped = piece.intersection(with: interval), clipped.duration > 0 else { continue }
+                out[calendar.startOfDay(for: clipped.start), default: [:]][e.projectID, default: 0] += clipped.duration
+            }
+        }
+        return out
+    }
+
+    /// An hourly rate typed by hand: "85", "85.5", "85,50" or "1,250.00". Nil for anything that is not a number of zero or more.
+    static func parseRate(_ text: String) -> Double? {
+        let t = text.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return nil }
+        // With both separators the last one is the decimal point; a lone separator followed by one or
+        // two digits is one too ("85,5"); anything else is grouping ("1.250").
+        let separators = t.filter { $0 == "," || $0 == "." }
+        var decimal: String.Index?
+        if let last = t.lastIndex(where: { $0 == "," || $0 == "." }) {
+            let tail = t.distance(from: last, to: t.endIndex) - 1
+            if Set(separators).count == 2 || (separators.count == 1 && tail <= 2) { decimal = last }
+        }
+        var digits = ""
+        for i in t.indices {
+            let ch = t[i]
+            if ch.isASCII && ch.isNumber { digits.append(ch) }
+            else if i == decimal { digits.append(".") }
+            else if ch == "," || ch == "." || ch == " " { continue }
+            else { return nil }
+        }
+        guard let n = Double(digits), n.isFinite, n >= 0 else { return nil }
+        return n
     }
 
     static func earnings(_ byProject: [UUID: TimeInterval], projects: [Project]) -> Double {
@@ -193,7 +241,7 @@ enum Theme {
 
 @MainActor
 final class HoursModel: ObservableObject {
-    static let shared = HoursModel(ledger: Storage.load(Ledger.self, app: "Hours", file: "ledger.json") ?? Ledger(), persists: true)
+    static let shared = HoursModel(ledger: Ledger.load(from: Storage.url(app: "Hours", file: "ledger.json")), persists: true)
 
     @Published private(set) var ledger: Ledger
     @Published var filter: SidebarItem? = .all
@@ -323,9 +371,24 @@ final class HoursModel: ObservableObject {
         save()
     }
 
+    /// Saves an edited or new entry. An editor opened on a running timer may be stale (the Dock menu can stop it
+    /// meanwhile): a stopped timer stays stopped, and saving never leaves two timers running.
     func saveEntry(_ entry: Entry) {
         change("Edit Entry") { l in
-            if let i = l.entries.firstIndex(where: { $0.id == entry.id }) { l.entries[i] = entry } else { l.entries.append(entry) }
+            var entry = entry
+            if let i = l.entries.firstIndex(where: { $0.id == entry.id }) {
+                let stored = l.entries[i]
+                if entry.end == nil, let end = stored.end { entry.end = max(end, entry.start) }
+                l.entries[i] = entry
+            } else {
+                if entry.end == nil { entry.end = max(now(), entry.start) }
+                l.entries.append(entry)
+            }
+            if entry.end == nil {
+                for j in l.entries.indices where l.entries[j].end == nil && l.entries[j].id != entry.id {
+                    l.entries[j].end = max(now(), l.entries[j].start)
+                }
+            }
         }
     }
 

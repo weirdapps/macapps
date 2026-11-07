@@ -426,11 +426,11 @@ struct WeekChart: View {
         let days = Timesheet.days(in: model.week, calendar: cal)
         let keys = days.map { $0.formatted(.dateTime.weekday(.abbreviated)) + " " + $0.formatted(.dateTime.day()) }
         let projects = model.projects.filter { p in entries.contains { $0.projectID == p.id } }
+        let byDay = Timesheet.secondsByDay(entries, in: model.week, now: now, calendar: cal)
         var bars: [Bar] = []
         var totals: [TimeInterval] = []
         for (i, day) in days.enumerated() {
-            let dayEntries = entries
-            let byProject = Timesheet.secondsByProject(dayEntries, in: Timesheet.day(day, calendar: cal), now: now)
+            let byProject = byDay[day] ?? [:]
             totals.append(byProject.values.reduce(0, +))
             for p in projects where (byProject[p.id] ?? 0) > 0 {
                 bars.append(Bar(id: "\(i)-\(p.id)", day: keys[i], project: p.name, color: Theme.color(p.color), hours: byProject[p.id]! / 3600))
@@ -461,6 +461,7 @@ struct WeekChart: View {
                 .chartYScale(domain: 0...(maxHours.rounded(.up)))
                 .chartXAxis(.hidden)
                 .chartYAxis {
+                    // No labels: they would shift the bars off the day columns below, which carry the totals.
                     AxisMarks(position: .leading, values: .stride(by: maxHours > 12 ? 4 : 2)) { _ in
                         AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
                     }
@@ -845,14 +846,19 @@ struct ProjectEditor: View {
     @State var project: Project
     let isNew: Bool
     @State private var billed = false
-    @State private var rate: Double = 0
+    @State private var rateText = ""
     @Environment(\.dismiss) private var dismiss
+
+    /// An empty rate means zero; anything else must read as a number.
+    private var rateIsValid: Bool {
+        !billed || rateText.trimmingCharacters(in: .whitespaces).isEmpty || Timesheet.parseRate(rateText) != nil
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             Form {
                 TextField("Name", text: $project.name, prompt: Text("Client or project"))
-                LabeledContent("Colour") {
+                LabeledContent("Color") {
                     HStack(spacing: 7) {
                         ForEach(Theme.palette.indices, id: \.self) { i in
                             Button { project.color = i } label: {
@@ -868,12 +874,15 @@ struct ProjectEditor: View {
                 if billed {
                     LabeledContent("Hourly rate") {
                         HStack(spacing: 6) {
-                            TextField("Rate", value: $rate, format: .number.precision(.fractionLength(0...2)))
+                            TextField("Rate", text: $rateText, prompt: Text("0"))
                                 .labelsHidden()
                                 .multilineTextAlignment(.trailing)
                                 .frame(width: 90)
                             Text(model.currency).foregroundStyle(.secondary)
                         }
+                    }
+                    if !rateIsValid {
+                        Text("Type the rate as a number, like 85 or 72.50.").font(.caption).foregroundStyle(.red)
                     }
                 }
             }
@@ -883,12 +892,12 @@ struct ProjectEditor: View {
                 Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
                 Button(isNew ? "Add Project" : "Save") {
                     project.name = project.name.trimmingCharacters(in: .whitespacesAndNewlines)
-                    project.rate = billed ? max(0, rate) : nil
+                    project.rate = billed ? Timesheet.parseRate(rateText) ?? 0 : nil
                     model.saveProject(project)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(project.name.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(project.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !rateIsValid)
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 16)
@@ -896,7 +905,7 @@ struct ProjectEditor: View {
         .frame(width: 420)
         .onAppear {
             billed = project.rate != nil
-            rate = project.rate ?? 0
+            rateText = project.rate.map { $0.formatted(.number.precision(.fractionLength(0...2)).grouping(.never)) } ?? ""
         }
     }
 }
@@ -953,25 +962,42 @@ struct PeriodChart: View {
 
     var body: some View {
         let cal = model.calendar
+        let dayCount = Timesheet.days(in: interval, calendar: cal).count
+        // Past three months one bar per day gets too thin to read, so long custom ranges show months.
+        let byMonth = dayCount > 92
+        var sums: [Date: [UUID: TimeInterval]] = [:]
+        for (day, byProject) in Timesheet.secondsByDay(entries, in: interval, now: now, calendar: cal) {
+            let key = byMonth ? cal.dateInterval(of: .month, for: day)?.start ?? day : day
+            for (id, s) in byProject { sums[key, default: [:]][id, default: 0] += s }
+        }
+        // Whole months on the axis, so the first and last month bars sit inside the plot.
+        let domain = byMonth
+            ? (cal.dateInterval(of: .month, for: interval.start)?.start ?? interval.start)...(cal.dateInterval(of: .month, for: interval.end.addingTimeInterval(-1))?.end ?? interval.end)
+            : interval.start...interval.end
         var bars: [Bar] = []
-        for day in Timesheet.days(in: interval, calendar: cal) {
-            let byProject = Timesheet.secondsByProject(entries, in: Timesheet.day(day, calendar: cal), now: now)
+        for (key, byProject) in sums {
             for p in model.projects where (byProject[p.id] ?? 0) > 0 {
-                bars.append(Bar(id: "\(day.timeIntervalSince1970)-\(p.id)", day: day, color: Theme.color(p.color), hours: byProject[p.id]! / 3600))
+                bars.append(Bar(id: "\(key.timeIntervalSince1970)-\(p.id)", day: key, color: Theme.color(p.color), hours: byProject[p.id]! / 3600))
             }
         }
-        let dayCount = Timesheet.days(in: interval, calendar: cal).count
         return Card {
             VStack(alignment: .leading, spacing: 10) {
-                Text("By day").font(.headline)
+                Text(byMonth ? "By month" : "By day").font(.headline)
                 Chart(bars) { bar in
-                    BarMark(x: .value("Day", bar.day, unit: .day), y: .value("Hours", bar.hours), width: .ratio(dayCount > 14 ? 0.7 : 0.5))
+                    BarMark(x: .value("Day", bar.day, unit: byMonth ? .month : .day), y: .value("Hours", bar.hours),
+                            width: .ratio(dayCount > 14 ? 0.7 : 0.5))
                         .foregroundStyle(bar.color.gradient)
                 }
-                .chartXScale(domain: interval.start...interval.end)
+                .chartXScale(domain: domain)
                 .chartXAxis {
-                    AxisMarks(values: .stride(by: .day, count: dayCount > 14 ? 7 : 1)) { _ in
-                        AxisValueLabel(format: dayCount > 14 ? .dateTime.month(.abbreviated).day() : .dateTime.weekday(.abbreviated), centered: true)
+                    if byMonth {
+                        AxisMarks(values: .automatic(desiredCount: 8)) { _ in
+                            AxisValueLabel(format: .dateTime.month(.abbreviated).year(.twoDigits))
+                        }
+                    } else {
+                        AxisMarks(values: .stride(by: .day, count: dayCount > 14 ? 7 : 1)) { _ in
+                            AxisValueLabel(format: dayCount > 14 ? .dateTime.month(.abbreviated).day() : .dateTime.weekday(.abbreviated), centered: true)
+                        }
                     }
                 }
                 .chartYAxis {
