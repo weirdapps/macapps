@@ -31,6 +31,16 @@ struct ContentView: View {
                 }
             }
         }
+        .overlay(alignment: .bottom) {
+            if model.photos.isEmpty, let notice = model.notice {
+                NoticeLine(notice: notice)
+                    .fixedSize()
+                    .background(Capsule().fill(.regularMaterial))
+                    .padding(.bottom, 24)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy, value: model.notice)
         .toolbar { toolbar }
         .navigationTitle("Scrub")
         .navigationSubtitle(subtitle)
@@ -55,7 +65,7 @@ struct ContentView: View {
         ToolbarItemGroup(placement: .primaryAction) {
             Button { model.showImporter = true } label: { Label("Add Photos", systemImage: "plus") }
                 .help("Add photos or a folder of photos")
-            Button { model.clean(.location) } label: { Label("Remove Location", systemImage: "location.slash") }
+            Button { model.clean(.location) } label: { Label("Remove Location", systemImage: "mappin.slash") }
                 .help("Save copies of the selected photos without their location")
                 .disabled(!model.canClean(.location, all: false))
             Button { model.clean(.all) } label: { Label("Remove All Metadata", systemImage: "eraser") }
@@ -88,16 +98,26 @@ struct Sidebar: View {
         .onDeleteCommand { model.remove(model.selection) }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if let notice = model.notice {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                    Text(notice).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                NoticeLine(notice: notice)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+    }
+}
+
+struct NoticeLine: View {
+    let notice: ScrubModel.Notice
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: notice.isProblem ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                .foregroundStyle(notice.isProblem ? .orange : .green)
+            Text(notice.text).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -232,13 +252,13 @@ struct PhotoDetail: View {
                 }
                 Spacer(minLength: 0)
                 HStack(spacing: 10) {
-                    Button { model.clean(.location) } label: { Label("Remove Location", systemImage: "location.slash.fill") }
+                    Button { model.clean(.location) } label: { Label("Remove Location", systemImage: "mappin.slash") }
                         .buttonStyle(.bordered)
-                        .disabled(model.isBusy || !photo.flags.contains(.location))
+                        .disabled(model.isBusy || !photo.canClean(.location))
                     Button { model.clean(.all) } label: { Label("Remove All Metadata", systemImage: "eraser.fill") }
                         .buttonStyle(.borderedProminent)
                         .tint(Theme.top)
-                        .disabled(model.isBusy || photo.flags.isEmpty)
+                        .disabled(model.isBusy || !photo.canClean(.all))
                 }
                 .controlSize(.large)
             }
@@ -522,7 +542,7 @@ struct MultiDetail: View {
             }
             .frame(width: 280)
             HStack(spacing: 10) {
-                Button { model.clean(.location) } label: { Label("Remove Location", systemImage: "location.slash.fill") }
+                Button { model.clean(.location) } label: { Label("Remove Location", systemImage: "mappin.slash") }
                     .buttonStyle(.bordered)
                     .disabled(!model.canClean(.location, all: false))
                 Button { model.clean(.all) } label: { Label("Remove All Metadata", systemImage: "eraser.fill") }
@@ -562,7 +582,7 @@ struct SettingsView: View {
                 }
                 TextField("Name suffix", text: $suffix)
             } footer: {
-                Text("Example: IMG_4021\(suffix.trimmingCharacters(in: .whitespaces).isEmpty ? Prefs.defaultSuffix : suffix).HEIC. Originals are never changed.")
+                Text("Example: IMG_4021\(Scrubber.safeSuffix(suffix).isEmpty ? Prefs.defaultSuffix : Scrubber.safeSuffix(suffix)).HEIC. Originals are never changed.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }

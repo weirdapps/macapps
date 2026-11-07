@@ -86,6 +86,17 @@ struct PhotoReport: Sendable {
     var hasMakerNotes = false
 
     var sortedFlags: [PrivacyFlag] { flags.sorted() }
+
+    /// Labels in the Other card that describe the pixels rather than the photographer; a clean copy keeps them.
+    static let technicalLabels: Set<String> = ["Colour profile", "Resolution", "Orientation"]
+
+    /// Rows that Remove All Metadata takes away: everything shown except the technical ones.
+    var removableRows: Int {
+        groups.reduce(0) { n, g in n + g.rows.filter { !(g.title == "Other" && Self.technicalLabels.contains($0.label)) }.count }
+    }
+
+    /// True when Remove All Metadata has something to remove, a copyright or keywords alone included.
+    var hasRemovableMetadata: Bool { !flags.isEmpty || removableRows > 0 }
 }
 
 enum Keys {
@@ -99,9 +110,11 @@ enum Keys {
 
 enum Format {
     static func exposure(_ t: Double) -> String {
-        if t <= 0 { return "Unknown" }
+        guard t.isFinite, t > 0 else { return "Unknown" }
         if t >= 1 { return number(t, digits: 1) + " s" }
-        return "1/\(Int((1 / t).rounded())) s"
+        let d = (1 / t).rounded()
+        guard d < 1e9 else { return "Unknown" }
+        return "1/\(Int(d)) s"
     }
 
     static func fNumber(_ f: Double) -> String { "\u{0192}/" + number(f, digits: 1) }
@@ -347,13 +360,17 @@ enum MetadataReader {
 
     static func double(_ v: Any?) -> Double? {
         switch v {
-        case let n as NSNumber: return n.doubleValue
-        case let s as String: return Double(s)
+        case let n as NSNumber: return n.doubleValue.isFinite ? n.doubleValue : nil
+        case let s as String: return Double(s).flatMap { $0.isFinite ? $0 : nil }
         default: return nil
         }
     }
 
-    static func int(_ v: Any?) -> Int? { double(v).map { Int($0) } }
+    /// Whole numbers from metadata, which can hold anything: NaN, infinity and absurd values give nil rather than a crash.
+    static func int(_ v: Any?) -> Int? {
+        guard let d = double(v), abs(d) < 1e15 else { return nil }
+        return Int(d)
+    }
 
     static func leafCount(_ d: [String: Any]) -> Int {
         d.values.reduce(0) { n, v in n + ((v as? [String: Any]).map(leafCount) ?? 1) }
@@ -361,6 +378,7 @@ enum MetadataReader {
 
     static func compass(_ degrees: Double) -> String {
         let names = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+        guard degrees.isFinite else { return "" }
         let i = Int(((degrees.truncatingRemainder(dividingBy: 360) + 360).truncatingRemainder(dividingBy: 360) + 22.5) / 45) % 8
         return names[i]
     }
@@ -401,22 +419,28 @@ struct CleanResult: Sendable {
 }
 
 enum ScrubError: LocalizedError {
-    case unreadable, unwritable(String), verifyFailed([String])
+    case unreadable, unwritable(String), folderNotWritable(String), verifyFailed([String])
 
     var errorDescription: String? {
         switch self {
         case .unreadable: "The photo could not be read."
         case .unwritable(let type): "Scrub cannot write \(type) files."
+        case .folderNotWritable(let name): "Scrub cannot save into \u{201C}\(name)\u{201D}. Choose another folder in Settings."
         case .verifyFailed(let problems): "The cleaned copy did not pass the check: " + problems.joined(separator: ", ") + "."
         }
     }
 }
 
 enum Scrubber {
+    /// The name suffix as typed, made safe for a file name: no folder separators, no surrounding spaces.
+    static func safeSuffix(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+    }
+
     /// `IMG_1-clean.jpg` next to the original or in `folder`, numbered if that name is taken.
     static func outputURL(for url: URL, suffix: String, folder: URL?, exists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) -> URL {
         let dir = folder ?? url.deletingLastPathComponent()
-        let base = url.deletingPathExtension().lastPathComponent + suffix
+        let base = url.deletingPathExtension().lastPathComponent + safeSuffix(suffix)
         let ext = url.pathExtension
         func make(_ name: String) -> URL { dir.appendingPathComponent(ext.isEmpty ? name : name + "." + ext) }
         var candidate = make(base)
@@ -434,6 +458,8 @@ enum Scrubber {
     static func clean(_ url: URL, mode: ScrubMode, to output: URL) throws -> CleanResult {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(src) > 0,
               let type = CGImageSourceGetType(src) else { throw ScrubError.unreadable }
+        let folder = output.deletingLastPathComponent()
+        guard FileManager.default.isWritableFile(atPath: folder.path) else { throw ScrubError.folderNotWritable(folder.lastPathComponent) }
         let before = MetadataReader.report(from: CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [String: Any] ?? [:], type: type as String)
 
         var lossless = false
@@ -498,6 +524,7 @@ enum Scrubber {
         if mode == .all {
             for flag in after.sortedFlags where flag != .location { problems.append("\(flag.title.lowercased()) still present") }
             if after.hasMakerNotes { problems.append("maker notes still present") }
+            else if after.removableRows > 0 { problems.append("\(after.removableRows) details still present") }
         }
         if after.pixelWidth != before.pixelWidth || after.pixelHeight != before.pixelHeight { problems.append("image size changed") }
         if after.orientation != before.orientation { problems.append("orientation changed") }

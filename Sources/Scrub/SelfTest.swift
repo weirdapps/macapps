@@ -43,6 +43,19 @@ enum SelfTest {
         let d = Format.exifDate("2026:08:14 19:42:07", offset: "+03:00")
         check(d?.timeIntervalSince1970 == 1_786_725_727, "EXIF date with offset")
         check(Format.timeZone("-05:30")?.secondsFromGMT() == -19800, "offset time zone")
+        // Odd values straight from a file: none may crash.
+        check(Format.exposure(.nan) == "Unknown" && Format.exposure(.infinity) == "Unknown" && Format.exposure(1e-300) == "Unknown",
+              "exposure survives NaN, infinity and absurdly short times")
+        check(MetadataReader.compass(.nan) == "" && MetadataReader.compass(-90) == "W", "compass survives NaN and negative angles")
+        check(MetadataReader.int(Double.nan as NSNumber) == nil && MetadataReader.int(1e300 as NSNumber) == nil
+              && MetadataReader.int("nan") == nil && MetadataReader.int("12") == 12, "integers from metadata never trap")
+        let odd = MetadataReader.report(from: [Keys.exif: [kCGImagePropertyExifExposureTime as String: Double.nan,
+                                                         kCGImagePropertyExifISOSpeedRatings as String: [Double.infinity],
+                                                         kCGImagePropertyExifFlash as String: 1e40],
+                                               Keys.gps: [kCGImagePropertyGPSLatitude as String: 10.0, kCGImagePropertyGPSLongitude as String: 20.0,
+                                                          kCGImagePropertyGPSImgDirection as String: Double.nan],
+                                               kCGImagePropertyPixelWidth as String: Double.infinity], type: "public.jpeg")
+        check(odd.pixelWidth == 0 && odd.coordinate != nil, "a report from broken numbers still builds")
     }
 
     private static func parsing() {
@@ -64,6 +77,14 @@ enum SelfTest {
               "exposure sentence")
         check(Exposure.sentence([]).hasPrefix("Nothing"), "exposure sentence when clean")
         check(Demo.model.photos[0].report?.hasMakerNotes == true, "maker notes detected")
+        let tagged = MetadataReader.report(from: [Keys.tiff: [kCGImagePropertyTIFFCopyright as String: "(c) Alex"],
+                                                  Keys.iptc: [kCGImagePropertyIPTCKeywords as String: ["home", "kids"]],
+                                                  kCGImagePropertyProfileName as String: "sRGB IEC61966-2.1"], type: "public.jpeg")
+        check(tagged.flags.isEmpty && tagged.hasRemovableMetadata && tagged.removableRows == 2,
+              "copyright and keywords alone can still be removed")
+        let plain = MetadataReader.report(from: [kCGImagePropertyProfileName as String: "sRGB IEC61966-2.1",
+                                                 kCGImagePropertyDPIWidth as String: 72], type: "public.png")
+        check(!plain.hasRemovableMetadata, "a colour profile and resolution alone leave nothing to remove")
     }
 
     private static func naming() {
@@ -76,6 +97,12 @@ enum SelfTest {
               "empty suffix never overwrites the original")
         check(Scrubber.outputURL(for: url, suffix: "-clean", folder: URL(fileURLWithPath: "/tmp/Out"), exists: { _ in false }).path
               == "/tmp/Out/IMG_1-clean.HEIC", "chosen folder")
+        check(Scrubber.outputURL(for: url, suffix: "/../../x", folder: nil, exists: { _ in false }).path == "/tmp/Pics/IMG_1-..-..-x.HEIC",
+              "a suffix cannot leave the folder")
+        check(Scrubber.outputURL(for: URL(fileURLWithPath: "/tmp/Pics/Ελλάδα 東京 🌅.jpg"), suffix: " -clean ", folder: nil, exists: { _ in false })
+              .lastPathComponent == "Ελλάδα 東京 🌅-clean.jpg", "unicode names and a padded suffix")
+        check(Scrubber.outputURL(for: URL(fileURLWithPath: "/tmp/Pics/noext"), suffix: "-clean", folder: nil, exists: { _ in false })
+              .lastPathComponent == "noext-clean", "a name without an extension")
     }
 
     // MARK: Round trips
@@ -174,6 +201,27 @@ enum SelfTest {
         try? Data("notes".utf8).write(to: sub.appendingPathComponent("notes.txt"))
         let found = Scrubber.imageFiles(in: [sub, sub.appendingPathComponent("b.jpg")])
         check(found.count == 1 && found.first?.lastPathComponent == "b.jpg", "folders searched, non images and duplicates skipped")
+
+        // Empty and garbage files with image names are read as nothing, not as a crash.
+        let empty = dir.appendingPathComponent("empty.jpg"), junk = dir.appendingPathComponent("junk.heic")
+        try? Data().write(to: empty)
+        try? Data((0..<4096).map { UInt8(truncatingIfNeeded: $0 &* 31) }).write(to: junk)
+        check(MetadataReader.read(empty) == nil && MetadataReader.thumbnail(empty) == nil, "an empty file is not a photo")
+        check(MetadataReader.read(junk) == nil, "a garbage file is not a photo")
+        check((try? Scrubber.clean(empty, mode: .all, to: dir.appendingPathComponent("empty-clean.jpg"))) == nil
+              && !FileManager.default.fileExists(atPath: dir.appendingPathComponent("empty-clean.jpg").path), "an empty file writes no copy")
+
+        // A folder Scrub may not write into gives a clear error and leaves nothing behind.
+        let locked = dir.appendingPathComponent("Locked", isDirectory: true)
+        try? FileManager.default.createDirectory(at: locked, withIntermediateDirectories: true)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: locked.path)
+        do {
+            _ = try Scrubber.clean(jpeg, mode: .all, to: locked.appendingPathComponent("photo-clean.jpg"))
+            check(false, "read only folder refused")
+        } catch ScrubError.folderNotWritable {
+            check(true, "read only folder refused")
+        } catch { check(false, "read only folder refused (\(error.localizedDescription))") }
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
 
         // A file that is not an image fails cleanly.
         do {

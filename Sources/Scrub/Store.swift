@@ -16,6 +16,12 @@ struct Photo: Identifiable {
     var name: String { url.lastPathComponent }
     var flags: Set<PrivacyFlag> { report?.flags ?? [] }
 
+    /// Whether `mode` has anything to take out of this photo.
+    func canClean(_ mode: ScrubMode) -> Bool {
+        guard let report else { return false }
+        return mode == .all ? report.hasRemovableMetadata : report.flags.contains(.location)
+    }
+
     var summary: String {
         guard let r = report else { return loading ? "Reading\u{2026}" : "Not a readable image" }
         return "\(r.pixelWidth) \u{00D7} \(r.pixelHeight), " + Format.bytes(fileSize)
@@ -35,7 +41,7 @@ enum Prefs {
     }
 
     static var nameSuffix: String {
-        let s = UserDefaults.standard.string(forKey: suffix)?.trimmingCharacters(in: .whitespaces) ?? ""
+        let s = Scrubber.safeSuffix(UserDefaults.standard.string(forKey: suffix) ?? "")
         return s.isEmpty ? defaultSuffix : s
     }
 }
@@ -43,6 +49,12 @@ enum Prefs {
 @MainActor
 final class ScrubModel: ObservableObject {
     static let shared = ScrubModel()
+
+    /// A one line message under the list: the outcome of a batch, or why nothing was added.
+    struct Notice: Equatable {
+        var text: String
+        var isProblem = false
+    }
 
     struct Job {
         var title: String
@@ -56,7 +68,7 @@ final class ScrubModel: ObservableObject {
     @Published var maps: [Photo.ID: NSImage] = [:]
     @Published var mapsUnavailable: Set<Photo.ID> = []
     @Published var showImporter = false
-    @Published var notice: String?
+    @Published var notice: Notice?
     private var work: Task<Void, Never>?
     private var mapRequests: Set<Photo.ID> = []
 
@@ -70,7 +82,7 @@ final class ScrubModel: ObservableObject {
     }
 
     func canClean(_ mode: ScrubMode, all: Bool) -> Bool {
-        !isBusy && targets(all: all).contains { mode == .all ? !$0.flags.isEmpty : $0.flags.contains(.location) }
+        !isBusy && targets(all: all).contains { $0.canClean(mode) }
     }
 
     // MARK: Adding
@@ -80,9 +92,17 @@ final class ScrubModel: ObservableObject {
         let known = Set(photos.map { $0.url.standardizedFileURL.path })
         let files = Scrubber.imageFiles(in: urls).filter { !known.contains($0.standardizedFileURL.path) }
         guard !files.isEmpty else {
-            if !urls.isEmpty, known.isEmpty || Scrubber.imageFiles(in: urls).isEmpty { notice = "No photos found there." }
+            if !urls.isEmpty, known.isEmpty || Scrubber.imageFiles(in: urls).isEmpty {
+                let n = Notice(text: "No photos found there. Scrub reads JPEG, HEIC, PNG, TIFF and other image files.", isProblem: true)
+                notice = n
+                Task {
+                    try? await Task.sleep(for: .seconds(6))
+                    if notice == n { notice = nil }
+                }
+            }
             return
         }
+        notice = nil
         let new = files.map { Photo(url: $0) }
         photos += new
         if selection.isEmpty, let first = new.first { selection = [first.id] }
@@ -121,7 +141,7 @@ final class ScrubModel: ObservableObject {
     // MARK: Cleaning
 
     func clean(_ mode: ScrubMode, all: Bool = false) {
-        let list = targets(all: all).filter { mode == .all ? !$0.flags.isEmpty : $0.flags.contains(.location) }
+        let list = targets(all: all).filter { $0.canClean(mode) }
         guard !list.isEmpty, !isBusy, !Desktop.isSnapshot else { return }
         let suffix = Prefs.nameSuffix, folder = Prefs.outputFolder
         job = Job(title: mode == .all ? "Removing metadata" : "Removing location", done: 0, total: list.count)
@@ -153,7 +173,7 @@ final class ScrubModel: ObservableObject {
                 var parts = ["\(cleaned) cleaned \(cleaned == 1 ? "copy" : "copies") saved and verified"]
                 if failed > 0 { parts.append("\(failed) failed") }
                 if stopped { parts.append("stopped early") }
-                if list.count > 1 || failed > 0 || stopped { notice = parts.joined(separator: ", ") + "." }
+                if list.count > 1 || failed > 0 || stopped { notice = Notice(text: parts.joined(separator: ", ") + ".", isProblem: failed > 0) }
             }
             work = nil
         }
