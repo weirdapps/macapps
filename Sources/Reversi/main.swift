@@ -32,7 +32,7 @@ struct ReversiApp: App {
             }
             CommandMenu("Game") {
                 ForEach(Array(Opponent.allCases.enumerated()), id: \.element) { i, o in
-                    Toggle(o == .human ? "Two Players" : "Play \(o.title)", isOn: Binding(
+                    Toggle(o.title, isOn: Binding(
                         get: { model.opponent == o }, set: { if $0 { model.opponent = o } }))
                         .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")))
                 }

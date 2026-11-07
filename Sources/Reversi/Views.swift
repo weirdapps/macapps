@@ -156,10 +156,19 @@ struct BoardView: View {
                                 if inside { hovered = sq } else if hovered == sq { hovered = nil }
                             }
                             .onTapGesture { model.tap(sq) }
+                            .accessibilityElement()
+                            .accessibilityLabel(accessibility(sq, disc: pos.disc(at: sq), hint: hints & (1 << UInt64(sq)) != 0))
+                            .accessibilityAddTraits(hints & (1 << UInt64(sq)) != 0 ? .isButton : [])
                     }
                 }
             }
         }
+    }
+
+    private func accessibility(_ sq: Int, disc: Disc?, hint: Bool) -> String {
+        let name = Position.name(of: sq)
+        if let disc { return "\(name), \(disc.name.lowercased())" }
+        return hint ? "\(name), legal move" : "\(name), empty"
     }
 
     /// Flips ripple outwards from the square just played.

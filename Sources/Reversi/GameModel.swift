@@ -7,7 +7,7 @@ enum Opponent: String, CaseIterable, Codable, Identifiable {
     var id: String { rawValue }
 
     var level: Level? { Level(rawValue: rawValue) }
-    var title: String { self == .human ? "Second Player" : "Computer, \(rawValue.capitalized)" }
+    var title: String { self == .human ? "Two Players" : "\(rawValue.capitalized) Computer" }
 }
 
 /// What is kept between launches: the game in progress and the table settings.
@@ -105,6 +105,12 @@ final class GameModel: ObservableObject {
         return winnerTitle(b > w ? .black : .white)
     }
 
+    /// The banner shown when `passer` has no legal move, worded for whoever is reading the board.
+    func passNotice(_ passer: Disc) -> String {
+        if opponent == .human { return "\(passer.name) has no move and passes" }
+        return isComputer(passer) ? "Computer has no move and passes. Your move again" : "You have no move, so you pass"
+    }
+
     private func winnerTitle(_ winner: Disc) -> String {
         if opponent == .human { return "\(winner.name) wins" }
         return isComputer(winner) ? "Computer wins" : "You win"
@@ -147,9 +153,15 @@ final class GameModel: ObservableObject {
 
     private func apply(_ square: Int) {
         let before = game.records.count
+        let mover = position.toMove
         guard game.play(square) else { return }
         flipOrigin = square
-        notice = game.records.count > before + 1 ? "\(position.toMove.opponent.name) has no move and passes" : nil
+        if game.records.count > before + 1 {
+            notice = passNotice(mover.opponent)
+        } else if !isComputer(mover) {
+            // Your pass notice stays up through the computer's extra move, until you play again.
+            notice = nil
+        }
         save()
         scheduleComputer()
     }

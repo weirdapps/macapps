@@ -195,6 +195,33 @@ enum SelfTest {
         model.undo()
         check(model.position == .start && !model.canUndo, "undo in two-player mode goes back to the start")
 
+        // A damaged save never crashes: out-of-range and illegal squares end the replay.
+        check(Game.replay([-1, 64, 999]).records.isEmpty, "a save with out-of-range squares restores an empty board")
+        check(Game.replay([sq("d3"), sq("a1"), sq("c5")]).squares == [sq("d3")], "replay stops at the first illegal square")
+        check((try? JSONDecoder().decode(SavedState.self, from: Data("{}".utf8))) == nil, "an empty save file is refused, not trusted")
+
+        // Pass banners speak to whoever is at the board.
+        check(model.passNotice(.white) == "White has no move and passes", "two-player pass banner names the colour")
+        let vs = GameModel(persists: false)
+        vs.opponent = .medium
+        vs.humanSide = .black
+        check(vs.passNotice(.black) == "You have no move, so you pass" && vs.passNotice(.white).hasPrefix("Computer has no move"),
+              "against the computer the pass banner says you or Computer")
+        check(Opponent.allCases.map(\.title) == ["Easy Computer", "Medium Computer", "Hard Computer", "Two Players"],
+              "opponent names read as menu items")
+
+        // Against the computer: your move hands over, undo cancels the pending reply.
+        vs.tap(sq("d3"))
+        check(vs.thinking && !vs.humanCanPlay && vs.status == "Computer is thinking", "after your move the computer thinks")
+        vs.tap(sq("c3"))
+        check(vs.game.squares == [sq("d3")], "taps are ignored while the computer thinks")
+        vs.undo()
+        check(vs.position == .start && !vs.thinking && vs.humanCanPlay, "undo cancels the computer's reply and gives you the move")
+        vs.humanSide = .white
+        check(vs.thinking && vs.hints == 0, "switching to White hands the opening move to the computer")
+        vs.opponent = .human
+        check(!vs.thinking && vs.humanCanPlay, "switching to two players stops the computer")
+
         print(failures == 0 ? "All \(checks) checks passed" : "\(failures) of \(checks) checks failed")
         return failures == 0 ? 0 : 1
     }
