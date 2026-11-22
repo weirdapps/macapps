@@ -410,9 +410,9 @@ struct PageDrop: DropDelegate {
         }
         let providers = info.itemProviders(for: [.fileURL])
         guard !providers.isEmpty else { model.endDrag(); return false }
+        let model = model
         let index = target.flatMap { t in model.pages.firstIndex { $0.id == t } }
         model.endDrag()
-        let model = model
         Task { @MainActor in
             let urls = await PageDrop.urls(from: providers)
             model.add(urls, at: index)
