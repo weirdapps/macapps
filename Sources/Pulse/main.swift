@@ -207,7 +207,14 @@ final class SystemMonitor: ObservableObject {
         memory = MemoryUsage(physical: 16 * gb, app: 7 * gb + gb / 2, wired: 2 * gb, compressed: gb / 2, cached: 4 * gb)
         pressure = .normal
         loads = [3.12, 2.84, 2.51]
-        cpuHistory = (0..<Self.capacity).map { i in 0.3 + 0.1 * sin(Double(i) / 4) + 0.05 * sin(Double(i) * 1.7) }
+        // Split into typed steps: one expression of mixed literals and two sin() calls is
+        // more than the macos-latest compiler will type-check in reasonable time.
+        cpuHistory = (0..<Self.capacity).map { i -> Double in
+            let x = Double(i)
+            let slow: Double = 0.1 * sin(x / 4)
+            let fast: Double = 0.05 * sin(x * 1.7)
+            return 0.3 + slow + fast
+        }
         memoryHistory = (0..<Self.capacity).map { i in 0.6 + 0.03 * sin(Double(i) / 9) }
     }
 

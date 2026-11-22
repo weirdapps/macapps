@@ -1,0 +1,33 @@
+name: CodeQL
+
+"on":
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch: {}
+
+jobs:
+  analyze:
+    # CodeQL analyses Swift only on macOS, and only what a build compiles.
+    runs-on: macos-latest
+    # A CodeQL-traced build of every app took ~46 min to reach 590 of 896 steps
+    # (2026-11-22), so a full build plus analysis does not fit in 60.
+    timeout-minutes: 150
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      # Keep init and analyze pinned to the SAME codeql-action version.
+      # A split fails the run with "Loaded a configuration file for version X,
+      # but running version Y".
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066  # v4.39.3
+        with:
+          languages: swift
+          build-mode: manual
+      # Package.swift discovers apps by folder; a cached manifest misses new ones.
+      - name: Build every app for CodeQL
+        run: swift build --manifest-cache none
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066  # v4.39.3
