@@ -170,6 +170,7 @@ final class ShrinkModel: ObservableObject {
         }
         let candidates = processable
         guard !candidates.isEmpty else { return }
+        let settings = settings
         // Plan every destination first, on one thread, so two images in a batch never claim the same name.
         // Every image in the list counts as an original, not only the ones in this batch.
         let entries = candidates.compactMap { item in
@@ -184,7 +185,6 @@ final class ShrinkModel: ObservableObject {
             jobs.append(Job(id: item.id, source: entry.source, destination: dest, type: entry.type))
             update(item.id) { $0.state = .queued }
         }
-        let settings = settings
         completed = 0
         batchTotal = jobs.count
         withAnimation(.snappy) { isRunning = true }
